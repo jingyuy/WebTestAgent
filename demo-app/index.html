@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acme Demo App</title>
+    <style>
+      :root { --bg:#0f1420; --card:#1a2132; --line:#2b3550; --fg:#e9eefb; --muted:#93a1bd; --accent:#4f8cff; --ok:#35c88a; --err:#ff5f57; }
+      * { box-sizing: border-box; }
+      body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif; }
+      .shell { max-width: 760px; margin: 0 auto; padding: 40px 20px; }
+      .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:24px; }
+      h1 { font-size:20px; margin:0 0 4px; }
+      h2 { font-size:15px; margin:0 0 14px; }
+      p.muted { color:var(--muted); margin:0 0 20px; }
+      label { display:block; font-size:12.5px; color:var(--muted); margin:14px 0 6px; }
+      input, select { width:100%; background:#0e1524; border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:9px 11px; font:inherit; }
+      input:focus, select:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+      button { font:inherit; background:var(--accent); border:1px solid var(--accent); color:#05132b; font-weight:650; border-radius:8px; padding:10px 16px; cursor:pointer; }
+      button.secondary { background:transparent; border-color:var(--line); color:var(--fg); font-weight:500; }
+      button:hover { filter:brightness(1.08); }
+      .actions { margin-top:18px; display:flex; gap:10px; align-items:center; }
+      .error { color:var(--err); font-size:13px; margin-top:12px; }
+      .success { color:var(--ok); font-size:13px; margin-top:12px; }
+      .hidden { display:none !important; }
+      nav { display:flex; gap:8px; align-items:center; margin-bottom:18px; }
+      nav .spacer { flex:1; }
+      nav button { padding:8px 12px; }
+      .badge { font-size:12px; color:var(--muted); }
+      ul#project-list { list-style:none; margin:16px 0 0; padding:0; }
+      ul#project-list li { display:flex; justify-content:space-between; padding:11px 12px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px; background:#141b2b; }
+      ul#project-list li .owner { color:var(--muted); font-size:12px; }
+      .checkbox { display:flex; align-items:center; gap:8px; margin-top:14px; color:var(--muted); font-size:13px; }
+      .checkbox input { width:auto; }
+      .field-row { display:flex; gap:10px; margin-top:16px; }
+      .field-row input { flex:1; }
+      code { background:#0e1524; padding:1px 5px; border-radius:4px; color:#b9cdf3; }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <!-- ------------------------------------------------------------------ -->
+      <!-- Login view                                                         -->
+      <!-- ------------------------------------------------------------------ -->
+      <section id="login-view" class="card">
+        <h1>Sign in to Acme</h1>
+        <p class="muted">Demo application used to exercise the test agent. Credentials: <code>test@example.com</code> / <code>password123</code></p>
+
+        <form id="login-form">
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" data-testid="email-input" placeholder="you@example.com" autocomplete="off" />
+
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" data-testid="password-input" placeholder="Your password" autocomplete="off" />
+
+          <div class="checkbox">
+            <input id="remember" type="checkbox" data-testid="remember-checkbox" />
+            <label for="remember" style="margin:0">Remember me</label>
+          </div>
+
+          <div class="actions">
+            <button type="submit" data-testid="login-button">Sign in</button>
+            <a href="#forgot" id="forgot" style="color:#8fb3ff; font-size:13px">Forgot password?</a>
+          </div>
+
+          <div id="login-error" class="error hidden" data-testid="login-error" role="alert"></div>
+        </form>
+      </section>
+
+      <!-- ------------------------------------------------------------------ -->
+      <!-- App view                                                           -->
+      <!-- ------------------------------------------------------------------ -->
+      <section id="app-view" class="hidden">
+        <nav>
+          <button class="secondary" id="nav-projects" data-testid="nav-projects">Projects</button>
+          <button class="secondary" id="nav-settings" data-testid="nav-settings">Settings</button>
+          <span class="spacer"></span>
+          <span class="badge" id="user-email" data-testid="current-user"></span>
+          <button class="secondary" id="logout" data-testid="logout-button">Log out</button>
+        </nav>
+
+        <div class="card" id="projects-panel">
+          <h1>Projects</h1>
+          <p class="muted">Create a project and it will appear in the list below.</p>
+
+          <div class="field-row">
+            <input id="project-name" data-testid="project-name-input" placeholder="New project name" />
+            <button id="add-project" data-testid="add-project-button">Add project</button>
+          </div>
+          <div id="project-error" class="error hidden" data-testid="project-error" role="alert"></div>
+          <div id="project-success" class="success hidden" data-testid="project-success"></div>
+
+          <ul id="project-list" data-testid="project-list"></ul>
+        </div>
+
+        <div class="card hidden" id="settings-panel">
+          <h1>Settings</h1>
+          <p class="muted">Change your notification preference and save.</p>
+
+          <label for="notification-frequency">Notification frequency</label>
+          <select id="notification-frequency" data-testid="notification-frequency">
+            <option value="never">Never</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+
+          <div class="actions">
+            <button id="save-settings" data-testid="save-settings-button">Save</button>
+          </div>
+          <div id="settings-success" class="success hidden" data-testid="settings-success" role="status"></div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const STORAGE_KEY = "acme-demo-state";
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const defaultState = {
+        user: null,
+        projects: [{ name: "Website Redesign", owner: "test@example.com" }],
+        notificationFrequency: "never",
+      };
+
+      function load() {
+        try {
+          return { ...defaultState, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") };
+        } catch {
+          return { ...defaultState };
+        }
+      }
+
+      function save() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      }
+
+      let state = load();
+
+      const $ = (id) => document.getElementById(id);
+
+      function show(el, text) {
+        el.textContent = text;
+        el.classList.remove("hidden");
+      }
+
+      function hide(el) {
+        el.classList.add("hidden");
+      }
+
+      function renderProjects() {
+        const list = $("project-list");
+        list.innerHTML = "";
+        state.projects.forEach((project) => {
+          const li = document.createElement("li");
+          li.setAttribute("data-testid", "project-item");
+          li.innerHTML = `<span data-testid="project-name">${project.name}</span><span class="owner">${project.owner}</span>`;
+          list.appendChild(li);
+        });
+      }
+
+      function renderApp() {
+        if (state.user) {
+          $("login-view").classList.add("hidden");
+          $("app-view").classList.remove("hidden");
+          $("user-email").textContent = state.user;
+          $("notification-frequency").value = state.notificationFrequency;
+          renderProjects();
+          showPanel("projects");
+        } else {
+          $("app-view").classList.add("hidden");
+          $("login-view").classList.remove("hidden");
+        }
+      }
+
+      function showPanel(which) {
+        $("projects-panel").classList.toggle("hidden", which !== "projects");
+        $("settings-panel").classList.toggle("hidden", which !== "settings");
+        hide($("project-success"));
+        hide($("settings-success"));
+      }
+
+      $("login-form").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        hide($("login-error"));
+
+        const email = $("email").value.trim();
+        const password = $("password").value;
+
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          show($("login-error"), "Please enter a valid email address.");
+          return;
+        }
+        if (!password) {
+          show($("login-error"), "Password is required.");
+          return;
+        }
+
+        await delay(250);
+
+        if (email !== "test@example.com" || password !== "password123") {
+          show($("login-error"), "Invalid email or password.");
+          return;
+        }
+
+        state.user = email;
+        save();
+        renderApp();
+      });
+
+      $("logout").addEventListener("click", () => {
+        state.user = null;
+        save();
+        $("password").value = "";
+        hide($("login-error"));
+        renderApp();
+      });
+
+      $("nav-projects").addEventListener("click", () => showPanel("projects"));
+      $("nav-settings").addEventListener("click", () => showPanel("settings"));
+
+      $("add-project").addEventListener("click", async () => {
+        hide($("project-error"));
+        hide($("project-success"));
+
+        const name = $("project-name").value.trim();
+        if (!name) {
+          show($("project-error"), "Project name is required.");
+          return;
+        }
+        if (state.projects.some((project) => project.name.toLowerCase() === name.toLowerCase())) {
+          show($("project-error"), "A project with that name already exists.");
+          return;
+        }
+
+        await delay(250);
+
+        state.projects.push({ name, owner: state.user || "test@example.com" });
+        save();
+        renderProjects();
+        $("project-name").value = "";
+        show($("project-success"), `Project "${name}" created.`);
+      });
+
+      $("save-settings").addEventListener("click", async () => {
+        hide($("settings-success"));
+        await delay(250);
+        state.notificationFrequency = $("notification-frequency").value;
+        save();
+        show($("settings-success"), `Settings saved successfully. Notification frequency is now ${state.notificationFrequency}.`);
+      });
+
+      renderApp();
+    </script>
+  </body>
+</html>

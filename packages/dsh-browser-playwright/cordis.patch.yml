@@ -1,0 +1,60 @@
+# Cordis profile patch contributed by this plugin.
+#
+# DSH reads this file because `package.json` declares:
+#     "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+#
+# `dsh plugin --profile <name> add <package>` appends this package to that
+# profile's `dsh.profile.bundles`; the loader then reads this file as one more
+# patch layer. That is the whole install story — no manual patch editing.
+# Verified against dsh 0.1.5-rc.2 with the shipped `headless` and `web`
+# profiles. Confirm with:
+#
+#     dsh --profile <name> --dump-config   # expect `id:` AND `name:` below
+#
+# This file inserts one row into whichever profile installs the package, so
+# the browser capability is available to every conversation in that profile.
+#
+# A single row is enough, even though the plugin is split into a service
+# definition, a provider, and a tool set: `lib/index.js` owns that wiring in
+# `apply()`. Splitting it across rows here would not work, because the service
+# definition is an abstract class — it is a contract, not a plugin — and cordis
+# can only instantiate modules that actually export a plugin.
+#
+# The row needs the base layer's `tools` row (`@deepseek-ai/dsh-tools`) to be
+# present, since that is the service the tool half injects. Every shipped
+# profile has it; a hand-built composition must as well, or the tools half
+# stays dormant while the browser service still loads.
+#
+# To mount only part of the plugin (for example the tools, against a browser
+# provider you already run), skip the patch and wire it by hand:
+#
+#     import browser from '@webtestagent/dsh-browser-playwright/playwright'
+#     import { registerBrowserTools } from '@webtestagent/dsh-browser-playwright/tool'
+#
+#     ctx.plugin(browser, { headless: false })
+#     ctx.effect(() => registerBrowserTools(ctx))
+#
+# Note the browser tool half must live in its own fiber that injects
+# `['tools', 'browser']`: cordis throws on reading an uninjected service, and
+# `apply()` cannot declare `inject: ['browser']` for a service it mounts
+# itself.
+
+- insert:
+    - id: browser-playwright
+      name: '@webtestagent/dsh-browser-playwright'
+      config:
+        # Launch chromium with no visible window. Set false to watch it work.
+        headless: true
+
+        # Per-action timeout, in milliseconds.
+        timeoutMs: 15000
+
+        # Drop a session's browser context after this long without a tool call.
+        # 0 disables the sweep. Session artifacts are kept either way.
+        idleTimeoutMs: 600000
+
+        # Record a .webm of every session and return its path on close.
+        recordVideo: true
+
+        # Allow browser_screenshot to write PNGs.
+        screenshots: true

@@ -1,0 +1,45 @@
+# Make the DSH web UI's "add workspace" flow automatable.
+#
+# The `web` profile ships `@deepseek-ai/dsh-host-directory-picker-auto`, which
+# resolves to a NATIVE operating-system folder dialog. A native dialog is outside
+# the page, so browser automation can neither see nor dismiss it — which makes
+# the whole web UI untestable end-to-end through the API.
+#
+# This overlay re-points the same row at the in-app tree picker instead.
+# Apply it with `--patch`, which appends to the patch stack after the profile's
+# own cordis.patch.yml, so nothing on disk is modified:
+#
+#   npx @deepseek-ai/dsh@0.1.5-rc.2 --profile web --patch ./dsh/web-browse-picker.patch.yml
+#
+# Layer order, per the generated <profile>/cordis.yml:
+#   bundle layers → <profile>/cordis.patch.yml → --patch overlays
+#
+# Two patch semantics this file depends on (from dsh-app-boot's applyEntryPatches):
+#
+#   1. `name` on a non-insert patch is a GUARD, not a setter. If it does not equal
+#      the target row's name the patch is SKIPPED with a warning. It is how you
+#      assert you are patching the row you think you are, not how you re-point it.
+#   2. A row cannot be re-pointed at another module. To replace an implementation
+#      you disable the original and insert a new row under a new id.
+#
+# It takes TWO rows, not one. `dsh-host-directory-picker-auto` has no client half
+# (it only resolves to a backend), and the default profile loads no
+# `dsh-client-ui-directory-picker-*` client at all. The tree UI the browser can
+# actually drive lives in `@deepseek-ai/dsh-client-ui-directory-picker-browse`,
+# which ships its browser half via `exports["./client"]` and is only served if it
+# is mounted as a row. Without that row the "Choose workspace" button toggles its
+# `aria-expanded` and renders nothing.
+#
+# See the plugin README, "Driving the web UI", for the full walkthrough.
+
+- id: directory-picker
+  name: '@deepseek-ai/dsh-host-directory-picker-auto'
+  disabled: true
+
+- insert:
+    - id: directory-picker-browse
+      name: '@deepseek-ai/dsh-host-directory-picker-browse'
+    - id: directory-picker-ui-browse
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
+
+

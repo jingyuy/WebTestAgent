@@ -1,0 +1,40 @@
+{
+  "name": "web-test-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MVP web testing agent: give it a URL + a natural-language test instruction, it drives a real Chromium browser via Playwright and reports a trustworthy PASS/FAIL with recorded evidence.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:plugin": "npm run build --workspace @webtestagent/dsh-browser-playwright",
+    "typecheck:plugin": "npm run typecheck --workspace @webtestagent/dsh-browser-playwright",
+    "test:plugin": "npm run test:e2e --workspace @webtestagent/dsh-browser-playwright",
+    "install:plugin": "node scripts/install-dsh-plugin.mjs",
+    "dev": "tsx watch src/server.ts",
+    "server": "tsx src/server.ts",
+    "agent": "tsx src/index.ts",
+    "smoke": "tsx src/smoke.ts",
+    "dry-run": "tsx src/dry-run.ts",
+    "bench": "tsx src/bench.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').cpSync('src/ui','dist/ui',{recursive:true})\"",
+    "start": "node dist/server.js",
+    "install:browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "playwright": "^1.49.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
