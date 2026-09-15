@@ -58,3 +58,41 @@
 
         # Allow browser_screenshot to write PNGs.
         screenshots: true
+
+        # ── persistent browser ──────────────────────────────────────────
+        # Off by default: sessions get isolated cookie jars.
+        #
+        # Turn it on to drive a REAL on-disk profile instead, so cookies,
+        # storage and any challenge already passed survive the process and the
+        # site sees a returning person rather than a fresh machine. Sessions of
+        # one deployment then share that context (each gets its own tab), so a
+        # login in one conversation is visible to the next — that is the point,
+        # and the trade-off to accept.
+        #
+        # persistent: true
+        #
+        # Profile directory. Default: <artifacts base>/profiles/chromium,
+        # i.e. ~/.dsh/profiles/chromium when DSH_HOME is set, else
+        # <cwd>/.dsh-browser-artifacts/profiles/chromium. Deliberately not
+        # inside the artifacts tree, which housekeeping may reasonably delete.
+        #
+        # userDataDir: /path/to/profile
+        #
+        # Drive an installed Google Chrome instead of bundled Chromium.
+        # The most convincing identity, and the only one that carries the
+        # extensions a person actually browses with.
+        #
+        # channel: chrome
+        #
+        # Match a fixed locale / time zone instead of the host's.
+        #
+        # locale: en-GB
+        # timezoneId: Europe/London
+
+        # ── human in the loop ──────────────────────────────────────────
+        # Whether browser_wait_for_human may park the run for a person.
+        # Default: true when the browser is visible (headless: false), else
+        # false, because a headless browser nobody can see makes that tool a
+        # five-minute dead end.
+        #
+        # humanInTheLoop: true

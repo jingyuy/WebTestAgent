@@ -14,6 +14,7 @@
     "build:plugin": "npm run build --workspace @webtestagent/dsh-browser-playwright",
     "typecheck:plugin": "npm run typecheck --workspace @webtestagent/dsh-browser-playwright",
     "test:plugin": "npm run test:e2e --workspace @webtestagent/dsh-browser-playwright",
+    "manual:plugin": "npm run manual:challenge --workspace @webtestagent/dsh-browser-playwright",
     "install:plugin": "node scripts/install-dsh-plugin.mjs",
     "dev": "tsx watch src/server.ts",
     "server": "tsx src/server.ts",

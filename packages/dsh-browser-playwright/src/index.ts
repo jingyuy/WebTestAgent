@@ -42,7 +42,7 @@ const browserTools: Plugin.Object = {
  *      `ctx.browser`. Nothing in the tool layer names Playwright, so another
  *      provider can be swapped in without touching it.
  *   2. `browserTools` is the *consumer*: it reads `ctx.browser` and registers
- *      nine `browser_*` tools on `ctx.tools`.
+ *      ten `browser_*` tools on `ctx.tools`.
  *   3. `ctx.effect` hands both teardowns to the plugin lifecycle, so unloading
  *      closes every browser context and unregisters every tool.
  */
@@ -62,7 +62,13 @@ export default plugin
 
 export { default as PlaywrightBrowser } from './playwright.js'
 export { BrowserService, BROWSER_SERVICE_NAME, isBrowserService } from './service.js'
-export { resolveConfig, defaultArtifactsDir } from './config.js'
+export {
+  resolveConfig,
+  defaultArtifactsDir,
+  defaultProfileDir,
+  DEFAULT_LAUNCH_ARGS,
+} from './config.js'
+export { detectChallenge, classifyChallenge, noChallenge } from './internal/challenge.js'
 export { createBrowserTools, registerBrowserTools, TOOL_PREFIX, sessionKey } from './tools/index.js'
 
 export type {
@@ -78,5 +84,8 @@ export type {
   ScreenshotRequest,
   ScreenshotResult,
   SnapshotCapture,
+  WaitForHumanRequest,
+  WaitForHumanResult,
 } from './service.js'
+export type { ChallengeInfo, ChallengeVendor } from './internal/challenge.js'
 export type { BrowserPluginConfig, ResolvedBrowserConfig } from './config.js'

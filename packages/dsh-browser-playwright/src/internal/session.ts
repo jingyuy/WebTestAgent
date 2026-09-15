@@ -3,6 +3,7 @@ import * as path from 'node:path'
 import { type Browser, type BrowserContext, type Locator, type Page, type Video } from 'playwright'
 import { RefStore } from './refs.js'
 import { captureSnapshot, type SnapshotCapture } from './snapshot.js'
+import { detectChallenge, type ChallengeInfo } from './challenge.js'
 
 /** Prefix a scheme when the user types `example.com`. */
 export function normalizeUrl(input: string): string {
@@ -20,6 +21,21 @@ export function normalizeText(value: string): string {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
+
+/**
+ * No-op `__name` helper, injected into every document.
+ *
+ * Bundlers with `keepNames` enabled (tsx/esbuild, and DSH's own loader) rewrite
+ * every compiled function with a `__name(fn, "x")` call. Playwright serialises
+ * function source INTO the page, where that helper does not exist, so any
+ * `page.evaluate()` fails with "ReferenceError: __name is not defined" — which
+ * silently degrades to an empty result. The polyfill must be present in the
+ * page before any evaluate-based collector runs, in dev *and* in a build.
+ *
+ * Exported because a persistent `BrowserContext` is shared by every session, so
+ * its owner installs this once, at launch.
+ */
+export const INIT_SCRIPT_POLYFILL = 'globalThis.__name ||= (fn) => fn;'
 
 // --------------------------------------------------------------------- actions
 
@@ -125,19 +141,31 @@ export interface ProbeResult {
 }
 
 export interface SessionOptions {
-  viewport: { width: number; height: number }
+  /** `null` uses the real window size instead of a fixed viewport. */
+  viewport: { width: number; height: number } | null
   videosDir?: string
   screenshotsDir?: string
   timeoutMs: number
+  /**
+   * Whether a person can reach this browser, which decides whether the
+   * snapshot's challenge advice may point at `browser_wait_for_human`.
+   */
+  humanInTheLoop: boolean
 }
 
 // --------------------------------------------------------------------- session
 
 /**
- * One DSH session maps onto one `BrowserContext`, i.e. one isolated
- * cookie/storage jar. The chromium process is shared, so concurrent
- * conversations cannot leak auth state into each other but also do not pay for
- * two browsers.
+ * One DSH session maps onto one page: either a fresh `BrowserContext` (the
+ * isolated default) or one tab inside the deployment's shared persistent
+ * profile. The chromium process is shared either way, so concurrent
+ * conversations cannot leak auth state into each other *in isolated mode* and
+ * do not each pay for a browser in either mode.
+ *
+ * `ownsContext` is what makes the two modes interchangeable: closing an
+ * isolated session tears its context down, whereas closing a session inside a
+ * persistent profile closes only its tab, leaving the cookies and storage the
+ * profile exists to accumulate.
  */
 export class BrowserSession {
   readonly refs = new RefStore()
@@ -146,13 +174,15 @@ export class BrowserSession {
   private readonly context: BrowserContext
   private readonly video: Video | null
   private readonly options: SessionOptions
+  private readonly ownsContext: boolean
   private shotCounter = 0
   private closed = false
 
-  private constructor(context: BrowserContext, page: Page, options: SessionOptions) {
+  private constructor(context: BrowserContext, page: Page, options: SessionOptions, ownsContext: boolean) {
     this.context = context
     this.page = page
     this.options = options
+    this.ownsContext = ownsContext
     this.video = page.video()
     this.page.setDefaultTimeout(options.timeoutMs)
   }
@@ -174,12 +204,22 @@ export class BrowserSession {
     // Playwright serialises function source INTO the page, where that helper
     // does not exist, so `page.evaluate(() => ...)` fails with
     // "ReferenceError: __name is not defined". A no-op polyfill injected into
-    // every document keeps evaluate-based code (the snapshot collector) working
-    // both in dev and in a build.
-    await context.addInitScript({ content: 'globalThis.__name ||= (fn) => fn;' })
+    // every document keeps evaluate-based code (the snapshot and challenge
+    // collectors) working both in dev and in a build.
+    await context.addInitScript({ content: INIT_SCRIPT_POLYFILL })
 
     const page = await context.newPage()
-    return new BrowserSession(context, page, options)
+    return new BrowserSession(context, page, options, true)
+  }
+
+  /**
+   * Wrap a page that lives in a context somebody else owns — the shared
+   * persistent profile. Installing {@link INIT_SCRIPT_POLYFILL} is the owner's
+   * job here, because a persistent context outlives any one session and the
+   * script only has to be added once.
+   */
+  static attach(context: BrowserContext, page: Page, options: SessionOptions): BrowserSession {
+    return new BrowserSession(context, page, options, false)
   }
 
   get isClosed(): boolean {
@@ -216,7 +256,58 @@ export class BrowserSession {
 
   /** Rebuild the snapshot and invalidate every previous ref. */
   async snapshot(): Promise<SnapshotCapture> {
-    return captureSnapshot(this.page, this.refs)
+    return captureSnapshot(this.page, this.refs, { humanInTheLoop: this.options.humanInTheLoop })
+  }
+
+  // --------------------------------------------------------------- challenge
+
+  /** Is the current page an automated-traffic challenge rather than content? */
+  async detectChallenge(): Promise<ChallengeInfo> {
+    return detectChallenge(this.page)
+  }
+
+  /**
+   * Block until the challenge on screen is gone, or the deadline passes.
+   *
+   * This is the human half of the loop: the agent cannot clear a CAPTCHA, so it
+   * hands the wheel to a person watching the browser window and waits. Every
+   * poll re-runs the same detector the snapshot uses, so "cleared" means
+   * exactly what the next snapshot will report — there is no second definition
+   * of done that could disagree with the observation the agent sees next.
+   *
+   * The loop never throws on timeout: "the challenge is still there" is an
+   * observation about the page, and the caller needs it as much as the success
+   * case. Only a caller mistake (a cancellation) ends the wait as an error.
+   *
+   * `onTick` fires once per poll so the owner can keep a session alive that
+   * would otherwise be reaped as idle *while a person is looking at it*.
+   */
+  async waitForHuman(
+    request: { timeoutMs: number; pollMs: number; signal?: AbortSignal },
+    onTick?: () => void,
+  ): Promise<{ cleared: boolean; alreadyClear: boolean; waitedMs: number; challenge: ChallengeInfo }> {
+    const startedAt = Date.now()
+    const deadline = startedAt + request.timeoutMs
+
+    let challenge = await this.detectChallenge()
+    const alreadyClear = !challenge.detected
+    if (alreadyClear) {
+      return { cleared: true, alreadyClear, waitedMs: 0, challenge }
+    }
+
+    while (Date.now() < deadline) {
+      if (request.signal?.aborted) {
+        throw new Error('browser_wait_for_human was cancelled by the caller while waiting for a person.')
+      }
+      onTick?.()
+      await delay(Math.min(request.pollMs, Math.max(deadline - Date.now(), 0)))
+      challenge = await this.detectChallenge()
+      if (!challenge.detected) {
+        return { cleared: true, alreadyClear: false, waitedMs: Date.now() - startedAt, challenge }
+      }
+    }
+
+    return { cleared: false, alreadyClear: false, waitedMs: Date.now() - startedAt, challenge }
   }
 
   // ----------------------------------------------------------------- actions
@@ -531,17 +622,25 @@ export class BrowserSession {
   // ---------------------------------------------------------------- teardown
 
   /**
-   * Close the context (flushing the video) and return the recorded path.
+   * Tear this session's page down and return the recorded video path.
    *
-   * The recording is only written to disk once the context closes, so the video
-   * path must be read AFTER `context.close()` — and the file must never be
-   * deleted here, or the artifact is lost.
+   * An owned context is closed outright (which flushes the video). A page that
+   * lives in a shared persistent profile closes only itself — the profile, and
+   * everything it has accumulated, outlives the session by design.
+   *
+   * The recording is only written to disk once its context or page closes, so
+   * the video path must be read AFTER that — and the file must never be deleted
+   * here, or the artifact is lost.
    */
   async close(): Promise<{ videoPath?: string }> {
     if (this.closed) return {}
     this.closed = true
     this.refs.clear()
-    await this.context.close().catch(() => undefined)
+    if (this.ownsContext) {
+      await this.context.close().catch(() => undefined)
+    } else {
+      await this.page.close().catch(() => undefined)
+    }
     let videoPath: string | undefined
     if (this.video) {
       videoPath = await this.video.path().catch(() => undefined)

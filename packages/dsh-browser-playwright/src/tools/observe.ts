@@ -119,6 +119,65 @@ export function createObservationTools({ browser }: ToolContextBag): ToolDefinit
     },
   })
 
+  const waitForHuman = defineTool({
+    name: 'browser_wait_for_human',
+    description:
+      'Pause the run and hand the browser to a PERSON, blocking until the anti-bot challenge on ' +
+      'screen is gone. Use it when a snapshot reported `CHALLENGE DETECTED` — a CAPTCHA or an ' +
+      '"unusual traffic" / "verify you are human" interstitial.\n' +
+      'Nothing you can do will clear one: clicking it, filling it, or waiting for it with ' +
+      'browser_wait does not work, and the page behind it is not the page under test. A person ' +
+      'looking at the browser window solves it in seconds; this tool waits for them and then ' +
+      'returns a fresh snapshot of wherever the real page ended up.\n' +
+      'It fails immediately when there is nothing to wait for, and when no person can see this ' +
+      'browser (a headless run with nobody watching). Do not use it as a general wait — for that, ' +
+      'use browser_wait.',
+    parameters: {
+      timeoutMs: {
+        type: 'number',
+        description:
+          'Give up after this many milliseconds and report that the challenge is still there. ' +
+          'Defaults to 300000 (5 minutes).',
+      },
+    },
+    output: textOutput('Whether the challenge was cleared, followed by a fresh page snapshot.'),
+    async execute(args, exec) {
+      throwIfAborted(exec)
+      const key = sessionKey(exec)
+      const timeoutMs = clamp(args.timeoutMs ?? 300_000, 5_000, 1_800_000)
+
+      const result = await browser.waitForHuman(key, {
+        timeoutMs,
+        pollMs: 1_000,
+        signal: exec.signal,
+      })
+
+      const seconds = Math.round(result.waitedMs / 1000)
+      let summary: string
+      if (!result.cleared) {
+        summary =
+          `The challenge is STILL there after ${seconds}s — a person did not clear it. ` +
+          `Found: ${result.challenge.summary}.` +
+          (result.challenge.evidence.length ? ` Evidence: ${result.challenge.evidence.join('; ')}.` : '') +
+          ' Do not report PASS: say the run is blocked by a human-verification challenge. Retry ' +
+          'with a longer timeoutMs only if a person really is coming.'
+      } else if (result.alreadyClear) {
+        summary =
+          'Nothing to wait for: there was no blocking challenge on the page when this was called' +
+          (result.challenge.detected
+            ? ` (it does show ${result.challenge.summary}). That widget is part of the page, not a ` +
+              'page-level interstitial, so a person clicking it does not change what this tool waits for.'
+            : '. Check the previous snapshot — it may already be stale.') +
+          ' Returning a fresh snapshot so you can re-decide.'
+      } else {
+        summary = `A person cleared the challenge after ${seconds}s. The page below is the real one again.`
+      }
+
+      const capture = await browser.snapshot(key)
+      return formatObservation(summary, capture)
+    },
+  })
+
   const screenshot = defineTool({
     name: 'browser_screenshot',
     description:
@@ -145,7 +204,7 @@ export function createObservationTools({ browser }: ToolContextBag): ToolDefinit
     },
   })
 
-  return [open, snapshot, wait, screenshot]
+  return [open, snapshot, wait, waitForHuman, screenshot]
 }
 
 function clamp(value: number, min: number, max: number): number {

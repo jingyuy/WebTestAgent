@@ -1,5 +1,6 @@
 import type { Locator, Page } from 'playwright'
 import { RefStore } from './refs.js'
+import { detectChallenge, type ChallengeInfo } from './challenge.js'
 
 /**
  * Snapshot engine.
@@ -13,6 +14,8 @@ import { RefStore } from './refs.js'
  *   - never send raw HTML to the model
  *   - interactive elements only, plus a compact accessibility outline
  *   - refs are invalidated whenever the page mutates
+ *   - an anti-bot challenge is reported as part of the observation, not left
+ *     for the model to notice (see `challenge.ts`)
  */
 
 const INTERACTIVE_SELECTOR = [
@@ -305,6 +308,32 @@ export interface SnapshotCapture {
   generation: number
   /** True when the collector itself failed (as opposed to finding nothing). */
   collectorFailed: boolean
+  /**
+   * Anti-bot challenge state at capture time. A `blocking` challenge means the
+   * element list below describes the challenge page, not the site under test.
+   */
+  challenge: ChallengeInfo
+}
+
+/**
+ * Context a snapshot needs that is not a property of the page.
+ */
+export interface SnapshotOptions {
+  /**
+   * Whether a person can actually reach this browser right now.
+   *
+   * Decides which remedy the challenge banner offers. It is deliberately
+   * distinct from {@link ChallengeInfo.humanSolvable}, which says only that a
+   * person *could* solve this kind of challenge: recommending
+   * `browser_wait_for_human` to an agent whose provider will refuse that call
+   * sends it to a dead end, so the two facts have to be combined here.
+   *
+   * Defaults to `false` — the pessimistic direction. Advising "report the
+   * block" to someone who did have a human available merely under-uses a
+   * working tool; advising the tool to someone who does not produces a hard
+   * error the agent has to reason its way out of.
+   */
+  humanInTheLoop?: boolean
 }
 
 /**
@@ -314,7 +343,11 @@ export interface SnapshotCapture {
  * elements"), because that would turn "our code is broken" into a believable
  * observation about the page.
  */
-export async function captureSnapshot(page: Page, refs: RefStore): Promise<SnapshotCapture> {
+export async function captureSnapshot(
+  page: Page,
+  refs: RefStore,
+  options: SnapshotOptions = {},
+): Promise<SnapshotCapture> {
   const url = page.url()
   const title = await page.title().catch(() => '')
 
@@ -350,6 +383,7 @@ export async function captureSnapshot(page: Page, refs: RefStore): Promise<Snaps
     lines.push(formatElement(ref, el))
   }
 
+  const challenge = await detectChallenge(page)
   const outline = collectorFailed ? '' : await pageOutline(page)
 
   const header = [
@@ -364,7 +398,10 @@ export async function captureSnapshot(page: Page, refs: RefStore): Promise<Snaps
       ? `INTERACTIVE ELEMENTS\n${lines.join('\n')}`
       : 'INTERACTIVE ELEMENTS\n(none found — the page may still be loading, or the content is inside an iframe)'
 
-  const parts = [header, '', interactive]
+  const parts = [header]
+  const banner = challengeBanner(challenge, options.humanInTheLoop === true)
+  if (banner) parts.push('', banner)
+  parts.push('', interactive)
   if (outline) parts.push('', 'PAGE OUTLINE', outline)
 
   return {
@@ -374,7 +411,55 @@ export async function captureSnapshot(page: Page, refs: RefStore): Promise<Snaps
     elementCount: chosen.length,
     generation: refs.generation,
     collectorFailed,
+    challenge,
   }
+}
+
+/**
+ * The challenge warning that precedes every observation.
+ *
+ * It leads the snapshot because the rest of the snapshot is worthless while it
+ * applies, and an agent that skims has to run into it before the element list.
+ * Returns `null` when there is nothing to say, so a normal page stays quiet.
+ *
+ * `humanInTheLoop` gates the remedy, so this never points the agent at
+ * `browser_wait_for_human` when that tool is going to refuse the call.
+ */
+function challengeBanner(challenge: ChallengeInfo, humanInTheLoop: boolean): string | null {
+  const evidence = challenge.evidence.length ? `\n  Evidence: ${challenge.evidence.join('; ')}` : ''
+
+  if (!challenge.scanned) {
+    return (
+      'CHALLENGE SCAN UNAVAILABLE\n' +
+      '  The page could not be read, so an anti-bot challenge CANNOT be ruled out.' +
+      evidence
+    )
+  }
+
+  if (!challenge.detected) return null
+
+  if (challenge.blocking) {
+    const remedy = challenge.humanSolvable
+      ? humanInTheLoop
+        ? 'A person can clear it: call browser_wait_for_human, and continue once it returns.'
+        : 'Nobody can clear this here: the browser is headless with the human loop off, so\n' +
+          '  browser_wait_for_human will refuse rather than park the run. Report the run as blocked\n' +
+          '  by a human-verification challenge; do not keep probing the page for a way through.'
+      : 'This kind usually clears by itself: wait it out with browser_wait, then re-read the page.'
+    return (
+      `CHALLENGE DETECTED — ${challenge.summary}\n` +
+      '  This is NOT the page under test. Everything below describes the challenge, not the site,\n' +
+      '  and clicking through it does not reveal the real page. Do not report PASS from here.\n' +
+      `  ${remedy}` +
+      evidence
+    )
+  }
+
+  return (
+    `CAPTCHA WIDGET — ${challenge.summary}\n` +
+    '  The page itself is real; this widget sits inside it and may guard the form that uses it.' +
+    evidence
+  )
 }
 
 /** Compact accessibility outline, used as context (not as an action target). */

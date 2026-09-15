@@ -49,7 +49,10 @@ export function createAssertTool(ctx: Context): ToolDefinition {
       'never both.\n' +
       'Returns ASSERTION PASSED, or ASSERTION FAILED listing exactly which condition failed ' +
       'and what was actually observed. Never report PASS on the strength of an action succeeding — ' +
-      'run this first. A false PASS is far worse than a false FAIL.',
+      'run this first. A false PASS is far worse than a false FAIL.\n' +
+      'An anti-bot challenge (CAPTCHA, "unusual traffic", "verify you are human") fails the verdict ' +
+      'outright no matter what the conditions say: that page is not the site under test. Clear it ' +
+      'with browser_wait_for_human, then assert again.',
     parameters: {
       url_contains: { type: 'string', description: 'Expected substring of the current URL.' },
       title_contains: { type: 'string', description: 'Expected substring of the page title.' },
@@ -131,13 +134,29 @@ export function createAssertTool(ctx: Context): ToolDefinition {
         )
       }
 
+      const capture = await browser.snapshot(key)
+
+      // A blocking challenge makes every condition above meaningless: the page
+      // was never the site under test, so anything it "proved" is about the
+      // CAPTCHA. Refuse the verdict rather than hand the agent a PASS it would
+      // happily report.
+      if (capture.challenge.blocking) {
+        conditions.unshift({
+          ok: false,
+          message:
+            `No blocking human-verification challenge is present (found: ${capture.challenge.summary})` +
+            (capture.challenge.evidence.length
+              ? ` [${capture.challenge.evidence.join('; ')}]`
+              : '') +
+            ' — every condition above was evaluated against the challenge page, not the site.',
+        })
+      }
+
       const failedCount = conditions.filter((c) => !c.ok).length
       const passed = failedCount === 0
       const verdict: 'ASSERTION PASSED' | 'ASSERTION FAILED' = passed
         ? 'ASSERTION PASSED'
         : 'ASSERTION FAILED'
-
-      const capture = await browser.snapshot(key)
 
       return {
         verdict,

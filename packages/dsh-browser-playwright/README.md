@@ -1,9 +1,10 @@
 # @webtestagent/dsh-browser-playwright
 
 A Playwright browser capability for [DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh).
-It gives a DSH agent nine tools for driving a real Chromium: navigate, observe the
-accessibility tree, interact by stable element ref, and — most importantly —
-*prove* an outcome with a structured assertion.
+It gives a DSH agent ten tools for driving a real Chromium: navigate, observe the
+accessibility tree, interact by stable element ref, *prove* an outcome with a
+structured assertion, and — when a site puts up an anti-bot challenge — hand the
+browser to a person instead of guessing.
 
 The harness owns the agent loop, session store, LLM transport, tool registry and
 Web UI. This package contributes only the browser, so every conversation in the
@@ -51,7 +52,7 @@ plugin's `@deepseek-ai/cordis` import would resolve to your checkout's copy whil
 the profile loads the harness's — two module instances of the framework. It happens
 to work today, but it is a hazard worth avoiding.
 
-## The nine tools
+## The ten tools
 
 Every tool that returns to the agent ends with a fresh snapshot, so the agent
 never acts on stale element refs.
@@ -61,6 +62,7 @@ never acts on stale element refs.
 | `browser_open` | Navigate and return the page snapshot. |
 | `browser_snapshot` | Re-read the page. This is what mints new refs. |
 | `browser_wait` | Wait for an element, text, URL or title to reach a state. |
+| `browser_wait_for_human` | Hand the browser to a person and block until an anti-bot challenge is cleared. |
 | `browser_screenshot` | Save a PNG and return its path. |
 | `browser_click` | Click by ref or selector. |
 | `browser_fill` | Replace an input's value. |
@@ -121,9 +123,95 @@ parsing prose:
 
 `presentationMeta` exposes `{ verdict, passed, failedCount }`.
 
+## Anti-bot challenges
+
+A CAPTCHA page is an ordinary document: a title, a heading, a submit button. An
+agent that has been told to test a site will click through it, land somewhere
+unexpected, and assert against whatever it finds — producing a confident, wrong
+verdict. Detection therefore is not a separate check the agent has to remember;
+it is part of observation, and it lands in every snapshot:
+
+```
+URL: https://www.google.com/sorry/index?continue=…
+TITLE: Sorry...
+REFS: generation 3, 2 interactive element(s)
+
+CHALLENGE DETECTED — Google anti-abuse interstitial is blocking the page (the document is an interstitial, not the content under test)
+  This is NOT the page under test. Everything below describes the challenge, not the site,
+  and clicking through it does not reveal the real page. Do not report PASS from here.
+  A person can clear it: call browser_wait_for_human, and continue once it returns.
+  Evidence: url matches /\/sorry\/(index|v2)?/i; page text matches /unusual traffic/i
+```
+
+Two kinds of match are distinguished, because they need different handling:
+
+- **blocking** — the document *is* the interstitial (`/sorry/index`, Cloudflare's
+  `/cdn-cgi/challenge-platform`, "Verify you are human"). The page is not the
+  content, and `browser_assert` refuses to return `ASSERTION PASSED` while one is
+  on screen, whatever the conditions said. This is what `browser_wait_for_human`
+  waits out.
+- **widget only** — a reCAPTCHA box embedded in a page that is otherwise real (a
+  signup form, often). `detected` is true so the agent is told, but it does not
+  veto an assertion: the surrounding page is genuine, and a test that only
+  touches that page elsewhere should not be derailed.
+
+Phrases are matched as a person would read them ("unusual traffic", "checking
+your browser"), never as bare words like *captcha* — a page under test can
+legitimately contain the word, and a detector that cries wolf is worse than none,
+because the agent learns to ignore it. The full signal set is in
+`src/internal/challenge.ts`; `classifyChallenge()` is pure, so it is testable
+without a browser.
+
+The remedy in the banner depends on one thing the challenge itself cannot tell
+you: whether a person can actually reach the browser. A challenge a human *could*
+solve, met by a headless provider with the human loop off, is reported as a block
+to report — not as an invitation to call `browser_wait_for_human`, which would
+refuse. `humanSolvable` describes the challenge; the banner combines it with
+`humanInTheLoop` before advising. Advising the tool anyway would contradict the
+refusal it produces, and leave the agent to reconcile two messages on its own.
+
+### `browser_wait_for_human`
+
+```ts
+// README excerpt — the tool's real description is longer.
+browser_wait_for_human({ timeoutMs: 300000 })
+```
+
+The agent cannot clear a challenge, so it does not try: it parks the run while a
+person solves it in the visible window, then re-checks with the *same* detector
+the snapshot uses, so "cleared" means exactly what the next snapshot will report.
+There is no second definition of done that could disagree with what the agent
+sees next.
+
+Three deliberate choices:
+
+- **It refuses to run when nobody can see the browser.** A headless wait is a
+  five-minute dead end that teaches the agent nothing, so `humanInTheLoop`
+  defaults to `!headless` and the tool throws — naming both ways out — instead of
+  blocking. Set `humanInTheLoop: true` explicitly when a human can reach a
+  headless browser out of band (a remote viewer, a CDP session). The snapshot
+  knows this setting and will not send the agent here in the first place.
+- **A timeout is an observation, not an exception.** "The challenge is still
+  there" comes back with the evidence attached, like a failed assertion. Throwing
+  would deny the agent the fact it most needs.
+- **It cannot be used as a general wait.** Calling it with no challenge returns
+  immediately and says so, so a misreading of the previous snapshot costs one
+  step instead of a timeout.
+
+The wait loop re-touches the session on every poll, so the idle sweep cannot reap
+a session out from under the person who is looking at it.
+
 ## Configuration
 
 Set under the row's `config:`. All keys are optional.
+
+> **Restate the whole object when overriding from a later patch layer.** A patch
+> that matches a row assigns each key it mentions, so `config:` **replaces** the
+> row's config wholesale rather than merging into it. Overriding only
+> `persistent: true` from a `--patch` file silently drops `headless`,
+> `timeoutMs`, `recordVideo` and the rest back to the plugin's own defaults —
+> verified with `--dump-config`. The plugin's defaults happen to be sensible, so
+> nothing breaks; the values the row *looked* like it had just stop applying.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -131,11 +219,17 @@ Set under the row's `config:`. All keys are optional.
 | `timeoutMs` | `15000` | Per-action timeout. |
 | `idleTimeoutMs` | `600000` | Drop a session after this long idle. `0` disables the sweep. Artifacts are kept either way. |
 | `slowMo` | `0` | Delay each Playwright action, for watching a run. |
-| `viewport` | `1280x800` | `{ width, height }`. |
+| `viewport` | `1280x800` | `{ width, height }`. With `persistent`, unset means the *real window size*. |
 | `artifactsDir` | see below | Where screenshots and videos go. `~` is expanded. |
 | `recordVideo` | `true` | Record a `.webm` per session; the path is returned on close. |
 | `screenshots` | `true` | Permit `browser_screenshot` to write PNGs. |
 | `launchArgs` | `[]` | Extra Chromium arguments. |
+| `persistent` | `false` | Drive a real on-disk profile instead of a throwaway one. See below. |
+| `userDataDir` | `<base>/profiles/chromium` | Profile directory. Only used with `persistent`. |
+| `channel` | bundled Chromium | e.g. `chrome`, to drive an installed Google Chrome. |
+| `locale` | the browser's | Fixed context locale, e.g. `en-GB`. |
+| `timezoneId` | the host's | Fixed IANA time zone, e.g. `Europe/London`. |
+| `humanInTheLoop` | `!headless` | Allow `browser_wait_for_human` to pause the run for a person. |
 
 The default artifacts directory is `$DSH_HOME/artifacts/browser` when a
 deployment exports `DSH_HOME`, otherwise `<cwd>/.dsh-browser-artifacts/artifacts/browser`.
@@ -145,11 +239,36 @@ useful default anyway: a video belongs next to the run that produced it.
 
 ### Sessions
 
-One `BrowserContext` per DSH session, keyed by `agent.id`, over a single shared
-Chromium process. Each context is serialized through its own queue, so
-concurrent tool calls cannot interleave inside one session. Contexts idle past
-`idleTimeoutMs` are closed; the browser and the rest of the profile are
-untouched.
+By default one `BrowserContext` per DSH session, keyed by `agent.id`, over a
+single shared Chromium process, so concurrent conversations cannot leak cookies
+into each other. Each context is serialized through its own queue. Contexts idle
+past `idleTimeoutMs` are closed; the browser process is untouched.
+
+### The persistent profile
+
+`persistent: true` swaps that for a real on-disk profile, driven through
+`launchPersistentContext`. Cookies, `localStorage`, service workers and installed
+extensions accumulate in `userDataDir` and survive the process, so a site sees a
+returning person rather than a fresh machine. Every session gets its own **tab**
+in the one context.
+
+The trade-offs are real and worth stating: sessions no longer get isolated cookie
+jars (a login in one conversation is visible to the next — that *is* the point),
+and closing a session closes its tab rather than the profile. Two other defaults
+flip, both for realism: the viewport becomes the real window size instead of a
+fixed `1280x800`, and `--enable-automation` is dropped from Chromium's arguments
+while `--disable-blink-features=AutomationControlled` is added. The profile lives
+outside the artifacts tree, because artifacts are evidence a housekeeping script
+may delete and the profile is accumulated trust that cannot be rebuilt.
+
+```yaml
+- id: browser-playwright
+  name: '@webtestagent/dsh-browser-playwright'
+  config:
+    persistent: true
+    headless: false          # a real window, which is what a person needs
+    channel: chrome          # the identity a person actually browses with
+```
 
 ## Architecture
 
@@ -160,7 +279,7 @@ lifecycles and different consumers:
 | --- | --- |
 | `/service` | `BrowserService`, the abstract capability, declared on `ctx.browser`. It is a contract, not a plugin — cordis can only instantiate modules that export a plugin. |
 | `/playwright` | `PlaywrightBrowser`, the default provider. Mount a different subclass to swap the engine. |
-| `/tool` | The nine `ToolDefinition`s, plus `registerBrowserTools`. |
+| `/tool` | The ten `ToolDefinition`s, plus `registerBrowserTools`. |
 | `/` | The bundle: mounts the provider, then registers the tools. |
 
 ### Two cordis details this package depends on
@@ -283,13 +402,55 @@ is then the same code path as any other DSH session.
 npm run test:e2e
 ```
 
-An offline, self-contained harness. It serves its own fixture page on an
+An offline, self-contained harness. It serves its own fixture pages on an
 ephemeral port, composes a real cordis context with the real `ToolRuntime`, and
-runs 28 checks covering registration, snapshots, refs, every assertion outcome,
+runs 70 checks covering registration, snapshots, refs, every assertion outcome,
 the selector escape hatch, navigation, screenshots and video. No network and no
 LLM.
 
-Two regressions it exists to catch:
+It then goes past the isolated default, because the newer features cannot be
+tested where they do not apply:
+
+- a set of pure `classifyChallenge()` cases, hand-built from the signal shape a
+  page produces — a Cloudflare interstitial, a real page that merely embeds a
+  reCAPTCHA widget, and a real page that only mentions the word *captcha*;
+- a **persistent, visible** context booted against a temp profile, which loads a
+  fixture interstitial, checks that `browser_assert` refuses to pass off it,
+  hands the browser to a "person" (the fixture solving itself on a timer), and
+  confirms the run continues on the real page afterwards;
+- a restart with the same profile directory, which is the only way to prove the
+  profile outlived the process rather than just the session.
+
+The last two phases need a visible Chromium window, so they open one. If the
+environment cannot (a headless CI box), the harness prints `SKIP` for that phase
+and still exits non-zero only for real failures.
+
+### Watching the human-in-the-loop path by hand
+
+```bash
+npm run manual:challenge                          # a local stand-in challenge
+npm run manual:challenge -- https://your-site/login   # a real one
+```
+
+From the repo root, `npm run manual:plugin` is the same thing.
+
+The e2e suite proves the loop with a *fake* person: the fixture clears itself on
+a 5s timer, which is what makes it runnable unattended. This script is the other
+half — it opens a real window and waits for a real click. It serves a challenge
+with no timer and prints each step as it goes:
+
+1. the `browser_open` snapshot, challenge banner and all;
+2. the structured `detectChallenge()` result;
+3. an assertion that *should* pass (the page really does contain the text) and
+   correctly returns `ASSERTION FAILED` anyway;
+4. `browser_wait_for_human`, which blocks until you solve it in the window;
+5. the assertion the challenge was blocking, which now passes.
+
+A real interstitial is not something you can summon on demand, so the local
+fixture is the useful default: deterministic, and it lets you debug the detector
+against a known-good page. Pass a URL to point it at something real.
+
+Four regressions it exists to catch:
 
 - **`__name` in the page.** `tsx`/esbuild/DSH's loader emit `__name(fn, "…")`
   around every compiled function for name preservation. Playwright serializes
@@ -308,6 +469,19 @@ Two regressions it exists to catch:
   collector is broken" into "the page has no elements". Snapshot collection now
   reports `collectorFailed`, and the snapshot says so in the text the agent
   reads, so observation failures are loud.
+
+Two more, from writing the fixture itself — both are properties of Chromium that
+the tests only look like they cover if you get them wrong:
+
+- **A cleared interstitial replaces the title, not just the body.** A fixture
+  that swaps its body back to the real page while leaving `<title>Verify you are
+  human</title>` in place is still a challenge, and should be: the detector reads
+  the document the browser is actually showing. A real interstitial hands the
+  document over.
+- **A cookie only survives a restart if it has an expiry.** Chromium keeps a
+  session cookie in memory, so a persistent profile does *not* restore one. The
+  fixture sets `Max-Age`, because that is the difference between a cookie and a
+  promise.
 
 ## License
 

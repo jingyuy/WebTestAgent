@@ -1,6 +1,6 @@
 {
   "name": "@webtestagent/dsh-browser-playwright",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Playwright browser capability for DeepSeek Harness: accessibility-snapshot interaction with stable element refs and one browser context per harness session.",
   "license": "MIT",
@@ -35,7 +35,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:e2e": "npm run build && node test/e2e.mjs"
+    "test:e2e": "npm run build && node test/e2e.mjs",
+    "manual:challenge": "npm run build && node test/manual-challenge.mjs"
   },
   "dependencies": {
     "playwright": "^1.49.1"
