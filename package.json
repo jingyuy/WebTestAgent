@@ -1,20 +1,14 @@
 {
   "name": "web-test-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "DeepSeek Harness browser bundle: accessibility-snapshot interaction with stable element refs, shipped as @webtestagent/dsh-browser-playwright.",
+  "description": "DeepSeek Harness browser profiles for agentic web testing: the dsh-browser bundle wired into the headless and web profiles, a demo app, and a per-profile headed-launch patcher.",
   "license": "MIT",
-  "workspaces": [
-    "packages/*"
-  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build:plugin": "npm run build --workspace @webtestagent/dsh-browser-playwright",
-    "typecheck:plugin": "npm run typecheck --workspace @webtestagent/dsh-browser-playwright",
-    "test:plugin": "npm run test:e2e --workspace @webtestagent/dsh-browser-playwright",
-    "manual:plugin": "npm run manual:challenge --workspace @webtestagent/dsh-browser-playwright",
-    "install:plugin": "node scripts/install-dsh-plugin.mjs"
+    "patch:headed": "node scripts/patch-dsh-browser-headed.mjs",
+    "serve:demo": "python3 -m http.server 4173 --directory demo-app --bind 127.0.0.1"
   }
 }

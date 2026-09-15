@@ -1,23 +1,38 @@
-# Web Test Agent (MVP)
+# WebTestAgent
 
-**Give it a URL and a plain-English instruction. It drives a real browser and tells you PASS or FAIL — with evidence you can watch.**
+**Point a DeepSeek Harness agent at a URL with a plain-English instruction; it drives a real
+browser and reports back.**
 
+This repo is the thin host layer for agentic web testing on top of
+[DeepSeek Harness](https://www.npmjs.com/package/@deepseek-ai/dsh). It ships no browser code
+of its own: the browser is the third-party **`dsh-browser`** bundle, wired into DSH profiles.
+What this repo owns is the configuration around it, the one piece of tooling `dsh-browser`
+cannot provide for itself, and a demo app worth pointing a run at.
+
+```mermaid
+flowchart LR
+    U[URL + instruction] --> R["DeepSeek Harness<br/>agent loop"]
+    R -->|"tool schemas"| L[DeepSeek<br/>tool-calling LLM]
+    L -->|"browser_click(selector=…)"| T["dsh-browser<br/>12 tools"]
+    T --> P[Playwright / Chromium]
+    P -->|"title, text, HTML, PNG"| T
+    T -->|observation| R
+    R --> A[(screenshots)]
 ```
-URL + instruction  →  agent loop  →  Playwright browser  →  PASS / FAIL + video + screenshots
-```
 
-This repo ships the **browser half** of that loop as a DeepSeek Harness bundle. The agent
-loop, session store, LLM transport and Web UI are the harness's; this repo owns
-everything below the tool boundary. It is deliberately narrow: one instruction in, one
-trustworthy verdict out.
+> **The browser plugin this repo used to ship was retired.** See
+> [Why the plugin was retired](#why-the-plugin-was-retired). The short version: it could not
+> coexist with `dsh-browser`, so one had to go, and `dsh-browser` won.
 
 ---
 
-## The one thing this MVP has to get right
+## What's here
 
-> A DeepSeek Harness agent can receive a URL + natural-language instruction and autonomously complete a 5–10 step workflow on a real website using Playwright, with a trustworthy PASS/FAIL result and recorded evidence.
-
-Everything below exists to serve that sentence.
+| Path | What it is |
+| --- | --- |
+| `dsh/web-browse-picker.patch.yml` | Overlay that makes the DSH web UI's workspace picker automatable. Without it, the picker is a **native OS dialog** — outside the page, so no browser automation can see or dismiss it, which makes the whole web UI untestable end to end. |
+| `scripts/patch-dsh-browser-headed.mjs` | Makes `dsh-browser` open a **visible** Chromium window, per profile. It hardcodes `headless: true` and exposes no config key, so patching the installed source is the only route short of forking. |
+| `demo-app/index.html` | A small Acme app with deliberately realistic failure modes, so a run can be tested against *rejections* and not only happy paths. |
 
 ---
 
@@ -25,313 +40,190 @@ Everything below exists to serve that sentence.
 
 ```bash
 npm install
-npx playwright install chromium
+npm run serve:demo          # demo app on http://127.0.0.1:4173/
 ```
 
-### As a DeepSeek Harness plugin
-
-The agent loop, session store, LLM transport, retry, tool registry and Web UI all
-belong to DeepSeek Harness. This repo contributes the browser as a bundle that
-installs into a DSH profile, where the harness owns the loop:
+Then, **from a different directory**, run a task:
 
 ```bash
-npm run build:plugin
-npm run install:plugin           # packs and installs into the headless + web profiles
-npx @deepseek-ai/dsh@0.1.5-rc.2 --profile headless "Sign in at http://127.0.0.1:3000/demo/ and assert the Projects page appears."
+DEEPSEEK_API_KEY=$(grep -m1 '^DEEPSEEK_API_KEY=' /path/to/this/repo/.env | cut -d= -f2-) \
+  dsh --profile headless "Open http://127.0.0.1:4173/ and tell me the exact page title."
 ```
 
-`plugin add` needs `pnpm` on `PATH`, and `dsh` refuses to boot in a directory whose
-`.env` sets `DEEPSEEK_BASE_URL` — so run it from somewhere else. See the
-[plugin README](packages/dsh-browser-playwright/README.md) for the tool list,
-configuration, and the cordis details the bundle depends on.
+Two things that will bite you otherwise:
 
-### Both profiles verified
-
-| Path | How it was proven |
-| --- | --- |
-| `headless` | `--profile headless "<task>"` runs one task against the real model, prints the verdict and exits. No UI, no workspace. |
-| `web` | Workspace added through the in-page directory browser, prompt sent from the chat box. 6 steps, 6s, 75.3K tokens → `ASSERTION PASSED`. |
-
-The web profile needs one overlay to be automatable at all: its workspace picker
-defaults to a **native OS folder dialog**, which lives outside the page. Appending
-`--patch ./dsh/web-browse-picker.patch.yml` swaps it for the in-page tree. That file
-carries the details, including the two cordis patch semantics that make it work.
+- **`dsh` refuses to boot in a directory whose `.env` sets `DEEPSEEK_BASE_URL`.** It is an
+  anti-hijack fence, and this repo is exactly such a directory. `cd /tmp` first.
+- **`dsh plugin …` shells out to a bare `dsh` and a bare `pnpm`.** Both must be on `PATH`, or
+  you get `sh: dsh: command not found` from what looks like a working command.
 
 ---
 
-## Architecture
+## The profiles
 
-```mermaid
-flowchart LR
-    U[URL + instruction] --> R["DeepSeek Harness<br/>agent loop"]
-    R -->|"task + tool schemas"| L[DeepSeek<br/>tool-calling LLM]
-    L -->|"tool call: browser_click(ref=e4)"| T[Browser tool registry<br/>semantic tools]
-    T --> S[Browser session<br/>one context per session]
-    S --> P[Playwright / Chromium]
-    P -->|"ARIA snapshot + refs"| T
-    T -->|"observation text"| R
-    R --> A[(artifacts/<br/>video.webm, screenshots)]
-    R --> V{verdict}
-```
+Profiles live in `~/.dsh/profiles/<name>/`. On this machine:
 
-The important seam is between **the agent loop** and **the browser plugin**. The loop
-is DSH's; this repo owns everything below the tool boundary:
-
-```
-packages/dsh-browser-playwright/src/tools/*    → the browser plugin (what the agent may do)
-packages/dsh-browser-playwright/src/internal/* → refs, snapshot, session (Playwright)
-```
-
-Nothing above the tool boundary knows about Playwright, and the plugin knows nothing about
-prompts or verdicts. That is the seam the DSH bundle slots into (see
-[Relationship to DeepSeek Harness](#relationship-to-deepseek-harness)).
-
-### Two agents, on purpose
-
-| | **Browser Agent** | **Test Agent** |
+| Profile | Bundles | Browser |
 | --- | --- | --- |
-| Job | Drive the page | Decide if the workflow passed |
-| Sees | ARIA snapshot, refs, tool results | Instruction, action log, assertions |
-| Owns | Refs, sessions, page state | Verdict, evidence, artifacts |
+| `headless` | `dsh-base`, `dsh-headless`, `dsh-browser` | headless (stock) |
+| `web` | `dsh-base`, `dsh-web-app`, `dsh-browser` | **headed**, via the patcher below |
 
-They are separate because "the click worked" and "the test passed" are different claims. Collapsing them is how products emit false PASSes.
+Both profile patch layers (`~/.dsh/profiles/<name>/cordis.patch.yml`) are intentionally empty:
 
----
-
-## How the agent sees the page
-
-The model **never** gets raw Playwright, raw HTML, or a JavaScript-evaluation tool. It gets a text snapshot with opaque element handles:
-
-```
-URL: http://localhost:3000/demo/
-TITLE: Acme Demo App
-REFS: generation 3, 11 interactive element(s)
-
-INTERACTIVE ELEMENTS
-[e1] textbox "Email" [testid=email-input type=email placeholder="you@example.com"]
-[e2] textbox "Password" [testid=password-input type=password]
-[e3] checkbox "Remember me" [testid=remember-checkbox type=checkbox unchecked]
-[e4] button "Sign in" [testid=login-button]
-...
-
-PAGE OUTLINE
-- heading "Sign in to Acme" [level=1]
-- textbox "Email": /placeholder: you@example.com
-- button "Sign in"
+```yaml
+[]
 ```
 
-Properties:
+Keep it an explicit `[]`. A comments-only patch layer parses as `null`, and dsh then refuses to
+boot with `overlay … must be a top-level YAML array of loader patch entries`.
 
-- **Visibility first.** Visible elements are listed first with `not-visible` marked, so the agent can tell a hidden panel from an absent one.
-- **Bounded.** Capped at 150 elements and 5000 outline characters, so a huge page can't blow the context window.
-- **`data-testid` aware.** Test ids are surfaced and preferred when building locators.
-- **Generation counter.** Every snapshot bumps a generation. Acting on a stale ref fails *with a recovery hint* listing valid refs, instead of silently clicking the wrong thing:
-  ```
-  ref "e4" is stale (snapshot generation 3, refs were created in generation 1).
-  Take a fresh snapshot and use the current refs: e1, e2, ...
-  ```
+Manage the browser bundle with:
 
-### Locator priority
-
-`data-testid` → `getByRole(role, { name, exact })` → `getByPlaceholder` → structural CSS path.
-
-Role + accessible name is what a real user perceives, so it survives cosmetic markup churn. Raw CSS paths are the last resort because they break on every refactor.
+```bash
+dsh plugin --profile headless add dsh-browser
+dsh plugin --profile headless remove dsh-browser
+```
 
 ---
 
 ## The tools the model may call
 
-| Tool | Purpose |
+All twelve come from `dsh-browser`, and every selector-taking tool wants **CSS**, not a
+semantic locator.
+
+| Tool | Does |
 | --- | --- |
-| `browser_open` | Navigate to a URL |
-| `browser_snapshot` | Re-read the page and get fresh refs |
-| `browser_click` | Click an element (auto-scrolls into view) |
-| `browser_fill` | Type into a field |
-| `browser_press` | Press a key, optionally on an element (Enter to submit) |
-| `browser_select` | Choose an option in a `<select>` |
-| `browser_wait` | Wait for time, text, or an element state |
-| `browser_screenshot` | Capture evidence |
-| `browser_assert` | **Verify a claim** — url/title contains, text present, element state |
-| `browser_wait_for_human` | Park the run for a person to clear a challenge (visible-window profiles only) |
+| `browser_open` | Open (or reuse) the browser, optionally navigating to a URL. Returns title + URL. |
+| `browser_navigate` | Navigate the current page to a URL and wait for load. |
+| `browser_click` | Click the element matching a CSS selector. |
+| `browser_type` | Type into an input matching a CSS selector; optionally press Enter. |
+| `browser_select` | Select option value(s) in a `<select>`. |
+| `browser_get_text` | Visible text of the first match, or the whole body. |
+| `browser_get_html` | Outer HTML of the first match, or the whole document (default cap 20000 chars). |
+| `browser_eval` | Evaluate a JavaScript expression in the page, JSON-serialised. |
+| `browser_wait` | Wait **milliseconds** (1–60000). That is all it does. |
+| `browser_screenshot` | PNG, by default `<workspace>/browser-screenshots/<timestamp>.png`; view it with `read_image`. |
+| `browser_install` | Explain or attempt `npx playwright install chromium` after a launch failure. |
+| `browser_close` | Close the browser and release resources. |
 
-That's the whole surface. There is no `evaluate_javascript` and no generic "do anything" escape hatch — every capability is an intent a reviewer can reason about.
+Three sharp edges worth knowing before you debug a confusing run:
 
-`browser_assert` is the load-bearing tool: it returns `ASSERTION PASSED` or `ASSERTION FAILED` and **does not throw**, so the model can retry with a better assertion instead of the run derailing. Its `presentationMeta` is what the harness surfaces as the verdict — the native `finish_test` tool was dropped in the port.
-
-The `headless` profile is `humanInTheLoop: false`, so `browser_wait_for_human` hard-refuses there; the challenge banner tells the agent to report the run as blocked instead.
-
----
-
-## Why the verdict is trustworthy
-
-1. **A PASS requires a passed assertion.** Clicking a button is not evidence; observing the result is. `browser_assert` returns the verdict, and the harness surfaces it.
-2. **Asymmetric cost of being wrong.** A false PASS is far worse than a false FAIL. A testing tool that reports green on a broken app is worse than useless — which is why **false PASS rate** stays the metric that matters most.
-3. **Evidence from the first commit.** Every run records video and screenshots under the configured artifacts dir. Trust comes from being able to check, not from being asked to.
-4. **Refs, not narrated work.** Acting on a stale ref fails with a recovery hint listing the valid refs, so a model cannot silently click the wrong thing after a re-render.
-5. **No refusals are faked.** The tool boundary has no credential store and no CAPTCHA solver; a blocked run is reported as a blocker, not a PASS.
+- **`browser_eval` takes an expression, not a function body** — its description claims both,
+  and that is wrong. It compiles `Function('"use strict"; return (' + expression + ')')()`, so
+  a bare arrow function evaluates to the function object, which serialises to `null`.
+- **`browser_wait` cannot wait for anything but time.** There is no "wait for text" or "wait
+  for element state", so polling a slow page means guessing a duration.
+- **Screenshots default into `<workspace>/browser-screenshots/`**, which litters whatever
+  workspace a run is pointed at.
 
 ---
 
-## Project layout
+## Headed browsers
 
-```
-packages/
-  dsh-browser-playwright/   DeepSeek Harness bundle (see its own README)
-    src/index.ts              bundle entry: ctx.browser + the tool fiber
-    src/playwright.ts         Playwright provider behind ctx.browser
-    src/config.ts             Row config → resolved options
-    src/service.ts            The ctx.browser contract (Temporal-free types)
-    src/tool.ts               defineTool helper for the browser_* tools
-    src/internal/             refs, snapshot, session
-    src/tools/                observe, interact, assert
-    test/e2e.mjs              Offline checks + a real Chromium login flow
-    cordis.patch.yml          The one row this bundle inserts
-dsh/
-  web-browse-picker.patch.yml  Overlay that makes the DSH web UI automatable
-  human-in-the-loop.patch.yml  Overlay opening a real window for browser_wait_for_human
-scripts/
-  install-dsh-plugin.mjs     Build + pack + install into DSH profiles, then verify
-demo-app/index.html     Acme demo app, kept as a manual target (see below)
+`dsh-browser` hardcodes `headless: true` (`lib/browser-manager.js`) and its config schema has no
+`headless` key, so neither its own `cordis.patch.yml` nor a `--patch` overlay can reach it. The
+`web` profile is the attended one — a visible window is the entire point of it — so this repo
+patches the installed file:
+
+```bash
+npm run patch:headed -- --profile web --verify    # apply, then prove a window opened
+npm run patch:headed -- --profile web --revert    # back to stock headless
+DSH_BROWSER_HEADED=0 dsh --profile web "…"        # or just headless for one run
 ```
 
-Everything runnable lives in `packages/dsh-browser-playwright`. The repo root only hosts
-the workspace, the patch overlays and the installer. The former native agent tree
-(`src/`) — loop, LLM client, prompt, refs/snapshot prototype, HTTP server, run console and
-benchmark — has been removed; its content is recoverable from git history.
+`--verify` launches through the patched manager and diffs `ps` before/after, inspecting **only
+the processes it caused to appear** — a machine with Chrome already open would otherwise make
+the check pass or fail for reasons that have nothing to do with the patch. Only the main
+process carries `--headless`, so it asserts "none of ours", never "all of ours".
 
----
-
-## The interface
-
-The run console is DeepSeek Harness's own Web UI (`--profile web`), which drives this
-plugin's tools; `--profile headless` is the unattended equivalent. There is no bespoke
-server or UI in this repo any more.
+> **Any `pnpm install` in a profile silently reverts this**, including `dsh plugin add/remove`,
+> because it restores the pristine registry copy. Re-run the patcher afterwards — it is
+> idempotent, and it fails loudly if upstream's code changed shape rather than patching blindly.
 
 ---
 
 ## The demo app
 
-`demo-app/index.html` is a small app with deliberately realistic failure modes, so a run can test *rejections* and not just happy paths:
+`demo-app/index.html` — a small Acme app with deliberately realistic failure modes:
 
 - login with email validation and a wrong-credential error
 - projects panel with empty-name and duplicate-name rejection
 - settings panel with a persisted `<select>`
-- simulated 250ms latency (so races are real)
-- state in `localStorage`, isolated per run by using a fresh `BrowserContext`
+- simulated 250 ms latency, so races are real
+- state in `localStorage`
 
-It has **no search box and no delete button** — exactly the kind of check that should come back FAIL. A testing tool must be able to say "no".
-
-It is kept as a realistic manual target. It is **not** wired to an automated runner: the
-scenario corpus that used it was part of the removed native agent tree and is recoverable
-from git history. Serve it with any static server, e.g.
-`npx serve demo-app` — or just open the file — and point a DSH run at it.
+It has **no search box and no delete button** — exactly the kind of claim that should come back
+negative. A testing tool that cannot say "not found" is not testing anything.
 
 ---
 
-## Offline validation (no API key needed)
+## Driving the DSH web UI
+
+`--profile web` serves the harness's own Web UI. Its "add workspace" flow defaults to that
+native OS folder dialog, so append the overlay:
 
 ```bash
-npm run test:plugin               # the DSH bundle: offline checks + real Chromium
+dsh --profile web --patch /absolute/path/to/dsh/web-browse-picker.patch.yml --no-open --port 3099
 ```
 
-`test:plugin` needs nothing but Chromium — it builds the DSH bundle, registers its tools
-against a stub harness, and drives a real Chromium through a full login flow, asserting
-both the passing *and* the failing path, without a model or an API key.
+Use an **absolute** path — `--patch` is resolved against the shell's working directory. The
+file itself documents the two cordis patch semantics it depends on: `name` on a non-insert
+patch is a *guard*, not a setter, and a row cannot be re-pointed at another module, so the
+native picker is disabled and the in-page picker inserted under new ids.
 
 ---
 
-## Benchmark
+## Why the plugin was retired
 
-Not ported. The native loop, the offline drivers and the benchmark harness were all
-removed with `src/`; the 8-scenario corpus (6 pass, 2 negative) is recoverable from git
-history. The metric that matters most is unchanged — **false PASS rate**, a PASS on a
-scenario that should FAIL. Re-pointing a benchmark at `dsh --profile headless` is open
-work (see [Roadmap](#roadmap)).
+This repo used to ship `@webtestagent/dsh-browser-playwright`: ten tools, ARIA snapshots with
+stable element refs, generation-based ref invalidation, `browser_assert`, one `BrowserContext`
+per run, challenge detection, and a human-in-the-loop handoff. `dsh-browser` offered a wider
+tool surface — `browser_eval`, `browser_get_text`, `browser_get_html` — so the two were
+compared head to head and the swap was made.
 
----
+They **cannot coexist**, and the reason is worth recording, because the obvious compromise —
+"mount both and delete the overlapping tools" — does not work:
 
-## Design decisions worth defending
+1. **Duplicate tool names are fatal, not last-wins.** Five collided: `browser_open`,
+   `browser_click`, `browser_select`, `browser_screenshot`, `browser_wait`. In
+   `@deepseek-ai/dsh-scope`, `NamedEntries.insert()` is
+   `if (data.has(name)) throw this.duplicateError(name)`. Mounting both made *all* of the old
+   plugin's tools vanish — not merely the five that collided — while the boot still exited `0`
+   with **no error text anywhere**. A silent failure with a plausible-looking success.
 
-**Refs are invalidated on every mutation.** Convenient? No. Correct? Yes — otherwise the agent clicks a stale node after a re-render and the verdict is quietly wrong.
+2. **Each plugin owned its own Chromium.** Ours launched one
+   (`chromium.launch()` / `chromium.launchPersistentContext`); `dsh-browser` launches its own,
+   with its own page. So even with the name collision avoided, a surviving `browser_snapshot`
+   would have read *our* blank page while `browser_click` drove *theirs* — split brain, and
+   worse than either plugin alone because the results look plausible. The tool sets are not
+   interchangeable across that boundary; one engine has to own all of them.
 
-**One `BrowserContext` per session.** Isolated cookies, storage, and cache, so runs can't contaminate each other. (`persistent: true` deliberately trades that isolation for one shared on-disk profile — see the plugin README.)
-
-**Video from day one.** It is the single most persuasive piece of evidence and it is nearly free (`recordVideo` on the context). Runs are also the only way to debug an agent flake after the fact.
-
-**`page.evaluate()` functions need a `__name` polyfill.** esbuild/tsc can rewrite every function they compile with a `__name(fn, "x")` keepNames helper; Playwright serialises the function *source* into the browser, where that helper doesn't exist, so `page.evaluate()` dies with `ReferenceError: __name is not defined`. The plugin registers `globalThis.__name ||= (fn) => fn` at profile-launch time (`INIT_SCRIPT_POLYFILL`), which makes transpiled evaluate code work in dev *and* in a build. Don't remove it — every `page.evaluate` in the package depends on it.
-
-**Never swallow observation errors.** An early `.catch(() => [])` in the snapshot collector turned "the entire element collector is broken" into "this page has no elements". Observation failures must be loud.
-
----
-
-## Known limitations
-
-Honest list, because an MVP that pretends otherwise is a liability:
-
-- **No self-healing.** A changed `data-testid` will fail the run; the agent may recover by re-snapshotting, or may not.
-- **Login is hard-coded in the instruction.** Credentials are passed as text in the prompt — there is no credential store, and none should exist until there's a secure one.
-- **CAPTCHAs, MFA, and anti-bot walls stop the agent.** By design; it reports the blocker instead of trying to defeat it.
-- **Iframes and new tabs are not handled.** Ref collection inspects the main frame only.
-- **The 150-element cap** can hide what the agent needs on very dense pages.
-- **No CI integration.** `dsh --profile headless` exits with a usable status code, but there is no GitHub Action, no test-code generation, no scheduling.
-- **Cost is unmanaged.** No budget cap or token accounting beyond reporting usage per run.
+Hence all-or-nothing per profile, and `dsh-browser` won.
 
 ---
 
-## Relationship to DeepSeek Harness
+## What this cost
 
-The brief was to build a thin browser layer on top of DeepSeek Harness. An earlier MVP implemented the loop natively against the DeepSeek chat API, to prove the Playwright foundation, the snapshot engine and the actions *before* letting a model drive them. That native loop has since been removed; what remains is the browser layer, shipped as a **real DSH bundle** in [`packages/dsh-browser-playwright`](packages/dsh-browser-playwright/README.md). The refs, snapshot engine and locator strategy are exposed as ten `defineTool` tools behind a `ctx.browser` service:
+Honest list. The swap bought three tools and gave up more than three:
 
-```
-~/.dsh/profiles/<profile>/dsh.profile.bundles
-  → @webtestagent/dsh-browser-playwright
-      → cordis.patch.yml            inserts one row
-          → browser-playwright      mounts ctx.browser (Playwright provider)
-              → browser-tools       registers the ten browser_* tools
-```
-
-**The harness needs no changes.** It supplies the agent loop, session store, LLM transport, retry, tool registry and UI; this package supplies only the browser. Verified against DSH `0.1.5-rc.2` — offline checks against a stub harness and real Chromium, then real agent runs in *both* the `headless` and `web` profiles that signed into the demo app and returned a PASS with assertion evidence.
-
-| Concern | Owner |
+| Lost | Consequence |
 | --- | --- |
-| Agent loop, session store, LLM transport, retry, tool registry, Web UI | DSH |
-| Prompt + verdict presentation | DSH (`presentationMeta` on assertions) |
-| Browser session, refs, snapshot engine, locator strategy | this package |
-| Tools | this package — 10 `browser_*` (incl. `browser_wait_for_human`; there is no `finish_test`) |
-| Evidence artifacts | screenshots + `.webm` video under the configured dir |
+| `browser_assert` | **The biggest loss.** Nothing returns a verdict any more, so no step is a machine-checkable PASS/FAIL. The agent reports what it observed; a human decides. |
+| ARIA snapshots + refs | Tools take CSS selectors again. A changed `data-testid` or an unannounced re-render can silently retarget a click. |
+| Per-session isolation | `dsh-browser` is a singleton browser with a single `currentPage`. Runs share cookies and storage, so they can contaminate each other. |
+| Challenge detection | No structured "this is a bot wall" signal; a block looks like any other failure. |
+| `browser_wait_for_human` + `humanInTheLoop` | **The `web` profile's entire human-in-the-loop story is gone.** A person can still watch and click the visible window, but the agent can no longer hand off to them or park a run. This is inherent to `dsh-browser`, not patchable around. |
+| Rich `browser_wait` | Time-only now; no waiting on text or element state. |
+| Recorded video | No `recordVideo`; screenshots only, into `<workspace>/browser-screenshots/`. |
 
-The design carried over from the native prototype: refs over selectors, visibility-first bounded snapshots, generation-based invalidation, and an assertion that **returns a verdict instead of throwing**. The port also fixed two real gaps that only surfaced once a model was driving — `browser_assert` gained a `selector` target for non-interactive elements, and `ref` + `selector` together became an explicit hard error.
-
----
-
-## Roadmap
-
-| Phase | Deliverable | Status |
-| --- | --- | --- |
-| 0 | Workspace, TypeScript setup, env config | ✅ |
-| 1 | Playwright foundation — session, screenshots, video | ✅ → in the DSH bundle |
-| 2 | Snapshot engine — element collection, refs, invalidation | ✅ → in the DSH bundle |
-| 3 | Action tools — click, fill, select, press, wait, assert | ✅ → in the DSH bundle |
-| 4 | Test runner — prompt, loop, verification, artifacts | ❌ removed; the harness owns the loop |
-| 5 | Demo app + 8 scenarios (incl. 2 negative) | 🟡 `demo-app/` kept; the 8 scenarios were removed with the native tree (git history) |
-| 6 | UI + SSE API + artifact browsing | ❌ removed; the harness's own Web UI replaces it |
-| 7 | Benchmark — success rate + **false PASS rate** | ❌ removed; not ported |
-| 8 | End-to-end DeepSeek run | ✅ via the DSH plugin — see below |
-| 9 | DSH bundle — 10 tools, installable into a profile | ✅ `headless` + `web` |
-| 10 | Saved test suites — replay a name, not a prompt | ⬜ |
-| 11 | CI — exit codes, GitHub Action, regression history | ⬜ |
-
-Phase 8 moved to the harness: `--profile headless "<task>"` runs one task against the
-real model, prints the result and exits, which is a far better verification vehicle
-than a bespoke loop. The native runner and its offline `smoke`/`dry-run` drivers were
-therefore removed.
+The retired plugin is recoverable from git history — `75f5cf9` is the v0.4.0 commit — as is the
+native agent tree that preceded it.
 
 ---
 
-## Explicitly out of scope for this MVP
+## Verified against
 
-Kept out on purpose, to protect the one milestone:
-
-GitHub/PR integration · CI/CD pipelines · generated test code repos · multi-user auth or SaaS · distributed browser grids · raw CDP access · autonomous credential discovery · visual/screenshot reasoning.
-
-Each is a way to spend the MVP's budget on something other than a trustworthy verdict.
+DSH `0.1.5-rc.2`, `dsh-browser` `0.1.0`, Node 24, macOS. The `headless` profile was checked end
+to end rather than by config dump: twelve `browser_*` tools present, and `browser_open` against
+the demo app returning its real title. The headed patch was verified by the `ps` diff described
+above: 9 processes spawned, 0 carrying `--headless`.

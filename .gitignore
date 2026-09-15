@@ -1,9 +1,7 @@
 node_modules/
 dist/
 artifacts/
-.dsh-browser-artifacts/
-packages/*/lib/
-packages/*/test/tmp/
+browser-screenshots/
 *.tgz
 .env
 *.log
