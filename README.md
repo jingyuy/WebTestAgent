@@ -31,7 +31,7 @@ flowchart LR
 | Path | What it is |
 | --- | --- |
 | `dsh/web-browse-picker.patch.yml` | Overlay that makes the DSH web UI's workspace picker automatable. Without it, the picker is a **native OS dialog** — outside the page, so no browser automation can see or dismiss it, which makes the whole web UI untestable end to end. |
-| `scripts/patch-dsh-browser-headed.mjs` | Makes `dsh-browser` open a **visible** Chromium window, per profile. It hardcodes `headless: true` and exposes no config key, so patching the installed source is the only route short of forking. |
+| `scripts/patch-dsh-browser.mjs` | Two source edits `dsh-browser` cannot be configured into: stop it advertising `navigator.webdriver`, and let it open a **visible** window. Per profile, idempotent, with `--verify` and `--revert`. |
 | `demo-app/index.html` | A small Acme app with deliberately realistic failure modes, so a run can be tested against *rejections* and not only happy paths. |
 
 ---
@@ -118,27 +118,54 @@ Three sharp edges worth knowing before you debug a confusing run:
 
 ---
 
-## Headed browsers
+## Two things dsh-browser can't be configured to do
 
-`dsh-browser` hardcodes `headless: true` (`lib/browser-manager.js`) and its config schema has no
-`headless` key, so neither its own `cordis.patch.yml` nor a `--patch` overlay can reach it. The
-`web` profile is the attended one — a visible window is the entire point of it — so this repo
-patches the installed file:
+Both live in `scripts/patch-dsh-browser.mjs`, for the same reason: the package hardcodes the
+value and its config schema has no key for it, so neither its own `cordis.patch.yml` nor a
+`--patch` overlay can reach either one. Editing the installed file is the only route short of
+forking.
+
+### 1. Stop advertising `navigator.webdriver` (both profiles)
+
+`dsh-browser` launches with `args: ['--no-sandbox', '--disable-dev-shm-usage']` and nothing else.
+Without `--disable-blink-features=AutomationControlled`, Blink leaves
+**`navigator.webdriver === true`** — the most commonly checked automation signal on the web, and
+often the first line of a bot-detection script.
+
+The retired plugin passed that flag, which is why the swap to `dsh-browser` started getting
+challenged on sites the old plugin handled. This edit restores parity: it makes the browser stop
+*volunteering* that it is automated. It is not a stealth overhaul — the user agent, headless
+header, and everything else are untouched.
+
+### 2. Open a real window (the `web` profile)
+
+`launch()` hardcodes `headless: true`, and the `web` profile is the attended one where a visible
+window is the entire point. So the headed edit rewrites that line to read from an environment
+default:
 
 ```bash
-npm run patch:headed -- --profile web --verify    # apply, then prove a window opened
-npm run patch:headed -- --profile web --revert    # back to stock headless
-DSH_BROWSER_HEADED=0 dsh --profile web "…"        # or just headless for one run
+npm run patch:browser -- --profile headless          # args edit only; headless stays headless
+npm run patch:browser -- --profile web --headed      # args + headed
+npm run patch:browser -- --profile web --headed --verify
+npm run patch:browser -- --profile web --revert      # back to shipped behaviour
+DSH_BROWSER_HEADED=0 dsh --profile web "…"           # or just headless for one run
 ```
 
-`--verify` launches through the patched manager and diffs `ps` before/after, inspecting **only
-the processes it caused to appear** — a machine with Chrome already open would otherwise make
-the check pass or fail for reasons that have nothing to do with the patch. Only the main
-process carries `--headless`, so it asserts "none of ours", never "all of ours".
+The `headless` profile is deliberately patched **without** `--headed`, so it genuinely is
+headless rather than merely pretending to be.
 
-> **Any `pnpm install` in a profile silently reverts this**, including `dsh plugin add/remove`,
-> because it restores the pristine registry copy. Re-run the patcher afterwards — it is
-> idempotent, and it fails loudly if upstream's code changed shape rather than patching blindly.
+### On `--verify`
+
+One launch, two assertions, and a non-zero exit if either fails. It reads
+`navigator.webdriver` from the page, then diffs `ps` before/after to inspect **only the processes
+it caused to appear** — a machine with Chrome already open would otherwise make the check pass
+or fail for reasons having nothing to do with the patch. Only the main process carries
+`--headless`, so it asserts "none of ours", never "all of ours".
+
+> **Any `pnpm install` in a profile silently reverts both edits**, including `dsh plugin
+> add/remove`, because it restores the pristine registry copy. Re-run the patcher afterwards —
+> it is idempotent, and it fails loudly if upstream's code changed shape rather than patching
+> blindly.
 
 ---
 

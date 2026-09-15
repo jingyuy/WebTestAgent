@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "patch:headed": "node scripts/patch-dsh-browser-headed.mjs",
+    "patch:browser": "node scripts/patch-dsh-browser.mjs",
     "serve:demo": "python3 -m http.server 4173 --directory demo-app --bind 127.0.0.1"
   }
 }
