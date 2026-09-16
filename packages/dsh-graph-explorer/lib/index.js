@@ -40,6 +40,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION } from './capture.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
+import {
+    CAPABILITY_KINDS,
+    CAPABILITY_NAME_PATTERN,
+    DETECTION_TYPES,
+    EFFECT_REQUIRED,
+    EFFECT_TYPES,
+    LIST_OPERATIONS,
+    SEVERITIES,
+    vocabularyNotes,
+} from './schema.js';
 import { createRun, normalizeRunDirName, RUN_DIR_NAME, RUN_DIR_PATTERN } from './session.js';
 
 export const name = 'graph-explorer';
@@ -68,6 +78,7 @@ const self = (() => {
 
 export const Config = Schema.object({
     observeTool: Schema.string().default('graph_observe'),
+    transitionTool: Schema.string().default('graph_transition'),
     // The pattern declares the contract so a config error is caught while the
     // profile is still booting, alongside every other bad setting. The runtime
     // check in `apply` is not a duplicate of it: this declares *what is valid*,
@@ -97,19 +108,7 @@ const OBSERVED_TOOLS = new Set([
     'browser_wait',
 ]);
 
-/** Assertion kinds the graph schema permits in `detection`. */
-const DETECTION_TYPES = new Set([
-    'state',
-    'url',
-    'element_state',
-    'element_value',
-    'value',
-    'api',
-    'effect',
-    'message',
-    'absence',
-    'custom',
-]);
+/** Assertion kinds the graph schema permits — see `schema.js` for the source of truth. */
 
 const workspaceCwd = (exec) => exec?.agent?.session?.header?.cwd ?? process.cwd();
 
@@ -164,8 +163,58 @@ const elementNames = (capture) => (capture?.interactive ?? [])
     .map((item) => (item.name ? item.role + ':' + item.name : item.role + ':' + item.selector))
     .filter(Boolean);
 
-/** Bounded text-diff of two captures: what the action actually changed. */
-function diffCaptures(before, after) {
+/**
+ * The mutable part of each interactive element, keyed exactly like `elementNames`.
+ *
+ * An element's *identity* is its role and name; its *state* is the value inside it,
+ * whether it is checked, and whether it is disabled. The capture has always recorded
+ * those, but the diff never looked at them — so filling in a field, which is the entire
+ * content of a form step, came back as "nothing changed" and was blamed on a raced
+ * capture. That is a false diagnosis of a real step, and it sends the model hunting for
+ * a race that is not there.
+ */
+const elementStates = (capture) => {
+    const states = new Map();
+    for (const item of capture?.interactive ?? []) {
+        const key = item.name ? item.role + ':' + item.name : item.role + ':' + item.selector;
+        if (!key) continue;
+        const bits = [];
+        if (item.value !== undefined) bits.push('value=' + JSON.stringify(item.value));
+        if (item.checked !== undefined) bits.push('checked=' + (item.checked === true));
+        if (item.disabled === true) bits.push('disabled');
+        states.set(key, bits.join(' '));
+    }
+    return states;
+};
+
+/**
+ * Application storage, which is state the page owns and a step can change by itself.
+ *
+ * Only changed keys are reported, and a removed key reports as `null` so that "unset"
+ * and "set to the empty string" stay distinguishable. Bounded to five keys: this is a
+ * hint for the model, not a dump.
+ */
+const diffStorage = (before, after) => {
+    const was = before?.storage ?? {};
+    const now = after?.storage ?? {};
+    const changed = {};
+    for (const [key, value] of Object.entries(now)) {
+        if (was[key] !== value) changed[key] = value;
+    }
+    for (const key of Object.keys(was)) {
+        if (!(key in now)) changed[key] = null;
+    }
+    const entries = Object.entries(changed);
+    return entries.length ? Object.fromEntries(entries.slice(0, 5)) : null;
+};
+
+/**
+ * Bounded text-diff of two captures: what the action actually changed.
+ *
+ * Exported (with `crossCheckEffects`) so the machinery's side of the comparison can be
+ * tested against captures directly, without a browser and without a harness.
+ */
+export function diffCaptures(before, after) {
     if (!before || !after) return null;
     const beforeNames = new Set(elementNames(before));
     const afterNames = new Set(elementNames(after));
@@ -178,6 +227,18 @@ function diffCaptures(before, after) {
     const disappeared = [...beforeNames].filter((item) => !afterNames.has(item)).slice(0, 20);
     if (appeared.length) diff.appeared = appeared;
     if (disappeared.length) diff.disappeared = disappeared;
+    const beforeStates = elementStates(before);
+    const changed = [];
+    for (const [key, state] of elementStates(after)) {
+        // An element that is not in the before capture did not change, it appeared.
+        if (!beforeStates.has(key)) continue;
+        const was = beforeStates.get(key);
+        if (was === state) continue;
+        changed.push(`${key}: ${was || '(none)'} → ${state || '(none)'}`);
+    }
+    if (changed.length) diff.changed = changed.slice(0, 20);
+    const storage = diffStorage(before, after);
+    if (storage) diff.storage = storage;
     const newMessages = [...afterStatus].filter((item) => !beforeStatus.has(item)).slice(0, 10);
     if (newMessages.length) diff.status = newMessages;
     const newErrors = (after.page_errors ?? []).slice(0, 10);
@@ -187,8 +248,133 @@ function diffCaptures(before, after) {
     return Object.keys(diff).length ? diff : null;
 }
 
+/** The user-facing messages a capture saw, as plain strings. */
+const statusTexts = (capture) => (capture?.status ?? [])
+    .map((entry) => entry?.text)
+    .filter((text) => typeof text === 'string' && text);
+
+/**
+ * The roles that make an element something you can act on.
+ *
+ * A diff lists appearances by `role:name`, and a list that grew adds plain text nodes rather
+ * than controls. Keeping only controls is what separates "the same screen with one more
+ * item in it" — a legitimate effect on a stable state — from "a different screen", which is
+ * a state identity that does not hold.
+ */
+const CONTROL_ROLES = new Set([
+    'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'listbox', 'slider', 'switch',
+    'menuitem', 'tab', 'searchbox',
+]);
+
+const controls = (entries) => (entries ?? [])
+    .filter((entry) => CONTROL_ROLES.has(String(entry).split(':')[0]));
+
+/**
+ * Put the model's account of a step next to the machinery's account of it.
+ *
+ * This is the whole reason a transition is recorded by a tool rather than written
+ * by the model: the effects are a *claim*, the capture is a *fact*, and the value is
+ * in them being separable. Neither is treated as authoritative — the model can see
+ * what a DOM diff cannot (that a value changed inside an input, that a message is a
+ * response to a rejected coupon), and the capture can see what the model cannot (that
+ * the URL did not actually change).
+ *
+ * `errors` are self-contradictions inside one record, which are refused: the effect
+ * says the graph entered one state while `to_state` says another, and no amount of
+ * evidence makes that true.
+ *
+ * `warnings` are disagreements, which are reported and recorded. A warning that fires
+ * wrongly costs a sentence of the model's attention; a silent disagreement becomes a
+ * graph assertion with nothing behind it.
+ *
+ * Exported (with `diffCaptures`) so the cross-check can be tested against captures
+ * directly, without a browser and without a harness: this is the one piece of the tool
+ * whose whole job is being right about a disagreement, so it should not be the one
+ * piece that is only exercised by a live run.
+ */
+export function crossCheckEffects({ effects, before, after, fromState, toState, observedChange }) {
+    const errors = [];
+    const warnings = [];
+    const seenMessages = new Set([...statusTexts(before), ...statusTexts(after)]);
+    const urlChanged = Boolean(before && after && before.url !== after.url);
+
+    for (const effect of effects ?? []) {
+        if (!effect || typeof effect !== 'object') continue;
+
+        if (effect.type === 'state_entered' && effect.to && effect.to !== toState) {
+            errors.push(
+                `effect state_entered says the app entered ${JSON.stringify(effect.to)} while to_state is `
+                + `${JSON.stringify(toState)}. A transition cannot end in two places — fix whichever of the two is wrong.`,
+            );
+        }
+
+        if ((effect.type === 'navigation' || effect.type === 'url_changed') && effect.observed === true && !urlChanged) {
+            warnings.push({
+                kind: 'claimed_navigation_not_observed',
+                effect: effect.type,
+                detail: `The effect is marked observed, but the URL was unchanged between the two captures (${before?.url ?? 'unknown'}).`,
+            });
+        }
+
+        if (effect.type === 'message' && effect.message && !seenMessages.has(effect.message)) {
+            warnings.push({
+                kind: 'claimed_message_not_seen',
+                message: effect.message,
+                detail: 'No capture in this step carried that text. Quote the app\'s own words, or drop the effect.',
+            });
+        }
+
+        if (effect.type === 'request' && !(after?.network ?? []).length) {
+            warnings.push({
+                kind: 'claimed_request_not_observed',
+                detail: 'No request was seen in this step. Legitimate for a request that loaded a whole new document (those are not observed yet), but not for a same-document action.',
+            });
+        }
+    }
+
+    const claimsNavigation = (effects ?? []).some(
+        (effect) => effect && (effect.type === 'navigation' || effect.type === 'url_changed'),
+    );
+    if (urlChanged && !claimsNavigation) {
+        warnings.push({
+            kind: 'unclaimed_url_change',
+            detail: `The URL changed to ${after.url} but no navigation or url_changed effect was recorded.`,
+        });
+    }
+
+    if (observedChange === null) {
+        warnings.push({
+            kind: 'no_observed_change',
+            detail: 'Nothing in the captured surface changed between the two steps — no URL, title, element, value, checked state, message, storage or request difference. Either this really is a self-loop, or the capture raced the page\'s own update (a late render, an animation, a debounced request).',
+        });
+    }
+
+    // A state id is bound to the reading that was made in it, so the same id must describe
+    // both ends of a self-loop. Two readings that share no controls are not one state, and
+    // the usual cause is a reading taken late: the model reads the page after its own next
+    // action, then every endpoint that follows is shifted by one.
+    if (fromState && toState && fromState === toState) {
+        const arrived = controls(observedChange?.appeared);
+        const left = controls(observedChange?.disappeared);
+        if (arrived.length && left.length) {
+            warnings.push({
+                kind: 'self_loop_but_controls_changed',
+                detail: `This step starts and ends in ${toState}, but the two readings share no interactive surface: `
+                    + `${arrived.length} control(s) appeared and ${left.length} disappeared (${left.slice(0, 3).join(', ')} → `
+                    + `${arrived.slice(0, 3).join(', ')}). Two readings that look like different screens are not one state, so `
+                    + 'either the state identity does not hold for both, or one reading was taken at a different moment than its '
+                    + 'transition. Read the page as soon as its own action is done, and check that the source reading is the state '
+                    + 'the action was taken in.',
+            });
+        }
+    }
+
+    return { errors, warnings };
+}
+
 export function apply(ctx, config) {
     const observeTool = config.observeTool ?? 'graph_observe';
+    const transitionTool = config.transitionTool ?? 'graph_transition';
     // Resolved once, so the directory the model is told to read and the
     // directory the run store writes to are the same string by construction.
     // They used to be two independent derivations of the config, which is how a
@@ -214,6 +400,12 @@ export function apply(ctx, config) {
      */
     let latestObservation = null;
     let previousCapture = null;
+    /**
+     * The observation *before* `latestObservation`. A transition is only derivable
+     * from a pair of steps, and this is the far side of the pair: it is where the
+     * `from_state` comes from, resolved through the state the model read it as.
+     */
+    let previousObservation = null;
 
     /**
      * The turn's instruction, captured from `agent/pre-step` before the step's
@@ -304,6 +496,7 @@ export function apply(ctx, config) {
             screenshot,
         });
         if (captureValue) {
+            previousObservation = latestObservation;
             previousCapture = latestObservation?.capture ?? null;
             latestObservation = observation;
         }
@@ -373,6 +566,7 @@ export function apply(ctx, config) {
         order: SECTION_ORDER,
         text: protocolText({
             observeTool,
+            transitionTool,
             runDirName,
             maxSteps: config.maxSteps ?? null,
         }),
@@ -490,9 +684,333 @@ export function apply(ctx, config) {
                     state,
                     states_recorded: store.stateCount(),
                     observations_recorded: store.observationCount(),
+                    capabilities_recorded: store.capabilityCount(),
+                    transitions_recorded: store.transitionCount(),
+                    steps_walked: store.walkLength(),
                 },
             };
             return trimDigest(digest, config.maxDigestChars ?? 14000);
+        },
+    }));
+
+    // ---------------------------------------------------------------------
+    // Seam 2b — the transition
+    // ---------------------------------------------------------------------
+    // A transition is the only place the model's reading and the machinery's record
+    // are forced to sit in the same object, so it is the only place a disagreement
+    // between them can be caught while the page is still open. Both endpoints are
+    // DERIVED from evidence rather than accepted as arguments: a state id typed by
+    // the model would be a dangling reference waiting to happen, and the run already
+    // knows the answer.
+    ctx.tools.register(defineTool({
+        name: transitionTool,
+        description: 'Record the transition one browser action produced: which capability was applied, '
+            + 'from which state, into which state. Call this after graph_observe has recorded the state the '
+            + 'action landed in. The from_state and to_state are derived from evidence — you do not pass them. '
+            + `Returns the machine-observed change for the step beside your claimed effects, so you can see `
+            + 'whether they agree. Omitting every argument only reports where the walk currently stands.',
+        parameters: {
+            capability: {
+                type: 'string',
+                description: 'snake_case verb phrase naming the behaviour, e.g. login, add_product_to_cart, '
+                    + 'apply_coupon. Reuse the exact name you used before for the same behaviour — the vocabulary '
+                    + 'is the point of a capability.',
+            },
+            capability_kind: {
+                type: 'string',
+                description: 'interaction | navigation | query | setup (login/seed) | composite. Recorded on first use.',
+            },
+            capability_input: {
+                type: 'object',
+                additionalProperties: true,
+                description: 'Parameter type map, recorded on first use: {"coupon_code":{"type":"string","required":true}}. '
+                    + 'This is the capability\'s parameters, NOT the concrete values used this time.',
+            },
+            capability_output: {
+                type: 'object',
+                additionalProperties: true,
+                description: 'What the capability yields, e.g. {"discount":"number"}. Recorded on first use.',
+            },
+            arguments: {
+                type: 'object',
+                additionalProperties: true,
+                description: 'The concrete values used for THIS transition, e.g. {"coupon_code":"SAVE10"}.',
+            },
+            target: {
+                type: 'string',
+                description: 'The element acted on, as element_<semantic_purpose>, when the capability is not bound to one element.',
+            },
+            guard: {
+                type: 'string',
+                description: 'Human-readable condition that must hold for this transition, e.g. cart.item_count > 0.',
+            },
+            effects: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: true },
+                description: 'What changed. Each entry is {type, ...}: navigation/url_changed/state_entered need `to`; '
+                    + 'value_changed/visibility_changed need `target` and `to`; message needs `message`; request needs '
+                    + '`api`; storage_changed/validation_error/list_changed/element_created/element_destroyed need `target`. '
+                    + 'Set "observed": true only for what the evidence actually shows.',
+            },
+            apis: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Ids of the API calls this transition triggers, as api_<name>.',
+            },
+            assertions: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: true },
+                description: 'Checks that should hold after this step when a test is generated: {type, target, operator, expected}.',
+            },
+            preconditions: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Tags or ids that must already hold, e.g. user_authenticated.',
+            },
+            description: { type: 'string', description: 'One sentence describing this transition.' },
+        },
+        output: {
+            schema: { type: 'json' },
+            render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+            const store = ensureRun(exec);
+
+            // Read-only report. `capability` is the one argument that means "record
+            // something", so OMITTING it is a request to look rather than a mistake —
+            // and it is the only way to ask where the walk stands after a chain break.
+            // Supplying it and getting it wrong is still refused below: the two cases
+            // are told apart by absence, not by validity.
+            if (args.capability === undefined) {
+                const last = store.lastTransition();
+                const ignored = Object.keys(args).filter((key) => args[key] !== undefined);
+                return {
+                    recorded: false,
+                    note: ignored.length
+                        ? `No capability was given, so nothing was recorded — these arguments were read and ignored: `
+                            + `${ignored.join(', ')}. Pass \`capability\` to record a transition.`
+                        : 'No arguments were given, so nothing was recorded. This is the state of the walk.',
+                    walk: {
+                        steps_walked: store.walkLength(),
+                        transitions_recorded: store.transitionCount(),
+                        states_recorded: store.stateCount(),
+                        capabilities_recorded: store.capabilityCount(),
+                        observations_recorded: store.observationCount(),
+                        last_step: last
+                            ? {
+                                transition_id: last.id,
+                                from_state: last.from_state,
+                                to_state: last.to_state,
+                                capability: last.action?.capability ?? null,
+                                chain_break: last.chain_break,
+                            }
+                            : null,
+                    },
+                    vocabulary: store.capabilityNames(),
+                };
+            }
+
+            const after = latestObservation;
+            if (!after) {
+                throw new Error(
+                    'No evidence has been captured yet, so there is no transition to record. '
+                    + 'Drive the page with a browser_* tool first, then read the result with '
+                    + `\`${observeTool}\`.`,
+                );
+            }
+            if (!after.capture) {
+                throw new Error(
+                    `Step ${after.id} could not be read (${after.capture_error ?? 'the capture failed'}), so neither end of `
+                    + 'a transition can be established for it. Record what is on screen now by acting once more and '
+                    + `calling \`${observeTool}\`, or leave this step out of the graph.`,
+                );
+            }
+
+            const before = previousObservation;
+            if (!before) {
+                throw new Error(
+                    'There is no step before this one, so there is no transition: the first browser action establishes '
+                    + 'the entry state rather than moving between states. Record it with '
+                    + `\`${observeTool}\` and act again.`,
+                );
+            }
+
+            const toState = store.stateForObservation(after.id);
+            if (!toState) {
+                throw new Error(
+                    `No state has been read for step ${after.id}, so this transition has no destination. `
+                    + `Call \`${observeTool}\` first — the reading has to happen while the page still shows it.`,
+                );
+            }
+
+            const fromState = store.stateForObservation(before.id);
+            if (!fromState) {
+                throw new Error(
+                    `No state was ever read for step ${before.id}, so this transition has no source, and that cannot be `
+                    + 'repaired now: a reading has to be made while its page is still on screen. Skip this transition and '
+                    + `call \`${observeTool}\` after every action from here on, including the first.`,
+                );
+            }
+
+            // --- capability -------------------------------------------------
+            const capabilityName = typeof args.capability === 'string' ? args.capability.trim() : '';
+            if (!CAPABILITY_NAME_PATTERN.test(capabilityName)) {
+                throw new Error(
+                    `capability ${JSON.stringify(args.capability)} is not usable: the schema requires a lowercase `
+                    + 'snake_case verb phrase starting with a letter, e.g. login, add_product_to_cart, apply_coupon. '
+                    + 'Name the behaviour, not the element you clicked.',
+                );
+            }
+            if (args.capability_kind !== undefined && !CAPABILITY_KINDS.has(args.capability_kind)) {
+                throw new Error(
+                    `capability_kind ${JSON.stringify(args.capability_kind)} is not one of: `
+                    + `${[...CAPABILITY_KINDS].join(', ')}. Pick the closest and call again.`,
+                );
+            }
+
+            const notes = vocabularyNotes(capabilityName, store.capabilityNames());
+            const capability = store.addCapability({
+                name: capabilityName,
+                kind: args.capability_kind,
+                description: args.description,
+                input: args.capability_input,
+                output: args.capability_output,
+                notes,
+            });
+
+            // --- the transition's own references ----------------------------
+            if (args.target !== undefined && !/^element[-_][A-Za-z0-9._:-]+$/.test(String(args.target))) {
+                throw new Error(
+                    `target ${JSON.stringify(args.target)} is not an element id. Use element_<semantic_purpose> — the same `
+                    + 'purpose you gave the element when you observed its state.',
+                );
+            }
+            for (const api of args.apis ?? []) {
+                if (!/^api[-_][A-Za-z0-9._:-]+$/.test(String(api))) {
+                    throw new Error(
+                        `api ${JSON.stringify(api)} is not an api id. Use api_<name> (the schema prefix is required), `
+                        + 'so the reference can resolve when the graph is assembled.',
+                    );
+                }
+            }
+
+            // --- effects ----------------------------------------------------
+            const effects = Array.isArray(args.effects) ? args.effects : [];
+            for (const effect of effects) {
+                const type = effect?.type;
+                if (!EFFECT_TYPES.has(type)) {
+                    throw new Error(
+                        `effect type ${JSON.stringify(type)} is not one of: ${[...EFFECT_TYPES].join(', ')}. `
+                        + 'Pick the kind that matches what actually changed.',
+                    );
+                }
+                const missing = EFFECT_REQUIRED.get(type).filter((field) => effect[field] === undefined);
+                if (missing.length) {
+                    throw new Error(
+                        `effect ${JSON.stringify(type)} is missing ${missing.join(', ')}. `
+                        + 'The schema requires it, and an effect without it cannot be asserted in a generated test.',
+                    );
+                }
+                if (effect.severity !== undefined && !SEVERITIES.has(effect.severity)) {
+                    throw new Error(
+                        `effect severity ${JSON.stringify(effect.severity)} is not one of: ${[...SEVERITIES].join(', ')}.`,
+                    );
+                }
+                if (effect.operation !== undefined && !LIST_OPERATIONS.has(effect.operation)) {
+                    throw new Error(
+                        `effect operation ${JSON.stringify(effect.operation)} is not one of: ${[...LIST_OPERATIONS].join(', ')}.`,
+                    );
+                }
+            }
+            for (const assertion of args.assertions ?? []) {
+                // The short form (a bare assertion name) is legal, so only the object
+                // form has a type to check.
+                if (assertion && typeof assertion === 'object' && !DETECTION_TYPES.has(assertion.type)) {
+                    throw new Error(
+                        `assertion type ${JSON.stringify(assertion.type)} is not one of: ${[...DETECTION_TYPES].join(', ')}.`,
+                    );
+                }
+            }
+
+            // --- the machine's own account of the step ----------------------
+            const beforeCapture = before.capture ?? null;
+            const observedChange = diffCaptures(beforeCapture, after.capture);
+            const { errors, warnings } = crossCheckEffects({
+                effects,
+                before: beforeCapture,
+                after: after.capture,
+                fromState,
+                toState,
+                observedChange,
+            });
+            if (!beforeCapture) {
+                warnings.push({
+                    kind: 'previous_step_not_read',
+                    detail: `Step ${before.id} has no capture of its own, so there is nothing to compare this step against.`,
+                });
+            }
+            if (errors.length) {
+                throw new Error(`${errors.join(' ')} Nothing was recorded.`);
+            }
+
+            const recorded = store.recordTransition({
+                from_state: fromState,
+                to_state: toState,
+                capability_id: capability.id,
+                capability_name: capabilityName,
+                arguments: args.arguments,
+                target: args.target,
+                guard: args.guard,
+                effects,
+                apis: args.apis,
+                assertions: args.assertions,
+                precondition_list: args.preconditions,
+                description: args.description,
+                before_observation: before.id,
+                after_observation: after.id,
+                observed_change: observedChange,
+                notes: warnings,
+            });
+
+            return {
+                transition: {
+                    transition_id: recorded.id,
+                    new: recorded.minted,
+                    from_state: fromState,
+                    to_state: toState,
+                    name: capabilityName,
+                    capability_id: capability.id,
+                    derived_from: { before: before.id, after: after.id },
+                    note: recorded.minted
+                        ? 'Recorded a new edge.'
+                        : 'This edge was already recorded — reused its id and appended the step to the walk.',
+                },
+                capability: {
+                    capability_id: capability.id,
+                    name: capabilityName,
+                    kind: capability.record.capability_kind,
+                    new: capability.created,
+                    vocabulary_notes: notes,
+                    note: notes.length
+                        ? 'The vocabulary already has a name close to this one — see vocabulary_notes. Nothing was renamed for you.'
+                        : 'No near-duplicate capability name in this run or in the schema vocabulary.',
+                },
+                chain_break: recorded.chain_break,
+                chain_break_note: recorded.chain_break
+                    ? `This step starts at ${fromState} but the previous step ended at ${recorded.chain_break.previous_to_state}, so the walk is not contiguous from here. Correct if that was not deliberate.`
+                    : null,
+                // The model's account and the machinery's account, side by side.
+                observed_change: observedChange,
+                claimed_effects: effects.length,
+                disagreements: warnings,
+                graph: {
+                    states_recorded: store.stateCount(),
+                    capabilities_recorded: store.capabilityCount(),
+                    transitions_recorded: store.transitionCount(),
+                    steps_walked: store.walkLength(),
+                    observations_recorded: store.observationCount(),
+                },
+            };
         },
     }));
 }

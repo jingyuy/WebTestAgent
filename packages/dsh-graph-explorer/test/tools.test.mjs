@@ -1,0 +1,132 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { apply, Config } from '../lib/index.js';
+
+let fails = 0;
+const check = (label, actual, expected) => {
+  const ok = JSON.stringify(actual) === JSON.stringify(expected);
+  if (!ok) { fails++; console.log('FAIL', label, '\n  actual  ', JSON.stringify(actual), '\n  expected', JSON.stringify(expected)); }
+  else console.log('ok  ', label);
+};
+const refuses = async (label, fn, expectedFragment) => {
+  try { await fn(); fails++; console.log('FAIL', label, '(no error thrown)'); }
+  catch (error) {
+    const ok = String(error.message).includes(expectedFragment);
+    if (!ok) { fails++; console.log('FAIL', label, '\n  message ', error.message, '\n  expected to contain', expectedFragment); }
+    else console.log('ok  ', label);
+  }
+};
+
+// --- fake harness ---------------------------------------------------------
+const cwd = mkdtempSync(join(tmpdir(), 'gx-tools-'));
+const tools = new Map();
+const handlers = new Map();
+const sections = [];
+const logs = [];
+let queue = [];           // capture values served to browser_eval, in order
+
+const exec = {
+  name: 'browser_open', arguments: { url: 'http://x/' }, token: 'tok', signal: undefined,
+  agent: { options: { provider: 'p', model: 'm' }, session: { header: { cwd, id: 'session-test' } } },
+};
+
+const ctx = {
+  tools: {
+    register: (tool) => tools.set(tool.name, tool),
+    execute: async (call) => {
+      if (call.name === 'browser_eval') {
+        const value = queue.length > 1 ? queue.shift() : queue[0];
+        return { isError: false, value };
+      }
+      return { isError: false, value: null };
+    },
+  },
+  on: (name, handler) => handlers.set(name, handler),
+  systemPrompt: { section: (section) => sections.push(section) },
+};
+apply(ctx, Config({ }));
+
+const capture = (over = {}) => ({ url: 'http://x/', title: 'T', headings: [], interactive: [], status: [], storage: {}, scroll: {}, network: [], console: [], page_errors: [], ...over });
+const act = (name, args = {}) => handlers.get('tools/execute')({ ...exec, name, arguments: args }, async () => ({ isError: false, value: null }));
+const observe = (args) => tools.get('graph_observe').execute(args, exec);
+const transition = (args) => tools.get('graph_transition').execute(args, exec);
+
+// --- registration ---------------------------------------------------------
+check('both tools registered', [...tools.keys()].sort(), ['graph_observe', 'graph_transition']);
+check('protocol section contributed', sections.map((s) => [s.name, s.order]), [['graph:exploration-protocol', 150]]);
+check('protocol teaches the transition tool', sections[0].text.includes('graph_transition'), true);
+
+// --- refusals before anything has happened --------------------------------
+await refuses('observe with no evidence', () => observe({}), 'nothing to interpret');
+await refuses('transition with no evidence', () => transition({ capability: 'login' }), 'no transition to record');
+
+// --- step 1: home ---------------------------------------------------------
+queue = [capture({ url: 'http://x/', title: 'Home' }), capture({ url: 'http://x/login', title: 'Sign in' })];
+await act('browser_open');
+await refuses('transition before any state was read', () => transition({ capability: 'go_to_login' }), 'the first browser action establishes the entry state');
+await refuses('observe rejects a state with no detection', () => observe({ page_type: 'home' }), 'no detection');
+await refuses('observe rejects an unknown detection type', () => observe({ page_type: 'home', detection: [{ type: 'vibes' }] }), 'not one of');
+await refuses('observe rejects an element with no semantic_purpose', () => observe({ page_type: 'home', detection: [{ type: 'url' }], elements: [{ role: 'link' }] }), 'semantic_purpose');
+const s1 = await observe({ page_type: 'home', variant: 'anonymous', detection: [{ type: 'url' }], elements: [{ semantic_purpose: 'login_link', role: 'link' }] });
+check('state recorded', [s1.graph.state.state_id, s1.graph.states_recorded], ['state_home_anonymous', 1]);
+
+// --- step 2: navigate to login --------------------------------------------
+await act('browser_click', { selector: '#login' });
+await refuses('transition with no destination state read yet', () => transition({ capability: 'go_to_login' }), 'has no destination');
+const s2 = await observe({ page_type: 'login', detection: [{ type: 'url' }] });
+check('second state is a distinct state', [s2.graph.state.state_id, s2.graph.state.new], ['state_login', true]);
+
+// --- the transition itself ------------------------------------------------
+const t1 = await transition({
+  capability: 'go_to_login',
+  capability_kind: 'navigation',
+  effects: [{ type: 'navigation', to: 'state_login', observed: true }, { type: 'message', message: 'Welcome back' }],
+  description: 'Open the sign-in page from the home page.',
+});
+check('derived endpoints', [t1.transition.from_state, t1.transition.to_state], ['state_home_anonymous', 'state_login']);
+check('derived evidence pair', t1.transition.derived_from, { before: 'obs_0001', after: 'obs_0002' });
+check('transition id minted', [t1.transition.transition_id, t1.transition.new], ['transition_go_to_login', true]);
+check('capability minted', [t1.capability.capability_id, t1.capability.kind, t1.capability.new], ['cap_go_to_login', 'navigation', true]);
+check('no chain break', t1.chain_break, null);
+check('machinery saw the url change', t1.observed_change.url, ['http://x/', 'http://x/login']);
+check('claimed message that was never seen is reported', t1.disagreements.map((w) => w.kind), ['claimed_message_not_seen']);
+check('a disagreement is recorded, not just returned', JSON.parse(readFileSync(join(cwd, 'graph-run', 'transitions.jsonl'), 'utf8')).notes.map((w) => w.kind), ['claimed_message_not_seen']);
+
+// --- refusals on a real transition ---------------------------------------
+await refuses('unknown effect type', () => transition({ capability: 'go_to_login', effects: [{ type: 'teleport', to: 'x' }] }), 'is not one of');
+await refuses('effect missing a required field', () => transition({ capability: 'go_to_login', effects: [{ type: 'value_changed', target: 'element_x' }] }), 'missing to');
+await refuses('bad effect severity', () => transition({ capability: 'go_to_login', effects: [{ type: 'message', message: 'x', severity: 'catastrophic' }] }), 'severity');
+await refuses('bad list operation', () => transition({ capability: 'go_to_login', effects: [{ type: 'list_changed', target: 'element_x', operation: 'shuffle' }] }), 'operation');
+await refuses('bad assertion type', () => transition({ capability: 'go_to_login', assertions: [{ type: 'pretty_sure' }] }), 'assertion type');
+await refuses('bad capability name', () => transition({ capability: 'Go To Login' }), 'snake_case');
+await refuses('bad capability kind', () => transition({ capability: 'go_to_login', capability_kind: 'vibe' }), 'capability_kind');
+await refuses('bad target id', () => transition({ capability: 'go_to_login', target: 'div#login' }), 'element_<semantic_purpose>');
+await refuses('bad api id', () => transition({ capability: 'go_to_login', apis: ['/api/login'] }), 'api_<name>');
+await refuses('effect contradicting the derived destination', () => transition({ capability: 'go_to_login', effects: [{ type: 'state_entered', to: 'state_home_anonymous' }] }), 'cannot end in two places');
+check('a refused transition records nothing', readFileSync(join(cwd, 'graph-run', 'transitions.jsonl'), 'utf8').trim().split('\n').length, 1);
+check('a refused transition mints no capability', JSON.parse(readFileSync(join(cwd, 'graph-run', 'capabilities.jsonl'), 'utf8')).name, 'go_to_login');
+
+// --- step 3: back to home, same capability as an edge that exists ---------
+queue = [capture({ url: 'http://x/', title: 'Home' }), capture({ url: 'http://x/', title: 'Home' })];
+await act('browser_navigate', { url: 'http://x/' });
+await observe({ page_type: 'home', variant: 'anonymous', detection: [{ type: 'url' }] });
+const t2 = await transition({ capability: 'go_to_login', capability_kind: 'navigation' });
+check('reused capability', [t2.capability.capability_id, t2.capability.new], ['cap_go_to_login', false]);
+check('same capability arriving elsewhere gets its own edge', [t2.transition.transition_id, t2.transition.new], ['transition_go_to_login_home_anonymous', true]);
+check('walk is contiguous', t2.chain_break, null);
+check('vocabulary note names the run-local near-duplicate first', (await transition({ capability: 'go_to_login_page' })).capability.vocabulary_notes.map((n) => n.vocabulary_name), ['go_to_login', 'login']);
+
+// --- summary --------------------------------------------------------------
+const report = await transition({});
+check('omitting the capability only reports', [report.recorded, report.transition ?? null], [false, null]);
+check('the report says where the walk stands', [report.walk.steps_walked, report.walk.transitions_recorded, report.walk.last_step.to_state], [3, 3, 'state_home_anonymous']);
+check('the report lists the vocabulary', report.vocabulary, ['go_to_login', 'go_to_login_page']);
+check('a partially supplied call is reported as ignored, not recorded', (await transition({ effects: [{ type: 'navigation', to: 'state_home_anonymous' }] })).note.includes('read and ignored: effects'), true);
+check('file counts', (() => {
+  const lines = (p) => readFileSync(join(cwd, 'graph-run', p), 'utf8').trim().split('\n').length;
+  return [lines('observations.jsonl'), lines('states.jsonl'), lines('capabilities.jsonl'), lines('transitions.jsonl')];
+})(), [3, 3, 2, 3]);
+
+console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
+process.exit(fails ? 1 : 0);

@@ -4,7 +4,7 @@
  * This is the seam that makes the model a *semantic reader* rather than a
  * transcriber: the harness already knows how to see the page (the recorder), so
  * the prompt spends its words on the judgement the harness cannot do — deciding
- * what state the page is in and what would prove it.
+ * what state the page is in, what would prove it, and what the action meant.
  */
 export const SECTION_NAME = 'graph:exploration-protocol';
 
@@ -29,6 +29,8 @@ storage, console messages, failed requests and a screenshot. It writes them to:
 - \`${config.runDirName}/observations.jsonl\` — one append-only evidence record per step
 - \`${config.runDirName}/evidence/*.png\` — one screenshot per step
 - \`${config.runDirName}/states.jsonl\` — your readings, bound to the evidence they interpret
+- \`${config.runDirName}/capabilities.jsonl\` — the vocabulary your transitions are phrased in
+- \`${config.runDirName}/transitions.jsonl\` — the edges, in the order they were walked
 
 You never need to collect that, and you must never invent it. Read
 \`${config.runDirName}/states.jsonl\` when you need to check what you already recorded.
@@ -39,9 +41,9 @@ For every step:
 
 1. Act with exactly one \`browser_*\` tool. One action at a time — a compound step
    hides which action caused which effect.
-2. Call \`graph_observe\` with your reading of the state you are now in. It returns the
-   evidence digest for the current page, so you can classify from facts rather than
-   from memory. Fields:
+2. Call \`${config.observeTool}\` with your reading of the state you are now in. It
+   returns the evidence digest for the current page, so you can classify from facts
+   rather than from memory. Fields:
    - \`page_type\` — the coarse semantic kind: \`home\`, \`login\`, \`project_list\`,
      \`settings\`, \`error\`, … Stable across routes and users.
    - \`variant\` — the actor/session variant (\`anonymous\`, \`authenticated\`, \`admin\`)
@@ -56,7 +58,29 @@ For every step:
      \`element_value\`, \`message\`, \`absence\`. A state with no detection cannot be
      asserted, so the tool will refuse it.
    - \`summary\` — one sentence, from the user's point of view.
-3. Repeat until the goal in the task is reached, is proven impossible, or you are out
+3. Call \`${config.transitionTool}\` to record what that action DID: which capability
+   you applied, and what it changed. A state says where the app is; a transition says
+   how it got there, and a journey is a walk over transitions. Fields:
+   - \`capability\` — the behaviour in snake_case, **not** the element you clicked:
+     \`login\`, \`add_product_to_cart\`, \`apply_coupon\`. Reuse the exact name you used
+     before for the same behaviour: the vocabulary is what makes a capability a
+     reusable helper rather than a one-off. If the tool returns \`vocabulary_notes\`, it
+     saw a name close to one already in use — converge on one of them.
+   - \`effects\` — what changed, one entry each. \`navigation\`, \`url_changed\` and
+     \`state_entered\` need \`to\`; \`value_changed\` and \`visibility_changed\` need
+     \`target\` and \`to\`; \`message\` needs \`message\`; \`request\` needs \`api\`; and
+     \`validation_error\`, \`list_changed\`, \`storage_changed\`, \`element_created\`,
+     \`element_destroyed\` need \`target\`. Prefer semantic paths (\`order.total\`) over
+     selectors, and set \`"observed": true\` only for what the evidence shows — an
+     effect you inferred is a weaker claim, and it should say so.
+   - \`arguments\` — the concrete values used this time, e.g. \`{"coupon_code":"SAVE10"}\`.
+   - \`guard\` — the condition that made this transition possible, if there is one.
+
+   \`from_state\` and \`to_state\` are derived from evidence — do not pass them. The
+   tool returns the change it saw for the step beside the effects you claimed, so
+   compare the two: a disagreement means one of the accounts is wrong, and it is worth
+   one more look before moving on.
+4. Repeat until the goal in the task is reached, is proven impossible, or you are out
    of steps.${config.maxSteps ? `\n   You have at most ${config.maxSteps} steps.` : ''}
 
 Rules that matter:
@@ -73,5 +97,9 @@ Rules that matter:
 - **Do not claim what you did not see.** If a value, message or element was not in the
   evidence, leave it out. Confidence, not decoration, is what the graph is for.
 - **\`${config.observeTool}\` is the only way states reach the graph.** A browser action
-  with no \`graph_observe\` after it produces evidence nobody interpreted, and the step
-  is lost.`;
+  with no \`${config.observeTool}\` after it produces evidence nobody interpreted, and the
+  step is lost. Read the state *while the page is showing it*: a reading cannot be made
+  afterwards, because the page it would describe has since changed.
+- **\`${config.transitionTool}\` needs the step before it to have been read too.** Both
+  ends of a transition come from evidence, so a step nobody read has no edge into it and
+  no edge out of it.`;

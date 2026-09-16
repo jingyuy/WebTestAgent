@@ -1,8 +1,8 @@
 /**
  * The append-only store for one exploration run.
  *
- * Three files, three levels of trust, matching the target schema's own framing
- * ("reality -> observation -> interpretation -> graph"):
+ * Five files, matching the target schema's own framing ("reality -> observation ->
+ * interpretation -> graph"):
  *
  *   run.json          provenance. Written once, never rewritten: what code,
  *                     what instruction, what model, what starting point. Unknown
@@ -12,11 +12,18 @@
  *                       silently alter the evidence it was derived from.
  *   states.jsonl      the model's semantic reading, each record bound by
  *                     `observation_id` to the evidence it interprets.
+ *   capabilities.jsonl  the vocabulary the transitions are phrased in. A capability
+ *                       is minted once per name and reused, so "what can this app do"
+ *                       is answerable without reading every transition.
+ *   transitions.jsonl the edges: a capability applied from one state, landing in
+ *                     another. Recorded in the order they were walked, which is the
+ *                     only thing that makes a journey reconstructible afterwards.
  *
  * Ids are minted here and never derived from a URL, a selector or an array index.
- * `state_*` ids are the one deliberate exception: they are keyed by the *semantic*
- * identity tuple so that the same identity always resolves to the same id, which
- * makes invariant 4 (state identity uniqueness) structural rather than a check.
+ * `state_*` and `transition_*` ids are the deliberate exceptions: both are keyed by
+ * a *semantic* tuple, so the same identity always resolves to the same id, which makes
+ * invariant 4 (state identity uniqueness) structural rather than a check, and keeps a
+ * repeated walk from minting a second id for an edge it already recorded.
  */
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -86,11 +93,26 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
 
   const observationsPath = join(dir, 'observations.jsonl');
   const statesPath = join(dir, 'states.jsonl');
+  const capabilitiesPath = join(dir, 'capabilities.jsonl');
+  const transitionsPath = join(dir, 'transitions.jsonl');
 
   let observationCount = 0;
   let stepCount = 0;
   const stateIdByKey = new Map();
   const stateRecordById = new Map();
+  /**
+   * Which state each observation was read as. This is what lets a transition's
+   * endpoints be *derived* instead of typed: if the model had to name its own state
+   * ids, a typo would become a dangling reference (invariant 2), and a plausible-
+   * looking wrong id would be worse than an error.
+   */
+  const stateIdByObservation = new Map();
+  const capabilityByName = new Map();
+  const capabilityById = new Map();
+  const transitionIdByKey = new Map();
+  const transitionIds = new Set();
+  /** Every recorded transition, in walk order. Duplicates kept: a walk may repeat an edge. */
+  const walk = [];
 
   const append = (path, record) => {
     appendFileSync(path, JSON.stringify(record) + '\n', 'utf8');
@@ -125,6 +147,8 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
     evidenceDir,
     observationsPath,
     statesPath,
+    capabilitiesPath,
+    transitionsPath,
 
     /** Allocate the next machine-evidence record. Immutable once written. */
     addObservation({ tool, toolArgs, phase, capture, error, screenshot }) {
@@ -189,6 +213,11 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
         status: model_status ?? 'observed',
         evidence: minted ? 'first_observation' : 'repeat_observation',
       };
+      // The index is updated on every reading, not only on the first: an observation
+      // re-read as its own state must keep pointing at it, and a re-reading that
+      // *changes* the answer should win, because the latest reading is the one made
+      // against the most complete evidence.
+      stateIdByObservation.set(observationId, id);
       if (!minted) {
         // Not a new state: record the sighting as a re-confirmation, preserving the
         // original identity record rather than overwriting it.
@@ -199,7 +228,164 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
       return { id, minted, record };
     },
 
+    /** The state an observation was read as, or undefined if it was never read. */
+    stateForObservation: (observationId) => stateIdByObservation.get(observationId),
+
+    /**
+     * Mint or reuse a capability by NAME.
+     *
+     * Name is the key, not a slug of the description: capability identity is
+     * vocabulary, and the whole point of a capability is that the second, tenth and
+     * hundredth use of "log in" is recognisably one behaviour. `kind`, `input` and
+     * `output` are only recorded when first seen — a later sighting does not get to
+     * silently redefine what an established capability takes and returns.
+     */
+    addCapability({ name, kind, description, input, output, aliases, notes }) {
+      const existing = capabilityByName.get(name);
+      if (existing) return { id: existing.id, record: existing, created: false };
+
+      const base = 'cap_' + slugify(name);
+      let id = base;
+      let suffix = 2;
+      while (capabilityById.has(id)) id = base + '_' + suffix++;
+
+      const record = {
+        id,
+        capability_id: id,
+        name,
+        capability_kind: kind ?? 'interaction',
+        description: description ?? null,
+        input: input ?? null,
+        output: output ?? null,
+        aliases: Array.isArray(aliases) ? aliases : [],
+        notes: Array.isArray(notes) ? notes : [],
+        first_seen_at: new Date().toISOString(),
+      };
+      capabilityByName.set(name, record);
+      capabilityById.set(id, record);
+      append(capabilitiesPath, { kind: 'capability', ...record });
+      return { id, record, created: true };
+    },
+
+    /**
+     * Record an edge: `capability` applied while in `from_state`, landing in
+     * `to_state`.
+     *
+     * Both endpoints are passed in already resolved — this store does not guess what
+     * the model meant, and the caller has the observation-to-state index that makes
+     * the answer a fact rather than an inference.
+     *
+     * A repeated walk of the same edge reuses the transition id (no duplicate
+     * identities, invariant 1) but is still appended to the walk, because a journey
+     * is a sequence of steps and two adds to one cart are two steps.
+     */
+    recordTransition({
+      from_state,
+      to_state,
+      capability_id,
+      capability_name,
+      arguments: actionArguments,
+      target,
+      guard,
+      effects,
+      apis,
+      assertions,
+      precondition_list,
+      description,
+      before_observation,
+      after_observation,
+      observed_change,
+      notes,
+    }) {
+      const key = JSON.stringify([from_state, to_state, capability_id]);
+      let id = transitionIdByKey.get(key);
+      const minted = id === undefined;
+      if (minted) {
+        const base = 'transition_' + slugify(capability_name);
+        let candidate = base;
+        if (transitionIds.has(candidate)) {
+          // The same capability arriving somewhere else is a different edge, so it
+          // needs a name a reader can tell apart. Qualifying it with the destination
+          // says what distinguishes it; only a third collision falls back to a number.
+          const destination = slugify(String(to_state).replace(/^state_/, ''));
+          candidate = base + '_' + destination;
+          let suffix = 2;
+          while (transitionIds.has(candidate)) candidate = base + '_' + destination + '_' + suffix++;
+        }
+        id = candidate;
+        transitionIdByKey.set(key, id);
+        transitionIds.add(id);
+      }
+
+      // Invariant 5 (a journey is a walk) is checkable here for the first time: the
+      // previous step must have ended in the state this one starts from. A break is
+      // recorded rather than refused, because re-opening a page mid-run legitimately
+      // starts a new strand, and only the model knows which happened.
+      const previous = walk.length ? walk[walk.length - 1] : null;
+      const chain_break = previous && previous.to_state !== from_state
+        ? { previous_transition: previous.id, previous_to_state: previous.to_state, from_state }
+        : null;
+
+      const record = {
+        id,
+        transition_id: id,
+        recorded_at: new Date().toISOString(),
+        from_state,
+        to_state,
+        action: {
+          capability: capability_id,
+          ...(actionArguments && Object.keys(actionArguments).length ? { arguments: actionArguments } : {}),
+          ...(target ? { target } : {}),
+        },
+        guard: guard ?? null,
+        effects: effects ?? [],
+        apis: apis ?? [],
+        assertions: assertions ?? [],
+        preconditions: precondition_list ?? [],
+        description: description ?? null,
+        // What each observation is evidence *for*, which is what the schema's `role`
+        // means. The reading before the action is evidence for where the step started;
+        // the reading the action itself produced is evidence for the action and for what
+        // the action left behind. Labelling the earlier reading "action" claimed that the
+        // previous tool call was this transition's action, which it was not.
+        evidence: [
+          {
+            observation: before_observation,
+            role: 'identity',
+            note: 'the surface as it stood when the action was taken (from_state)',
+          },
+          {
+            observation: after_observation,
+            role: 'action',
+            note: 'the action itself, and the surface it produced (to_state)',
+          },
+          {
+            observation: after_observation,
+            role: 'effect',
+            note: 'what the machinery saw change between the two readings',
+          },
+        ],
+        // What the machinery saw change, kept beside what the model said changed.
+        // Two independent accounts of one step; agreement between them is the only
+        // reason to believe either.
+        observed_change: observed_change ?? null,
+        notes: notes ?? [],
+        chain_break,
+      };
+
+      walk.push(record);
+      append(transitionsPath, { kind: 'transition', ...record, repeated: !minted });
+      return { id, minted, chain_break, record };
+    },
+
     stateCount: () => stateRecordById.size,
+    capabilityCount: () => capabilityById.size,
+    /** The vocabulary as it stands, which is what a new name is compared against. */
+    capabilityNames: () => [...capabilityByName.keys()],
+    transitionCount: () => transitionIds.size,
+    /** Steps walked, which is not `transitionCount` once an edge is walked twice. */
+    walkLength: () => walk.length,
+    lastTransition: () => (walk.length ? walk[walk.length - 1] : null),
     observationCount: () => observationCount,
     nextStep: () => ++stepCount,
   };

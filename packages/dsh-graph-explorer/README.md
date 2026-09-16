@@ -1,11 +1,13 @@
 # @webtestagent/dsh-graph-explorer
 
 A DeepSeek Harness bundle that turns a `dsh-browser` exploration into an
-append-only evidence log and the beginnings of an application behaviour graph.
+append-only evidence log and an application behaviour graph.
 
-This is the **spike**: it proves the three harness seams end-to-end, and it stops
-there. It does not yet emit a full `*.graph.json` or validate against the JSON
-Schemas — see [Not yet built](#not-yet-built).
+It records evidence, the model's reading of each state, and each transition — a
+capability applied in one state, landing in another — with the machinery's own
+account of the step checked against the model's. It does not yet emit a full
+`*.graph.json` or validate against the JSON Schemas; see
+[What this proves, and what it does not](#what-this-proves-and-what-it-does-not).
 
 ## The design in one line
 
@@ -31,8 +33,8 @@ One page, one owner. Never mount both.
 | Seam | API | Role |
 | --- | --- | --- |
 | Recorder | `ctx.on('tools/execute', (exec, next))` | Capture evidence around every browser action that can change the page |
-| Semantic tool | `ctx.tools.register(defineTool({...}))` | `graph_observe` — the only path by which a state reaches the graph |
-| Protocol | `ctx.systemPrompt.section({...})` | The act → observe loop the model follows |
+| Semantic tools | `ctx.tools.register(defineTool({...}))` | `graph_observe` and `graph_transition` — the only paths by which a state or an edge reaches the graph |
+| Protocol | `ctx.systemPrompt.section({...})` | The act → observe → record loop the model follows |
 
 `tools/execute` is an around-waterfall. The wrapper only ever reads `exec` and
 returns the real result — a wrapper that changed or dropped a result would
@@ -55,11 +57,15 @@ graph-run/
   run.json            # provenance, written once
   observations.jsonl  # machine evidence, one record per captured step. IMMUTABLE.
   states.jsonl        # the model's semantic reading, bound by observation_id
+  capabilities.jsonl  # the vocabulary of things the app can be asked to do
+  transitions.jsonl   # one record per walked step, endpoints derived from the readings
   evidence/           # one PNG per captured step
 ```
 
-`observations.jsonl` is append-only and never rewritten, so a later reading
-cannot silently alter the evidence it was derived from.
+All four `.jsonl` files are append-only and never rewritten, so a later reading
+cannot silently alter the evidence it was derived from. A reading appends a new
+state or a sighting of an existing one; a step appends a transition, and walking
+the same edge twice appends twice while reusing one transition id.
 
 ### Provenance
 
@@ -77,7 +83,7 @@ instruction, what model, what starting point:
   "model": "deepseek-flash",
   "session_id": "session-dc4d1554-...",
   "agent_preset": null,
-  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.4" }
+  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.8" }
 }
 ```
 
@@ -108,9 +114,83 @@ can never collide — the identity-uniqueness invariant holds by construction
 rather than by a check. The slug is built from that tuple, never from a URL, a
 selector or an array index.
 
-`transition.before_observation` / `after_observation` map onto consecutive
-entries of the observation chain: one capture follows every action, so the capture
-after step *N* is the capture before step *N+1*.
+The two observations a transition rests on are consecutive entries of the chain:
+one capture follows every action, so the capture after step *N* is the capture
+before step *N+1*.
+
+Each transition also carries its own evidence list, because an edge cannot be
+recovered from one reading: it needs the state the action was taken in and the
+surface the action produced.
+
+```json
+"evidence": [
+  { "observation": "obs_0004", "role": "identity", "note": "the surface as it stood when the action was taken (from_state)" },
+  { "observation": "obs_0005", "role": "action",   "note": "the action itself, and the surface it produced (to_state)" },
+  { "observation": "obs_0005", "role": "effect",   "note": "what the machinery saw change between the two readings" }
+]
+```
+
+`role` means what the schema says it means — what the observation is evidence
+*for*. Labelling the earlier reading `action` asserted that the *previous* tool
+call was this transition's action, which it was not.
+
+## Recording a transition
+
+A transition is the one thing that cannot be recovered from a single reading: it
+needs the state the action was taken in, the state the action produced, and an
+account of what changed between them. `graph_transition` takes the model's account
+of the change and derives the rest.
+
+**Endpoints are derived, never supplied.** `from_state` is the state read for the
+capture before this step, `to_state` the state read for this step's own capture.
+Both come from the observation-to-state index, so a model that misremembers where
+it was cannot invent an edge. If either reading is missing the call is refused,
+with the reason: a reading has to be made while its page is still on screen, and
+that cannot be done retroactively.
+
+**The two accounts of a step are compared, and both are kept.** The model's
+`effects` are a claim; the capture is a fact; neither is authoritative. The record
+holds `observed_change` beside `effects`, and the tool result shows them side by
+side. The model can see what a DOM diff cannot (that a message is the app refusing
+a duplicate, that a name came from the server); the capture can see what the model
+cannot (that the URL never actually changed). Disagreements come back as
+`disagreements[]` and are written into the record's `notes`, so the graph carries
+the doubt instead of erasing it.
+
+The two kinds of disagreement are treated differently:
+
+- **Errors refuse the call and nothing is recorded.** They are self-contradictions
+  inside one record — an effect claiming `state_entered: X` while `to_state` is `Y`.
+  No amount of evidence makes that true, so there is nothing to record and nothing
+  to warn about.
+- **Warnings are reported and recorded**: a claimed `message` no capture carried, a
+  claimed navigation across an unchanged URL, an unclaimed URL change, a claimed
+  request nobody saw, a step where nothing observable changed, and a self-loop whose
+  two readings share no interactive surface at all — which is what a reading taken at
+  the wrong moment looks like, and the failure that silently shifts every endpoint
+  after it.
+
+The comparison looks at everything the capture records, not just the text: an input's
+value, a checkbox's checked state, whether a control is disabled, and application
+storage. It has to. Most of what a form step does lives in a field's value, so a diff
+that ignored values reported every step of a form as "nothing changed" and blamed a
+raced capture for it — a wrong explanation of a step that was fine.
+
+`chain_break` is the invariant-5 check, and it is recorded rather than refused: if the
+previous step ended somewhere other than where this one starts, the walk has a
+discontinuity. Re-opening a page mid-run legitimately starts a new strand, and only the
+model knows which happened.
+
+Calling `graph_transition` with **no capability** is the read-only report: where the
+walk stands, what the vocabulary is, and — for any other argument that was supplied —
+a note naming what was read and ignored. The absence of a capability is the signal, so a
+half-formed call reports where it is instead of either recording something unintended or
+failing with a complaint about an unusable name.
+
+A transition id names an **edge**, not a visit: `(from_state, to_state, capability)`
+maps to one id, and walking it again appends another step with `repeated: true`. That
+keeps identity-uniqueness true by construction while leaving "we added two products"
+intact as two steps.
 
 ## Install
 
@@ -122,14 +202,22 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.4.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.4.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.8.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.8.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
 spec string, so re-installing the same path **at the same version** reuses the
 cached copy and silently keeps the old code. `--force` does not help. Bump
 `version` in `package.json` and repack to actually deploy.
+
+The installer's own output is not proof of what landed. Verify the artifact, not
+the exit code:
+
+```sh
+cd ~/.dsh/profiles/graph/node_modules/@webtestagent/dsh-graph-explorer
+diff -r <repo>/packages/dsh-graph-explorer/lib ./lib && echo IDENTICAL
+```
 
 `dsh plugin` shells out to a bare `dsh` and a bare `pnpm`, so both must be on
 `PATH`.
@@ -145,6 +233,7 @@ unresolvable peer can never turn a plugin install into a hard failure.
   name: '@webtestagent/dsh-graph-explorer'
   config:
     observeTool: graph_observe       # rename the semantic tool
+    transitionTool: graph_transition # rename the transition tool
     runDirName: graph-run            # where evidence lands (relative to the workspace)
     maxSteps: 12                     # folded into the prompt's step budget
     screenshot: true                 # one PNG per captured step
@@ -173,12 +262,14 @@ This is refused rather than repaired, in two places, for two different reasons:
 outside the project. A rewritten path is how a config typo becomes a surprise on
 disk.
 
-## What the spike proves, and what it does not
+## What this proves, and what it does not
 
-**Proven end-to-end:** evidence is captured around every browser action and
-persisted with artifacts on disk; `graph_observe` is visible to the model, callable,
-and refuses an unsound state instead of accepting it; the protocol section reaches
-the assembled prompt.
+**Proven end-to-end:** evidence is captured around every browser action and persisted
+with artifacts on disk; `graph_observe` and `graph_transition` are visible to the model,
+callable, and refuse unsound input instead of accepting it; the protocol section reaches
+the assembled prompt; and a live run against `demo-app` produced 5 states, 6
+capabilities and 6 transitions, reusing one transition id for a re-walked edge and
+reporting a misplaced reading as a `chain_break` instead of letting it pass.
 
 **Known gaps, in the order they will bite:**
 
@@ -188,11 +279,40 @@ the assembled prompt.
    (SPA) traffic *is* captured, which is the case `transition.effects[].request`
    needs. Closing the gap requires Playwright's `addInitScript`, i.e. a source patch
    to `dsh-browser`.
-2. **`graph_transition` does not exist yet.** The evidence for it is already being
-   recorded (the before/after chain), but nothing yet binds a capability and its
-   observed effects into a transition.
-3. **Nothing validates against the JSON Schemas.** `graph_commit`, the §14 invariant
+2. **Nothing validates against the JSON Schemas.** `graph_commit`, the §14 invariant
    checks, and a non-zero exit on violation are the next milestone. Until they exist,
-   a run produces evidence and readings, not a graph.
-4. **No journey assembly.** The walk is reconstructible from the observation chain
-   but is not yet assembled mechanically.
+   a run produces evidence, readings and edges — not a graph.
+3. **No journey assembly.** The walk is reconstructible from the observation chain
+   but is not yet assembled mechanically. It should be, since it is mechanical:
+   `journey.transitions[]` is an ordered list of ids and the walk already is one.
+4. **State ids grow without bound.** Every dimension the model chooses is concatenated
+   into the id, so a field value can end up in one:
+   `state_project_list_authenticated_form_error_duplicate_name_panel_none_projects_seeded`.
+   The dimensions are the model's to choose and they are all real, so the fix is a
+   budget (a limit on dimensions, or a hash past N) rather than a check.
+5. **Element state can outrank state identity.** The model may treat a filled-in field
+   as a new state, which mints a state per value. The schema's `identity` is about the
+   page, not the widget, but the tool cannot tell the two apart — it only knows the
+   tuple it was handed, and the honest thing is to report the id rather than guess.
+
+## Tests
+
+```sh
+npm test        # 3 suites, no browser and no harness
+```
+
+The suites drive the plugin's own seams: a fake tools registry, captures as plain
+objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, record
+shapes), the diff and the cross-check (every warning kind, the one error, malformed
+effects, missing captures), and a fake-harness integration pass over both tools'
+refusal paths.
+
+What they cannot check is that a real page looks like the capture claims. That is what
+a live run against `demo-app` is for, and both are needed: the diff logic is the piece
+whose entire job is being right about a disagreement, so it is exercised directly
+rather than only through a browser.
+
+`lib/index.js` imports its dependencies as peers, the way the harness supplies them, so
+the suites need them resolvable. `test/run.mjs` searches the usual places (the profile,
+the pnpm store, the npx cache) and prints a paste-ready `ln -sfn` if it cannot find
+them.
