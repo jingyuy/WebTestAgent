@@ -95,9 +95,19 @@ export const Config = Schema.object({
 
 /**
  * Browser tools whose RESULT can change what is on screen, so evidence must be
- * captured around them. The inspection tools (`get_text`, `get_html`, `eval`) are
- * excluded on purpose: they cannot change the page, and capturing around them
- * would multiply the cost of every look by three.
+ * captured around them.
+ *
+ * `browser_get_text` and `browser_get_html` are excluded because they genuinely
+ * cannot change the page, and capturing around them would multiply the cost of
+ * every look by three.
+ *
+ * `browser_eval` is NOT one of those, however much its name reads like
+ * inspection: it runs arbitrary JavaScript in the page, and its own description
+ * offers "triggering page logic" as a use. The recorder is itself the proof — it
+ * changes the page through `browser_eval` when it installs its network and
+ * console hooks. A change made through eval that nobody captured is a hole in
+ * the evidence chain: the reading after it would describe a page no observation
+ * accounts for, and the transition over that step could not be derived at all.
  */
 const OBSERVED_TOOLS = new Set([
     'browser_open',
@@ -106,6 +116,7 @@ const OBSERVED_TOOLS = new Set([
     'browser_type',
     'browser_select',
     'browser_wait',
+    'browser_eval',
 ]);
 
 /** Assertion kinds the graph schema permits — see `schema.js` for the source of truth. */
@@ -385,10 +396,10 @@ export function apply(ctx, config) {
     let run = null;
     /**
      * Re-entrancy guard. Our own captures dispatch `browser_eval` through
-     * `ctx.tools.execute`, which re-enters this very waterfall. The capture tools
-     * are not in OBSERVED_TOOLS, so recursion cannot actually happen today — but
-     * the failure mode is an unbounded loop that hangs the agent, so it is guarded
-     * structurally rather than by convention.
+     * `ctx.tools.execute`, which re-enters this very waterfall — and `browser_eval`
+     * is itself in OBSERVED_TOOLS, so without this guard every capture would
+     * capture its own capture, forever. The failure mode is an unbounded loop that
+     * hangs the agent, so it is guarded structurally rather than by convention.
      */
     let capturing = false;
     let dispatchSeq = 0;
@@ -838,7 +849,7 @@ export function apply(ctx, config) {
             const toState = store.stateForObservation(after.id);
             if (!toState) {
                 throw new Error(
-                    `No state has been read for step ${after.id}, so this transition has no destination. `
+                    `No state has been read for step ${after.id} (${after.tool}), so this transition has no destination. `
                     + `Call \`${observeTool}\` first — the reading has to happen while the page still shows it.`,
                 );
             }
@@ -846,9 +857,9 @@ export function apply(ctx, config) {
             const fromState = store.stateForObservation(before.id);
             if (!fromState) {
                 throw new Error(
-                    `No state was ever read for step ${before.id}, so this transition has no source, and that cannot be `
-                    + 'repaired now: a reading has to be made while its page is still on screen. Skip this transition and '
-                    + `call \`${observeTool}\` after every action from here on, including the first.`,
+                    `No state was ever read for step ${before.id} (${before.tool}), so this transition has no source, and `
+                    + 'that cannot be repaired now: a reading has to be made while its page is still on screen. Skip this '
+                    + `transition and call \`${observeTool}\` after every action from here on, including the first.`,
                 );
             }
 

@@ -100,6 +100,10 @@ Rules that matter:
   with no \`${config.observeTool}\` after it produces evidence nobody interpreted, and the
   step is lost. Read the state *while the page is showing it*: a reading cannot be made
   afterwards, because the page it would describe has since changed.
+- **\`browser_eval\` is an action, not a look.** It runs arbitrary JavaScript in the
+  page, so it can change as much as a click can. Read the state after one exactly as you
+  would after a click. Prefer \`browser_get_text\` / \`browser_get_html\` when all you want
+  is to read something: those are not actions, and they cost nothing to your evidence chain.
 - **\`${config.transitionTool}\` needs the step before it to have been read too.** Both
   ends of a transition come from evidence, so a step nobody read has no edge into it and
   no edge out of it.`;

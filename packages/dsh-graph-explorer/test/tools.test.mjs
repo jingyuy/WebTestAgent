@@ -117,6 +117,17 @@ check('same capability arriving elsewhere gets its own edge', [t2.transition.tra
 check('walk is contiguous', t2.chain_break, null);
 check('vocabulary note names the run-local near-duplicate first', (await transition({ capability: 'go_to_login_page' })).capability.vocabulary_notes.map((n) => n.vocabulary_name), ['go_to_login', 'login']);
 
+// --- an eval is an action too --------------------------------------------
+// `browser_eval` runs arbitrary JavaScript in the page, so it can change the page
+// as thoroughly as a click. Left uncaptured, the step becomes a hole in the
+// evidence chain and the reading after it describes a page nothing observed.
+queue = [capture({ url: 'http://x/', title: 'Home' })];
+await act('browser_eval', { expression: 'localStorage.setItem("draft", "1")' });
+const observations = readFileSync(join(cwd, 'graph-run', 'observations.jsonl'), 'utf8')
+  .trim().split('\n').map((line) => JSON.parse(line));
+check('browser_eval is captured', observations[observations.length - 1].tool, 'browser_eval');
+await refuses('a transition cannot skip the eval nobody read', () => transition({ capability: 'save_draft' }), 'has no destination');
+
 // --- summary --------------------------------------------------------------
 const report = await transition({});
 check('omitting the capability only reports', [report.recorded, report.transition ?? null], [false, null]);
@@ -126,7 +137,7 @@ check('a partially supplied call is reported as ignored, not recorded', (await t
 check('file counts', (() => {
   const lines = (p) => readFileSync(join(cwd, 'graph-run', p), 'utf8').trim().split('\n').length;
   return [lines('observations.jsonl'), lines('states.jsonl'), lines('capabilities.jsonl'), lines('transitions.jsonl')];
-})(), [3, 3, 2, 3]);
+})(), [4, 3, 2, 3]);
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

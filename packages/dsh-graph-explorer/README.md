@@ -83,7 +83,7 @@ instruction, what model, what starting point:
   "model": "deepseek-flash",
   "session_id": "session-dc4d1554-...",
   "agent_preset": null,
-  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.8" }
+  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.9" }
 }
 ```
 
@@ -202,8 +202,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.8.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.8.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.9.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.9.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -262,6 +262,61 @@ This is refused rather than repaired, in two places, for two different reasons:
 outside the project. A rewritten path is how a config typo becomes a surprise on
 disk.
 
+## Why two tools, not ten
+
+A semantic layer usually grows one tool per noun — `observe_state`, `identify_state`,
+`save_state`, `find_similar_state`, `record_transition`, `add_capability`,
+`query_graph`. This plugin has two. The merges are deliberate, because each split
+creates a state the graph can be left in that has no meaning:
+
+| Split in two | The half-recorded state it allows |
+| --- | --- |
+| `identify_state` / `save_state` | a reading that was identified but never saved — a state the model believes it recorded |
+| `save_state` / `find_similar_state` | a second id for a state that already has one, which is how a graph becomes a list of URLs |
+| `add_capability` / `record_transition` | an edge phrased in a vocabulary nothing else uses |
+| `observe_state` as a model call | evidence that exists only where the model remembered to ask for it |
+
+So `graph_observe` identifies, finds the duplicate and saves, in one call — and the
+identity tuple it keys on makes duplicate state ids impossible *by construction*
+rather than by convention. `graph_transition` mints or reuses the capability by name
+as part of recording the edge. And the observation is not a tool at all: the recorder
+takes it around every page-changing call, so the evidence exists whether or not anyone
+asks for it. The direction of every merge is the same — a boundary that can be called
+half-way leaves a half-recorded graph behind, and the failure is silent.
+
+**Reading the graph back is not a tool.** It is reading a file: the profile mounts
+filesystem tools, and `graph_transition` with no arguments reports where the walk
+stands and what the vocabulary is. A `query_graph` tool would duplicate `read_file`
+over data the model can already open. The moment to add one is when a run gets large
+enough that reading `states.jsonl` costs more than a compact projection would — not
+before, and never instead of the file, which is the evidence.
+
+**What the browser does not provide.** `dsh-browser` is 12 tools (`open`, `navigate`,
+`click`, `type`, `select`, `wait`, `screenshot`, `get_text`, `get_html`, `eval`,
+`close`, `install`) and this plugin does not add to them. Three things a design usually
+assumes are therefore absent, and here is what stands in for each:
+
+- **No accessibility tree.** `page.accessibility.snapshot()` belongs to Playwright, and
+  reaching it means a source patch to `dsh-browser`, which owns the page. So the capture
+  computes role and accessible name in the page instead — from `role`, `aria-label`,
+  `aria-labelledby`, `labels`, `placeholder`, `alt`, `title`. That is enough for elements
+  to be addressed as `role:name`, the way an accessibility tree addresses them, and it is
+  an approximation of one rather than the same thing.
+- **No network getter.** Requests come from hooks the capture installs, which is exactly
+  why the initial document load of a navigation is not observed.
+- **No general key press.** `browser_type` presses Enter when `submit` is set, and that is
+  the only key reachable. Escape, Tab and the arrow keys are not, so a flow that needs to
+  dismiss a dialog or drive a keyboard-only widget cannot be walked at all. That bounds
+  which transitions a run can discover, and it is worth knowing before reading a thin
+  graph as a thin application.
+
+**One tool that reads like inspection is not.** `browser_eval` runs arbitrary JavaScript
+in the page and its own description offers "triggering page logic" as a use, so it is
+captured around like a click. That is not a precaution: the recorder itself changes the
+page through `browser_eval` when it installs its hooks. Read the state after an eval
+exactly as after a click — or the step becomes evidence nobody interpreted, and the
+transition over it cannot be derived at all.
+
 ## What this proves, and what it does not
 
 **Proven end-to-end:** evidence is captured around every browser action and persisted
@@ -294,6 +349,12 @@ reporting a misplaced reading as a `chain_break` instead of letting it pass.
    as a new state, which mints a state per value. The schema's `identity` is about the
    page, not the widget, but the tool cannot tell the two apart — it only knows the
    tuple it was handed, and the honest thing is to report the id rather than guess.
+6. **The graph's top-level nouns have no source.** `graph.schema.json` requires
+   `application` (`id`, `name`) and nothing supplies it: `run.json` records the start
+   URL and the instruction, and neither names the app. `features` is optional in the
+   schema and is a judgement about the app's own structure rather than something the
+   machinery can observe, so it needs a model-facing tool. Neither exists yet, and
+   `graph_commit` cannot emit a valid graph until the first one does.
 
 ## Tests
 
