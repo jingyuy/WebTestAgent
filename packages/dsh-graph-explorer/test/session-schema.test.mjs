@@ -2,13 +2,21 @@ import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRun } from '../lib/session.js';
-import { vocabularyNotes, EFFECT_REQUIRED, CAPABILITY_NAME_PATTERN } from '../lib/schema.js';
+import { normalizeApplication, vocabularyNotes, EFFECT_REQUIRED, CAPABILITY_NAME_PATTERN } from '../lib/schema.js';
 
 let fails = 0;
 const check = (label, actual, expected) => {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
   if (!ok) { fails++; console.log('FAIL', label, '\n  actual  ', JSON.stringify(actual), '\n  expected', JSON.stringify(expected)); }
   else console.log('ok  ', label, '=', JSON.stringify(actual));
+};
+const refuses = (label, fn, expectedFragment) => {
+  try { fn(); fails++; console.log('FAIL', label, '(no error thrown)'); }
+  catch (error) {
+    const ok = String(error.message).includes(expectedFragment);
+    if (!ok) { fails++; console.log('FAIL', label, '\n  message ', error.message, '\n  expected to contain', expectedFragment); }
+    else console.log('ok  ', label);
+  }
 };
 
 const cwd = mkdtempSync(join(tmpdir(), 'gx-'));
@@ -83,6 +91,32 @@ check('custom needs nothing', EFFECT_REQUIRED.get('custom'), []);
 check('name pattern', [CAPABILITY_NAME_PATTERN.test('add_product_to_cart'), CAPABILITY_NAME_PATTERN.test('Add_Product'), CAPABILITY_NAME_PATTERN.test('add-product'), CAPABILITY_NAME_PATTERN.test('')],
   [true, false, false, false]);
 check('run.json untouched by transitions', JSON.parse(readFileSync(join(run.dir, 'run.json'), 'utf8')).plugin.version, '0.0.0');
+
+// --- the declared application --------------------------------------------
+// The one graph field the machinery cannot observe, so it is declared in config
+// and only checked here. Every refusal below is a value that would otherwise have
+// been written into a graph as though someone had declared it.
+check('an undeclared application is null, not a guess',
+  [normalizeApplication(undefined), normalizeApplication(null)], [null, null]);
+check('a declared application is carried verbatim',
+  normalizeApplication({ id: 'app_acme-demo', name: 'Acme Demo App' }),
+  { id: 'app_acme-demo', name: 'Acme Demo App' });
+refuses('an unprefixed id is refused', () => normalizeApplication({ id: 'acme', name: 'Acme' }), 'must be prefixed');
+refuses('a missing id is refused', () => normalizeApplication({ name: 'Acme' }), 'is not a usable application id');
+refuses('a whitespace-only name is refused', () => normalizeApplication({ id: 'app_x', name: '   ' }), 'must be a non-empty string');
+refuses('an unrecognized key is refused, not dropped',
+  () => normalizeApplication({ id: 'app_x', name: 'Acme', baseUrl: 'http://x/' }), 'no key');
+refuses('a non-mapping is refused', () => normalizeApplication('app_x'), 'must be a mapping');
+
+const declaredDir = mkdtempSync(join(tmpdir(), 'gx-app-'));
+const declared = createRun({
+  cwd: declaredDir,
+  provenance: { application: normalizeApplication({ id: 'app_acme', name: 'Acme' }) },
+});
+check('the declared application reaches run.json',
+  JSON.parse(readFileSync(join(declared.dir, 'run.json'), 'utf8')).application, { id: 'app_acme', name: 'Acme' });
+check('an undeclared application is written as null, so the commit can refuse',
+  JSON.parse(readFileSync(join(run.dir, 'run.json'), 'utf8')).application, null);
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

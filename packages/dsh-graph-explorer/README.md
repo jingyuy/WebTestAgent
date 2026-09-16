@@ -78,12 +78,13 @@ instruction, what model, what starting point:
   "cwd": "/Users/you/tmp",
   "start_url": "http://127.0.0.1:4173/",
   "instruction": "Open http://127.0.0.1:4173/ and sign in ...",
+  "application": { "id": "app_acme", "name": "Acme" },
   "max_steps": null,
   "provider": "deepseek-official",
   "model": "deepseek-flash",
   "session_id": "session-dc4d1554-...",
   "agent_preset": null,
-  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.9" }
+  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.10" }
 }
 ```
 
@@ -202,8 +203,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.9.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.9.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.10.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.10.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -235,10 +236,35 @@ unresolvable peer can never turn a plugin install into a hard failure.
     observeTool: graph_observe       # rename the semantic tool
     transitionTool: graph_transition # rename the transition tool
     runDirName: graph-run            # where evidence lands (relative to the workspace)
+    application:                     # which application this graph is about
+      id: app_acme                   # stable, prefixed; not derived from the URL
+      name: Acme                     # human-readable
     maxSteps: 12                     # folded into the prompt's step budget
     screenshot: true                 # one PNG per captured step
     maxDigestChars: 14000            # trims the digest before it competes for context
 ```
+
+`application` is the one field of the graph the machinery cannot observe. `run.json`
+records the start URL and the instruction, and neither of those names an application:
+a host is where an app is *served*, not what it *is*. That is why the schema carries
+`application.id` beside `base_url` and adds an `environments` map — the identity has to
+outlive the address, or walking the same app on staging silently becomes a second
+application.
+
+So it is declared, and there is deliberately **no fallback**:
+
+- unset leaves `null` in `run.json`, and the commit refuses, naming the setting to
+  supply. That is recoverable.
+- an id derived from the start URL would not be. It would sit in the finished graph
+  indistinguishable from a declared one, and nothing downstream could tell them apart.
+
+`id` must be prefixed (`app_acme` / `app-acme`) and `name` non-empty — the two required
+fields of `application.schema.json`. Anything else is refused rather than repaired,
+including an unrecognized key: the schema sets `additionalProperties: false`, so a key
+it does not list is a typo, and a value silently dropped is the same class of falsehood
+as a guessed default. As with `runDirName`, the config **schema** catches a bad `id`
+while the profile is booting, and `apply()` **normalizes once** so that what reaches
+`run.json` is already known to be usable.
 
 `runDirName` must be a path relative to the workspace, and it **must not be able
 to escape it**: no leading `/`, no `..` segment, no backslash, no NUL. Nested
@@ -349,12 +375,11 @@ reporting a misplaced reading as a `chain_break` instead of letting it pass.
    as a new state, which mints a state per value. The schema's `identity` is about the
    page, not the widget, but the tool cannot tell the two apart — it only knows the
    tuple it was handed, and the honest thing is to report the id rather than guess.
-6. **The graph's top-level nouns have no source.** `graph.schema.json` requires
-   `application` (`id`, `name`) and nothing supplies it: `run.json` records the start
-   URL and the instruction, and neither names the app. `features` is optional in the
-   schema and is a judgement about the app's own structure rather than something the
-   machinery can observe, so it needs a model-facing tool. Neither exists yet, and
-   `graph_commit` cannot emit a valid graph until the first one does.
+6. **`features` has no source.** `application` is now declared in config (see
+   [Configuration](#configuration)), but `features` is a judgement about the app's own
+   structure rather than something the machinery can observe, so it needs a model-facing
+   tool. Optional in the schema, so its absence costs a valid graph rather than a
+   committable one — but `graph_commit` has to be able to emit it.
 
 ## Tests
 

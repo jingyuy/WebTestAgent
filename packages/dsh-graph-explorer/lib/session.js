@@ -4,9 +4,9 @@
  * Five files, matching the target schema's own framing ("reality -> observation ->
  * interpretation -> graph"):
  *
- *   run.json          provenance. Written once, never rewritten: what code,
- *                     what instruction, what model, what starting point. Unknown
- *                     values stay null rather than being guessed at.
+ *   run.json          provenance. Written once, never rewritten: what code, what
+ *                     application, what instruction, what model, what starting
+ *                     point. Unknown values stay null rather than being guessed at.
  *   observations.jsonl  machine evidence, one record per captured step. IMMUTABLE:
  *                       nothing is ever rewritten, so a later reading cannot
  *                       silently alter the evidence it was derived from.
@@ -131,6 +131,12 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
     cwd,
     start_url: provenance.startUrl ?? null,
     instruction: provenance.instruction ?? null,
+    // Which application this is about, as declared in config. The one field here
+    // the machinery cannot observe, and the one the graph cannot be committed
+    // without. Null is the honest "not declared": it makes the commit refuse,
+    // which names the setting to supply, whereas an id derived from the start URL
+    // would be indistinguishable in the finished graph from a declared one.
+    application: provenance.application ?? null,
     max_steps: provenance.maxSteps ?? null,
     provider: provenance.provider ?? null,
     model: provenance.model ?? null,

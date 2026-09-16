@@ -63,6 +63,79 @@ export const LIST_OPERATIONS = new Set(['add', 'remove', 'reorder', 'reset']);
 export const CAPABILITY_KINDS = new Set(['interaction', 'navigation', 'query', 'setup', 'composite']);
 
 /**
+ * `application.id` is a prefixed id: `app_` or `app-` followed by the shared id
+ * alphabet. From `common.schema.json#/$defs/appId`, which narrows the generic `id`
+ * definition with exactly this pattern.
+ */
+export const APPLICATION_ID_PATTERN = /^app[-_][A-Za-z0-9._:-]+$/;
+
+/**
+ * The only keys accepted in a configured `application`.
+ *
+ * `application.schema.json` declares `additionalProperties: false`, so a key it does
+ * not list makes the object invalid rather than merely odd. An unrecognized key that
+ * is silently dropped is the same class of falsehood as a guessed default: `baseUrl`
+ * for `base_url` would leave the graph claiming an application with no base URL, and
+ * nothing in the output would say the value had been discarded. Refused, not carried.
+ */
+const APPLICATION_KEYS = new Set(['id', 'name']);
+
+/**
+ * The application this run is declared to be about, or `null` when none was declared.
+ *
+ * This is the one field of the graph the machinery cannot observe. `run.json` records
+ * the start URL and the instruction, and neither of those names an application: a host
+ * is where an app is *served*, not what it *is*. That is why `application.schema.json`
+ * carries `id` beside `base_url`, and adds an `environments` map for the same graph
+ * reused across hosts — the identity has to outlive the address. So it is declared in
+ * config, and this checks only that the declaration is usable.
+ *
+ * `null` is a real answer and is kept distinct from a bad one. An undeclared
+ * application is a run whose graph cannot be committed yet, and that refusal names the
+ * setting to supply, so it is recoverable. An id derived from the start URL is not:
+ * it would be written into the graph where nothing downstream could tell it apart from
+ * a declared one, and walking the same app on staging would silently become a second
+ * application.
+ *
+ * The rules enforced here live beside the schema rather than with the config because
+ * both are the normative schema's (the `app` prefix, `additionalProperties: false`),
+ * and because the value reaches `run.json`, which can be written by a caller with no
+ * config schema in front of it.
+ */
+export function normalizeApplication(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      'application must be a mapping of id and name, e.g. { id: "app_acme", name: "Acme" }; got '
+      + JSON.stringify(value) + '.',
+    );
+  }
+  const unknown = Object.keys(value).filter((key) => !APPLICATION_KEYS.has(key));
+  if (unknown.length) {
+    throw new Error(
+      'application has no key ' + JSON.stringify(unknown[0]) + '. The schema lists exactly id and name '
+      + '(application.schema.json sets additionalProperties: false), so an unrecognized key is a typo — and '
+      + 'carrying it would put an undeclared field into run.json.',
+    );
+  }
+  const { id, name } = value;
+  if (typeof id !== 'string' || !APPLICATION_ID_PATTERN.test(id)) {
+    throw new Error(
+      'application.id ' + JSON.stringify(id ?? null) + ' is not a usable application id: it must be prefixed, '
+      + 'like app_acme or app-acme. It is the graph\'s stable name for this application across hosts, so it '
+      + 'cannot be derived from the start URL.',
+    );
+  }
+  if (typeof name !== 'string' || !name.trim()) {
+    throw new Error(
+      'application.name must be a non-empty string: it is the human-readable name the graph shows for '
+      + JSON.stringify(id) + '.',
+    );
+  }
+  return { id, name };
+}
+
+/**
  * `capability.name` is a stable snake_case verb phrase — `common`-style pattern from
  * `capability.schema.json`. Enforced because an invalid name produces a graph that
  * cannot be committed, and the model can always rename.

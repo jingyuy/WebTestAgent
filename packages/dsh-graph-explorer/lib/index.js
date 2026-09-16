@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION } from './capture.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
 import {
+    APPLICATION_ID_PATTERN,
     CAPABILITY_KINDS,
     CAPABILITY_NAME_PATTERN,
     DETECTION_TYPES,
@@ -48,6 +49,7 @@ import {
     EFFECT_TYPES,
     LIST_OPERATIONS,
     SEVERITIES,
+    normalizeApplication,
     vocabularyNotes,
 } from './schema.js';
 import { createRun, normalizeRunDirName, RUN_DIR_NAME, RUN_DIR_PATTERN } from './session.js';
@@ -88,6 +90,21 @@ export const Config = Schema.object({
         .default(RUN_DIR_NAME)
         .pattern(RUN_DIR_PATTERN)
         .description('Where the run writes its evidence, relative to the workspace. Must not escape it.'),
+    // The one graph field the harness cannot observe. `run.json` records the start URL
+    // and the instruction, and a host is where an app is served, not what it is — so
+    // the identity is declared here. There is deliberately no fallback: unset leaves
+    // `null` in run.json and the commit refuses, naming this setting, while a derived
+    // id would sit in the finished graph indistinguishably from a declared one.
+    application: Schema.object({
+        id: Schema.string()
+            .pattern(APPLICATION_ID_PATTERN)
+            .description('Stable application id, prefixed: app_acme. Not derivable from the start URL.'),
+        name: Schema.string()
+            .min(1)
+            .description('Human-readable application name, e.g. Acme.'),
+    })
+        .default(null)
+        .description('Which application this graph is about. Without it a run still records evidence, but its graph cannot be committed.'),
     maxSteps: Schema.number(),
     screenshot: Schema.boolean().default(true),
     maxDigestChars: Schema.number().default(14000),
@@ -391,6 +408,10 @@ export function apply(ctx, config) {
     // They used to be two independent derivations of the config, which is how a
     // custom runDirName could point the model at a directory that never existed.
     const runDirName = normalizeRunDirName(config.runDirName ?? RUN_DIR_NAME);
+    // Normalized once, so the value the run store writes is already known to be usable:
+    // a bad declaration is refused while the profile is booting, with a message naming
+    // what to write, instead of surfacing as a schema path at commit time.
+    const application = normalizeApplication(config.application);
 
     /** Lazily created on the first captured action, so a run needs no explicit start. */
     let run = null;
@@ -441,6 +462,7 @@ export function apply(ctx, config) {
             provenance: {
                 startUrl: requestedUrl(toolName, toolArgs),
                 instruction,
+                application,
                 maxSteps: config.maxSteps ?? null,
                 plugin: self,
                 ...agentProvenance(exec),
