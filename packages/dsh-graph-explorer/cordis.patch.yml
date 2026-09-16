@@ -1,0 +1,12 @@
+# dsh-graph-explorer bundle patch: mounts the plugin into a dsh profile composition.
+#
+# Install (tarball, NOT a `link:` directory — see README):
+#   npm pack                                   # in packages/dsh-graph-explorer
+#   dsh plugin --profile graph add <abs path to the .tgz>
+#
+# The plugin registers `graph_observe` into the shared `tools` registry, contributes
+# a `systemPrompt` protocol section, and wraps `tools/execute` to capture evidence
+# around every `browser_*` call. It does not own the browser: `dsh-browser` does.
+- insert:
+    - id: graph-explorer
+      name: '@webtestagent/dsh-graph-explorer'

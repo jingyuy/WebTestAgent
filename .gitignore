@@ -2,6 +2,7 @@ node_modules/
 dist/
 artifacts/
 browser-screenshots/
+graph-run/
 *.tgz
 .env
 *.log

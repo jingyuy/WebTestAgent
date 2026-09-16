@@ -18,6 +18,9 @@ flowchart LR
     P -->|"title, text, HTML, PNG"| T
     T -->|observation| R
     R --> A[(screenshots)]
+    R -.->|"tools/execute"| G["dsh-graph-explorer<br/>recorder"]
+    G -.->|"browser_eval → evidence"| D[(observations +<br/>states)]
+    L -->|"graph_observe(meaning)"| G
 ```
 
 > **The browser plugin this repo used to ship was retired.** See
@@ -33,6 +36,7 @@ flowchart LR
 | `dsh/web-browse-picker.patch.yml` | Overlay that makes the DSH web UI's workspace picker automatable. Without it, the picker is a **native OS dialog** — outside the page, so no browser automation can see or dismiss it, which makes the whole web UI untestable end to end. |
 | `scripts/patch-dsh-browser.mjs` | Two source edits `dsh-browser` cannot be configured into: stop it advertising `navigator.webdriver`, and let it open a **visible** window. Per profile, idempotent, with `--verify` and `--revert`. |
 | `demo-app/index.html` | A small Acme app with deliberately realistic failure modes, so a run can be tested against *rejections* and not only happy paths. |
+| `packages/dsh-graph-explorer/` | The behaviour-graph spike: a DSH bundle that records evidence around every `browser_*` call and gives the model `graph_observe` to say what a page *means*. See its [README](packages/dsh-graph-explorer/README.md). |
 
 ---
 
@@ -67,6 +71,7 @@ Profiles live in `~/.dsh/profiles/<name>/`. On this machine:
 | --- | --- | --- |
 | `headless` | `dsh-base`, `dsh-headless`, `dsh-browser` | headless (stock) |
 | `web` | `dsh-base`, `dsh-web-app`, `dsh-browser` | **headed**, via the patcher below |
+| `graph` | `dsh-base`, `dsh-headless`, `dsh-browser`, `dsh-graph-explorer` | headless (stock) |
 
 Both profile patch layers (`~/.dsh/profiles/<name>/cordis.patch.yml`) are intentionally empty:
 
@@ -83,6 +88,38 @@ Manage the browser bundle with:
 dsh plugin --profile headless add dsh-browser
 dsh plugin --profile headless remove dsh-browser
 ```
+
+---
+
+## The behaviour-graph explorer (spike)
+
+`packages/dsh-graph-explorer/` is the first step toward an integration-test generator: a run
+that explores a site and produces a machine-readable record of the application's states and the
+transitions between them.
+
+The design in one line: **the machinery captures evidence, the model supplies meaning, the tool
+boundary binds them.** `dsh-browser` keeps sole ownership of the page; the plugin only observes
+the calls that drive it and reads the page through `browser_eval`.
+
+Three harness seams, all verified against the installed 0.1.5-rc.2 types:
+
+| Seam | API | Role |
+| --- | --- | --- |
+| Recorder | `ctx.on('tools/execute', (exec, next))` | Capture evidence around every `browser_*` action that can change the page |
+| Semantic tool | `ctx.tools.register(defineTool({…}))` | `graph_observe` — the only path by which a state reaches the graph |
+| Protocol | `ctx.systemPrompt.section({…})` | The act → observe loop the model follows |
+
+`dsh plugin --profile graph add <tarball>` installs it. Two traps, both hit during the spike:
+
+- **Install a tarball, never a `link:` directory.** A directory install resolves the real path, so
+  the plugin's `import '@deepseek-ai/dsh-tools'` starts from this repo — which has no
+  `node_modules` and no harness packages — and fails to resolve.
+- **Bump the version to redeploy.** pnpm keys a `file:` tarball on the spec string, so
+  re-installing the same path reuses the cached copy and silently keeps the old code. `--force`
+  does not help; a version bump does.
+
+See the [package README](packages/dsh-graph-explorer/README.md) for the output layout and the
+list of gaps that are not yet closed.
 
 ---
 
