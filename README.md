@@ -70,17 +70,41 @@ Profiles live in `~/.dsh/profiles/<name>/`. On this machine:
 | Profile | Bundles | Browser |
 | --- | --- | --- |
 | `headless` | `dsh-base`, `dsh-headless`, `dsh-browser` | headless (stock) |
-| `web` | `dsh-base`, `dsh-web-app`, `dsh-browser` | **headed**, via the patcher below |
+| `web` | `dsh-base`, `dsh-web-app`, `dsh-browser`, `dsh-graph-explorer` | **headed**, via the patcher below |
 | `graph` | `dsh-base`, `dsh-headless`, `dsh-browser`, `dsh-graph-explorer` | headless (stock) |
 
-Both profile patch layers (`~/.dsh/profiles/<name>/cordis.patch.yml`) are intentionally empty:
+A patch layer must stay a top-level YAML **array**. It may be `[]`, but a file whose entries are
+all commented out parses as `null`, and dsh then refuses to boot with
+`overlay … must be a top-level YAML array of loader patch entries`.
+
+`graph` and `web` are no longer empty: each declares which application its graphs are about,
+because the graph explorer cannot observe that — `run.json` records the start URL, and a host is
+where an app is *served*, not what it *is*.
 
 ```yaml
-[]
+- id: graph-explorer
+  name: '@webtestagent/dsh-graph-explorer'
+  config:
+    application:
+      id: app_acme-demo     # stable, prefixed; deliberately the same id in both profiles
+      name: Acme Demo App
 ```
 
-Keep it an explicit `[]`. A comments-only patch layer parses as `null`, and dsh then refuses to
-boot with `overlay … must be a top-level YAML array of loader patch entries`.
+The shared id is the point: a run through either profile lands in one application rather than
+two. `headless` keeps `[]` — it loads no graph explorer, so a run there records nothing.
+
+Two traps. A non-insert patch replaces the targeted row's whole `config`
+(`dsh-app-boot`'s `applyEntryPatches` does `target[key] = value`), so every `graph-explorer`
+setting has to live in that single block — setting `runDirName` in one file and `application` in
+another silently loses the first. And the run directory is relative to the **session's** cwd: in
+the web UI that is the workspace you picked in the tree picker, not the directory you launched
+dsh from.
+
+Confirm what composed before you run, which is cheaper than finding out at commit time:
+
+```bash
+cd ~/tmp && dsh --profile web --dump-config | grep -A 6 'graph-explorer'
+```
 
 Manage the browser bundle with:
 
