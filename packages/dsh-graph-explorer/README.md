@@ -552,6 +552,19 @@ against the normative schemas with no errors — with one candidate refused, one
 a self-loop read at the wrong moment arriving as an error, and a URL assertion with no
 value pinned to the route its own captures came from.
 
+**Proven by a live agent run.** A sign-in walk against `demo-app` called `graph_commit`
+as its own last step and committed 6 states, 4 capabilities and 7 edges from 9 readings;
+the graph validates. The run's defects landed in the report rather than in the graph, which
+is the point: a dashboard state whose `current_user` / `project_list` detection was refuted
+by one of its own raced readings (`detection_refuted_by_evidence`, error) was committed
+*without* that detection instead of failing the whole document; effects naming semantic
+paths (`login.email`) that resolve to no element id were dropped with the reason; and the
+committed graph carries every one of those findings in its own `warnings[]`, so a reader of
+`graph.json` alone learns what the run doubted. Two things that run made obvious are next:
+`element_target_does_not_resolve` is too blunt for a dotted target with a resolvable
+suffix, and `element_declared_in_several_states` repeats itself once per element per state
+family, which a shared form turns into a wall of near-identical warnings.
+
 **Known gaps, in the order they will bite:**
 
 1. **Initial document loads are not observed.** The network/console hooks are
@@ -583,6 +596,12 @@ value pinned to the route its own captures came from.
    structure rather than something the machinery can observe, so it needs a model-facing
    tool. Optional in the schema, so its absence costs a valid graph rather than a
    committable one — but `graph_commit` has to be able to emit it.
+7. **There is no entry state, so `reachability` cannot be a real check.**
+   `graph.schema.json` has no field designating where a journey starts, so the invariant
+   reports every state in a committed graph as unreachable from an entry that does not
+   exist. It is a warning, and it is reported rather than silently passed, but the fix
+   belongs in the schema — a graph that cannot say where it starts cannot answer whether
+   anything is reachable.
 
 ## Tests
 
