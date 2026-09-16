@@ -5,8 +5,10 @@ append-only evidence log and an application behaviour graph.
 
 It records evidence, the model's reading of each state, and each transition — a
 capability applied in one state, landing in another — with the machinery's own
-account of the step checked against the model's. It does not yet emit a full
-`*.graph.json` or validate against the JSON Schemas; see
+account of the step checked against the model's. `graph_commit` then reconciles the
+whole run into a `graph.json` that validates against the target JSON Schemas, beside
+a `commit_report.json` that says what it committed, what it refused and why. See
+[The commit](#the-commit) and
 [What this proves, and what it does not](#what-this-proves-and-what-it-does-not).
 
 ## The design in one line
@@ -33,8 +35,9 @@ One page, one owner. Never mount both.
 | Seam | API | Role |
 | --- | --- | --- |
 | Recorder | `ctx.on('tools/execute', (exec, next))` | Capture evidence around every browser action that can change the page |
-| Semantic tools | `ctx.tools.register(defineTool({...}))` | `graph_observe` and `graph_transition` — the only paths by which a state or an edge reaches the graph |
+| Semantic tools | `ctx.tools.register(defineTool({...}))` | `graph_observe` and `graph_transition` — the only paths by which a state or an edge reaches the candidate graph |
 | Protocol | `ctx.systemPrompt.section({...})` | The act → observe → record loop the model follows |
+| Reconciliation | `ctx.tools.register(defineTool({...}))` | `graph_commit` — the only path from candidate records to a committed graph |
 
 `tools/execute` is an around-waterfall. The wrapper only ever reads `exec` and
 returns the real result — a wrapper that changed or dropped a result would
@@ -60,6 +63,8 @@ graph-run/
   capabilities.jsonl  # the vocabulary of things the app can be asked to do
   transitions.jsonl   # one record per walked step, endpoints derived from the readings
   evidence/           # one PNG per captured step
+  graph.json          # written by graph_commit, only when the rules are satisfied
+  commit_report.json  # written by graph_commit, always
 ```
 
 All four `.jsonl` files are append-only and never rewritten, so a later reading
@@ -84,7 +89,7 @@ instruction, what model, what starting point:
   "model": "deepseek-flash",
   "session_id": "session-dc4d1554-...",
   "agent_preset": null,
-  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.10" }
+  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.11" }
 }
 ```
 
@@ -193,6 +198,176 @@ maps to one id, and walking it again appends another step with `repeated: true`.
 keeps identity-uniqueness true by construction while leaving "we added two products"
 intact as two steps.
 
+## The commit
+
+> Exploration is allowed to be wrong; `graph_commit` is where the run decides what
+> becomes knowledge.
+
+Everything above this line is *evidence*, and evidence is append-only for a reason: a
+capture is a fact about what the page did, a reading is what the model made of it, and a
+transition candidate is a claim about the step. None of them can be retracted by
+appending more of them, and none of them should be edited after the fact — an edited log
+is not evidence, it is a story.
+
+That leaves the question of what the run *knows*, which is a different question from what
+it recorded. `graph_commit` answers it, once, against the whole run at a time. This is
+where the exploratory logs become a graph, and it is a reconciliation step rather than a
+blind append:
+
+```
+raw evidence        observations.jsonl          append-only, never rewritten
+                    states.jsonl                 candidates: every reading
+                    capabilities.jsonl
+                    transitions.jsonl
+        │
+        │  graph_commit — read all of it, judge each candidate, write both files
+        ▼
+committed graph     graph.json                    only what survived the rules
+                    commit_report.json            every judgement that produced it
+```
+
+**It never repairs the raw logs.** A refused edge stays in `transitions.jsonl` exactly as
+the walk recorded it; a refuted detection stays in `states.jsonl` exactly as the model
+wrote it. The commit only decides what *enters the graph*. So the same run can be judged
+differently later — after a config fix, a new rule, or a second walk — without re-walking
+and without pretending the earlier reading never happened.
+
+**A refusal is a decision, not an error.** The tool returns `committed: false` and the
+blocking rules; it does not throw and it does not clean up. An agent that treated a
+blocked commit as a crash would lose the report, and the report is the product of that
+run: it is the thing that says *which* rule fired and *which* candidate caused it. The
+only inputs that raise are a directory that is not a run at all and a corrupt log, and
+even then nothing is written.
+
+**`ok` describes the document; finding severity describes the candidate.** This
+distinction carries most of the design:
+
+| | what it is about | what it means | effect |
+| --- | --- | --- | --- |
+| `report.blocking[]` (gates, error) | the document | a rule the graph cannot satisfy | `graph.json` is not written |
+| `findings[]` with `severity: error` | one candidate or one element | that candidate is wrong | the edge is refused, the graph still commits |
+| `findings[]` with `severity: warning` | one candidate | doubt the run carries | committed, with the doubt recorded |
+| `findings[]` with `severity: info` | one translation | the commit changed the shape of what it was given | committed as translated |
+
+The two are separate on purpose. A single bad edge is not a reason to withhold an entire
+graph — it is a reason to withhold *that edge*, and to say so where the model will read
+it. Conflating them produces the worst of both: a graph that is thrown away over one
+refusal, or a refusal that gets committed with a shrug.
+
+### What blocks a graph
+
+A gate fires on the document, not on a candidate:
+
+- **`application_not_declared`** — `application: {id, name}` is required by the schema and
+  cannot be observed (see [Configuration](#configuration)), so an unset one is a config
+  fix, not something a second walk could discover.
+- **`state_page_type_not_usable`** — a reading whose `page_type` cannot be a schema id.
+  Identity is required, so a state without a usable one is uncommittable.
+- **`state_without_detection`** — every state must carry at least one assertion that
+  identifies it, or the graph has a state nothing can recognise.
+- **`state_identity_collision`** — two committed states with the same id. `graph_observe`
+  makes this impossible by construction, so it means the logs were edited.
+- **`nothing_to_commit`** — records exist but no state was ever read for any of them. This
+  is the gate that catches the most common way a run goes wrong: an agent that drives the
+  page, records transitions, and never calls `graph_observe`. The logs look non-empty, so
+  an "is there anything here" check would pass; there is nothing to reconcile, because a
+  transition's endpoints come from readings.
+
+### What is judged instead
+
+Per candidate, and recorded in `report.decisions[]`:
+
+- **Evidence refutation.** `detection_refuted_by_evidence` (error): a state claims its
+  detection assertion held, and the capture bound to that very reading disproves it. This
+  is the check that makes `detection` a *predicate checked against evidence* rather than
+  three bullets the model typed — a claim about a page it can no longer see, verified
+  against a page it captured. `detection_value_not_in_evidence` (warning) is the softer
+  version: a text or value claim no captured element carries.
+- **Translation, reported.** A bare `{"type": "url"}` detection has no value to compare, so
+  it is pinned to the route derived from the state's own captures and reported as
+  `detection_url_pinned_to_route` (info). The alternative — dropping it — would leave a
+  state with no detection and turn a missing value into a blocked graph.
+- **Element declaration ownership.** An element id is globally unique across states
+  (§14.1), so exactly one state *owns* each element and the other states that declare it
+  are `also_declared_in`. That is a `warning` (`element_declared_in_several_states`), not an
+  error: the inventory is shared, the identity is not. `element_not_seen_in_evidence`
+  records an element no capture ever showed. `elements` is an **inventory**, `detection` is
+  a **predicate** — reading them as the same kind of claim is how a duplicated inventory
+  becomes a false identity.
+- **Reference resolution.** The model writes shorthand (`{target: 'logout'}`, purposes,
+  capability names, observation ids); the schema wants ids. Every translation is either
+  resolved (`effect_targets_resolved`, `element_aliased_to_id`) or dropped with a named
+  reason (`assertions_dropped`, `effects_dropped`, `api_references_dropped`, with details
+  like `element_target_does_not_resolve`, `state_assertion_without_a_state_endpoint`). A
+  dropped reference is never silent: it would make the graph assert less than the run did,
+  which is indistinguishable from a run that found less.
+- **Supersede.** A transition id names an edge, so several candidates can share one — a
+  self-loop then a clean re-walk, say. The best candidate is committed and the others are
+  `superseded` with `candidates: N` and the reason, never deleted. Prefer a candidate with
+  endpoint evidence and no self-contradiction; `superseded` is not the same verdict as
+  `rejected`, and the report keeps them apart.
+
+### The report
+
+`commit_report.json` is the run's own account of the commit, written even when the commit
+is refused:
+
+```
+generated_at  command  run_dir  application  start_url  instruction  version
+ok  blocking[]  gates[]
+states{committed, candidates, deduplicated, readings}
+capabilities{committed, candidates}   transitions{candidates, distinct, committed, rejected, superseded}
+observations{records, carried}        elements{declared, conflicts, shared}
+decisions[]   findings[]   invariants[]   notes[]   warnings[]
+```
+
+`decisions[]` is per candidate (`commit` / `reject` / `supersede`, with the reason);
+`findings[]` is flat and carries its `scope`, so a dropped assertion on a *committed* edge
+is as visible as one on a refused edge — the earlier shape hid them inside
+`decisions[].warnings`, which is exactly where nobody looks; `invariants[]` is §14
+(`identity_unique`, `reference_integrity`, `reachability`, `feature_closure`,
+`version_coherence`, …), each with a severity and only some of them blocking;
+`observations{records, carried}` says how many raw records travelled into the graph as
+evidence refs; `notes[]` carries the recorder's own warnings, graded by
+`NOTE_SEVERITY`, so `self_loop_but_controls_changed` — read at the wrong moment, the
+failure that silently shifts every endpoint after it — arrives as an error rather than as
+a line in a list of warnings.
+
+**`force` writes the assembled document with its refusal in `warnings[]`.** It is for
+inspecting a near-miss: `graph.json` is written from the same draft the rules judged, and
+every blocker is echoed into the graph's own `warnings` (which the schema types as an
+array of strings) so a forced document cannot be mistaken for a clean one. `report.ok`
+stays `false`. A forced commit is not a way to commit; it is a way to look.
+
+### Committing without an agent
+
+The reconciliation is a pure function over files, so the tool is a thin wrapper:
+
+```sh
+node lib/commit.js ~/tmp/graph-run          # human-readable summary, exit 0 ok / 1 blocked / 2 usage
+node lib/commit.js ~/tmp/graph-run --json   # the report
+```
+
+Consequence worth knowing: `graph_commit` with no `run_dir` targets the run *this session*
+recorded, and failing that the run directory the session would have written to. It does
+**not** create one. A commit that started an empty run in order to reject it would leave
+a directory behind that looks like an exploration nobody performed.
+
+**Independently validated.** The graph is checked against the normative schemas in
+`IntegrationTestGenerator/schemas`, and the validator deliberately lives **outside this
+repo** (`~/tmp/schema-check/`), so a fresh clone's `npm test` needs no install:
+
+```sh
+cd ~/tmp/schema-check && node validate.mjs ~/tmp/commit-probe/graph.json
+GRAPH_SCHEMA_DIR=/path/to/schemas node validate.mjs <graph.json>   # schema dir override
+```
+
+It is `ajv` + `ajv-formats` (`Ajv2020`, `strict: false`, draft 2020-12), and it is the
+reason the report's own findings can be trusted to mean what the schema means: the plugin
+enforces the parts of the target format it can judge, and the validator catches the parts
+it got wrong. Both are needed — the plugin can be wrong about the schema, and the schema
+cannot see the run.
+
 ## Install
 
 **Tarball, not a `link:` directory.** A directory install resolves the real path,
@@ -203,8 +378,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.10.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.10.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.11.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.11.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -235,6 +410,7 @@ unresolvable peer can never turn a plugin install into a hard failure.
   config:
     observeTool: graph_observe       # rename the semantic tool
     transitionTool: graph_transition # rename the transition tool
+    commitTool: graph_commit         # rename the reconciliation tool
     runDirName: graph-run            # where evidence lands (relative to the workspace)
     application:                     # which application this graph is about
       id: app_acme                   # stable, prefixed; not derived from the URL
@@ -288,11 +464,12 @@ This is refused rather than repaired, in two places, for two different reasons:
 outside the project. A rewritten path is how a config typo becomes a surprise on
 disk.
 
-## Why two tools, not ten
+## Why three tools, not ten
 
 A semantic layer usually grows one tool per noun — `observe_state`, `identify_state`,
 `save_state`, `find_similar_state`, `record_transition`, `add_capability`,
-`query_graph`. This plugin has two. The merges are deliberate, because each split
+`query_graph`.
+This plugin has three. The merges are deliberate, because each split
 creates a state the graph can be left in that has no meaning:
 
 | Split in two | The half-recorded state it allows |
@@ -316,6 +493,23 @@ stands and what the vocabulary is. A `query_graph` tool would duplicate `read_fi
 over data the model can already open. The moment to add one is when a run gets large
 enough that reading `states.jsonl` costs more than a compact projection would — not
 before, and never instead of the file, which is the evidence.
+
+**And the third tool is not a fourth merge target, it is a boundary.** It would be
+easy to fold the reconciliation into `graph_transition`: judge the edge as it is
+recorded and write it into the graph directly. That would make every candidate
+knowledge the instant it was claimed, which is the one thing the design refuses —
+there would be no point at which a claim could be withdrawn, so the append-only logs
+would be a formality and a misread page would be in the graph with nothing to compare
+it against. Keeping the commit separate is what makes "exploration is allowed to be
+wrong" a property of the system rather than an aspiration: the walk is free to be
+sloppy because the commit is where sloppiness gets caught, and the commit can be strict
+because it judges the whole run at once instead of one step at a time.
+
+**The tool count is not the goal; the number of half-recorded states is.** Each of the
+three exists because removing it would leave a claim that is neither evidence nor
+knowledge — a reading nobody saved, an edge judged before it could be compared,
+evidence that is not a graph. `graph_observe` and `graph_transition` write candidates;
+`graph_commit` is the only writer of the graph.
 
 **What the browser does not provide.** `dsh-browser` is 12 tools (`open`, `navigate`,
 `click`, `type`, `select`, `wait`, `screenshot`, `get_text`, `get_html`, `eval`,
@@ -352,6 +546,12 @@ the assembled prompt; and a live run against `demo-app` produced 5 states, 6
 capabilities and 6 transitions, reusing one transition id for a re-walked edge and
 reporting a misplaced reading as a `chain_break` instead of letting it pass.
 
+**Proven on the recorded run.** A real run's eleven state records (four readings, seven
+sightings) commit to four states and two edges, and the resulting `graph.json` validates
+against the normative schemas with no errors — with one candidate refused, one edge superseded, an element that belongs to two states attributed to one,
+a self-loop read at the wrong moment arriving as an error, and a URL assertion with no
+value pinned to the route its own captures came from.
+
 **Known gaps, in the order they will bite:**
 
 1. **Initial document loads are not observed.** The network/console hooks are
@@ -360,9 +560,12 @@ reporting a misplaced reading as a `chain_break` instead of letting it pass.
    (SPA) traffic *is* captured, which is the case `transition.effects[].request`
    needs. Closing the gap requires Playwright's `addInitScript`, i.e. a source patch
    to `dsh-browser`.
-2. **Nothing validates against the JSON Schemas.** `graph_commit`, the §14 invariant
-   checks, and a non-zero exit on violation are the next milestone. Until they exist,
-   a run produces evidence, readings and edges — not a graph.
+2. **The commit cannot yet judge everything the schema can express.** It enforces
+   identity uniqueness, reference integrity and declaration ownership, and the output
+   is schema-valid; but `reachability` and `feature_closure` are reported as warnings
+   because a walk that did not reach a state is not evidence that the state is
+   unreachable — the run is a sample, and the commit says so rather than turning an
+   incomplete walk into a failed graph.
 3. **No journey assembly.** The walk is reconstructible from the observation chain
    but is not yet assembled mechanically. It should be, since it is mechanical:
    `journey.transitions[]` is an ordered list of ids and the walk already is one.
@@ -384,14 +587,16 @@ reporting a misplaced reading as a `chain_break` instead of letting it pass.
 ## Tests
 
 ```sh
-npm test        # 3 suites, no browser and no harness
+npm test        # 4 suites, no browser and no harness
 ```
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
 objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, record
 shapes), the diff and the cross-check (every warning kind, the one error, malformed
-effects, missing captures), and a fake-harness integration pass over both tools'
-refusal paths.
+effects, missing captures), the reconciler (a synthesized run committed end to end,
+then every rule one at a time — gates, refutation, supersession, ownership, dropped
+references, and the filesystem behaviour of a refused and a forced commit), and a
+fake-harness integration pass over all three tools' refusal paths.
 
 What they cannot check is that a real page looks like the capture claims. That is what
 a live run against `demo-app` is for, and both are needed: the diff logic is the piece

@@ -68,7 +68,14 @@ export const normalizeRunDirName = (value) => {
   return cleaned;
 };
 
-const slugify = (value) => String(value)
+/**
+ * The shared id slug: lowercase, `_`-separated, ≤40 characters.
+ *
+ * Exported because `graph_commit` mints element ids the same way (`element_` + the
+ * purpose) and a second implementation of the same convention is a second chance for
+ * the two to disagree about what an id for the same thing looks like.
+ */
+export const slugify = (value) => String(value)
   .toLowerCase()
   .normalize('NFKD')
   .replace(/[^a-z0-9]+/g, '_')

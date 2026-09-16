@@ -35,10 +35,11 @@
  */
 import Schema from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION } from './capture.js';
+import { commitRun } from './commit.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
 import {
     APPLICATION_ID_PATTERN,
@@ -81,6 +82,7 @@ const self = (() => {
 export const Config = Schema.object({
     observeTool: Schema.string().default('graph_observe'),
     transitionTool: Schema.string().default('graph_transition'),
+    commitTool: Schema.string().default('graph_commit'),
     // The pattern declares the contract so a config error is caught while the
     // profile is still booting, alongside every other bad setting. The runtime
     // check in `apply` is not a duplicate of it: this declares *what is valid*,
@@ -403,6 +405,7 @@ export function crossCheckEffects({ effects, before, after, fromState, toState, 
 export function apply(ctx, config) {
     const observeTool = config.observeTool ?? 'graph_observe';
     const transitionTool = config.transitionTool ?? 'graph_transition';
+    const commitTool = config.commitTool ?? 'graph_commit';
     // Resolved once, so the directory the model is told to read and the
     // directory the run store writes to are the same string by construction.
     // They used to be two independent derivations of the config, which is how a
@@ -600,6 +603,7 @@ export function apply(ctx, config) {
         text: protocolText({
             observeTool,
             transitionTool,
+            commitTool,
             runDirName,
             maxSteps: config.maxSteps ?? null,
         }),
@@ -1043,6 +1047,118 @@ export function apply(ctx, config) {
                     steps_walked: store.walkLength(),
                     observations_recorded: store.observationCount(),
                 },
+            };
+        },
+    }));
+
+    // ---------------------------------------------------------------------
+    // Seam 3 — the commit, where evidence becomes a graph
+    // ---------------------------------------------------------------------
+    // Exploration is allowed to be wrong; this is where the run decides what
+    // becomes knowledge. Nothing before this point could *retract* anything —
+    // every capture, every state reading and every transition candidate is
+    // append-only, which is what makes them evidence — so the reconciliation
+    // happens here, against the whole run at once, and lands in two files: the
+    // graph, and a report of every judgement that produced it.
+    //
+    // The one thing this tool deliberately does NOT do is repair the logs. It
+    // reads them, judges them, and writes the verdict beside them; a rejected
+    // candidate stays in `transitions.jsonl` exactly as the walk recorded it, so
+    // the same run can be re-judged differently later without re-walking.
+    ctx.tools.register(defineTool({
+        name: commitTool,
+        description: 'Reconcile the run into a graph. This is the LAST step: it reads the raw evidence '
+            + '(observations, states, capabilities, transitions), decides which candidates become part of the '
+            + 'graph, and writes graph.json plus commit_report.json. It never edits the raw logs, and it refuses '
+            + 'to write a graph whose rules are violated — read the report instead of assuming success.',
+        parameters: {
+            run_dir: {
+                type: 'string',
+                description: 'Directory to commit, relative to the workspace root. Omit to commit the run this '
+                    + 'session has been recording. Only needed to re-commit an earlier run.',
+            },
+            force: {
+                type: 'boolean',
+                description: 'Commit even when blocking rules fired. Writes the graph with the violations listed in '
+                    + 'its warnings. Only for inspecting the near-miss; it does not make the graph correct.',
+            },
+        },
+        output: {
+            schema: { type: 'json' },
+            render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+            const cwd = workspaceCwd(exec);
+            // Deliberately not `ensureRun`: committing creates nothing. The run this session is
+            // recording is the obvious target, and failing that, the directory the session would
+            // have written to — which is how a later session commits a run it did not record. A
+            // commit that started an empty run in order to reject it would leave a directory
+            // behind that looks like an exploration nobody performed.
+            const dir = args.run_dir
+                ? (isAbsolute(args.run_dir) ? args.run_dir : resolve(cwd, args.run_dir))
+                : (run?.dir ?? join(cwd, runDirName));
+            if (!existsSync(join(dir, 'run.json'))) {
+                throw new Error(
+                    `${dir} is not an exploration run: it has no run.json. `
+                    + (run
+                        ? 'Pass run_dir to commit a run recorded earlier.'
+                        : `This session has recorded nothing yet, so there is nothing to reconcile — drive the page with a `
+                            + `browser_* tool and read the states with ${observeTool} first, or pass run_dir pointing at a `
+                            + `run an earlier exploration wrote (the default is ${runDirName} under the workspace root).`),
+                );
+            }
+
+            const { graph, report, graphPath, reportPath } = commitRun({
+                dir,
+                command: `${self?.name ?? 'dsh-graph-explorer'} ${self?.version ?? 'unknown'} ${commitTool}`,
+                force: args.force === true,
+            });
+
+            const severityCount = (severity) => report.findings.filter((finding) => finding.severity === severity).length;
+            return {
+                committed: report.ok,
+                graph_path: graphPath ?? null,
+                report_path: reportPath,
+                run_dir: dir,
+                application: report.application,
+                counts: {
+                    states: report.states,
+                    capabilities: report.capabilities.committed,
+                    transitions: report.transitions,
+                    observations: report.observations.records,
+                    elements: report.elements,
+                },
+                // The graph's own index of what it is: a model reporting on the run needs
+                // these without reading the file, because they are what it must explain.
+                warnings: {
+                    errors: severityCount('error'),
+                    warnings: severityCount('warning'),
+                    notes: severityCount('info'),
+                    detail: report.findings,
+                },
+                invariants: report.invariants.map((result) => ({
+                    code: result.code,
+                    ok: result.ok,
+                    severity: result.severity,
+                    detail: result.detail,
+                })),
+                decisions: report.decisions.map((decision) => ({
+                    transition_id: decision.transition_id,
+                    decision: decision.decision,
+                    capability: decision.capability,
+                    from_state: decision.from_state,
+                    to_state: decision.to_state,
+                    rejection_reason: decision.rejection_reason,
+                    warnings: (decision.findings ?? decision.warnings ?? []).map((finding) => finding.code),
+                })),
+                blocked_by: report.blocking,
+                next: report.ok
+                    ? `The graph is at ${graphPath}. It is built from ${report.transitions.committed} committed edge(s); `
+                        + `${report.transitions.rejected} candidate(s) were refused and ${report.transitions.superseded} superseded. `
+                        + 'Report the graph and the findings — a warning in warnings[] is a fact about the run, not a failure to paper over.'
+                    : `No graph was written. ${report.blocking.length} blocking rule(s) fired; each one is a fact the run `
+                        + 'does not settle. Resolve them and commit again — the raw evidence is unchanged, so a fix here is a '
+                        + 'config fix or another walk, never an edit to the logs.',
             };
         },
     }));

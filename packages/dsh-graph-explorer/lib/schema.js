@@ -143,6 +143,118 @@ export function normalizeApplication(value) {
 export const CAPABILITY_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
 
 /**
+ * `element.semantic.purpose` — the element's stable identity, and therefore the one
+ * name in the graph a reference can be resolved against. From `element.schema.json`,
+ * which gives it the same alphabet as a capability name.
+ */
+export const ELEMENT_PURPOSE_PATTERN = /^[a-z][a-z0-9_]*$/;
+
+/**
+ * `state.identity.page_type` — the coarse semantic page kind, same alphabet again.
+ * From `state.schema.json`. Enforced at commit because the page type is required, so a
+ * page type the pattern rejects makes the whole state invalid rather than merely odd.
+ */
+export const PAGE_TYPE_PATTERN = /^[a-z][a-z0-9_]*$/;
+
+/**
+ * The keys a committed `transition.effects[]` entry may carry.
+ *
+ * `transition.schema.json#/$defs/effect` sets `additionalProperties: false` and lists
+ * exactly these. The model's effect shorthand is closed by `EFFECT_REQUIRED` while the
+ * run is live, but a graph is a document: an unrecognized key that survived would make
+ * the whole document invalid, and the run it came from is already over. The keys are
+ * filtered at commit time for that reason.
+ */
+export const EFFECT_KEYS = new Set([
+  'id',
+  'type',
+  'target',
+  'from',
+  'to',
+  'value',
+  'message',
+  'severity',
+  'api',
+  'state',
+  'element',
+  'operation',
+  'observed',
+  'description',
+  'evidence',
+]);
+
+/**
+ * `assertion.severity` — a *third* severity enum, and not the one effects use.
+ *
+ * Effects are graded `info|success|warning|error` (how strongly the effect is claimed);
+ * assertions are graded `assert|warn|info` (what a generated test should do when the check
+ * fails). From `common.schema.json#/$defs/assertion`. One enum for both would silently
+ * produce assertions that are invalid documents, which is exactly the class of thing this
+ * file exists to prevent.
+ */
+export const ASSERTION_SEVERITIES = new Set(['assert', 'warn', 'info']);
+
+/**
+ * What the machinery's own notes on a transition mean for the commit.
+ *
+ * The notes are written by `crossCheckEffects` while the run is live, where the cost of a
+ * false positive is a sentence of the model's attention. At commit time the same note is a
+ * verdict, so the severity has to be decided once, here, beside the note kinds themselves.
+ *
+ * Only `self_loop_but_controls_changed` is an error, because it is the only note that says
+ * the record's *identity* is wrong rather than its *detail*: the step claims to start and end
+ * in one state while the two readings share no interactive surface, and a state that does not
+ * hold for both endpoints cannot be committed as either. Every other note is a disagreement
+ * about something inside an edge whose endpoints the evidence still supports — a real edge
+ * with an overstated effect, which is worse to lose than to carry with a warning.
+ */
+export const NOTE_SEVERITY = new Map([
+  ['self_loop_but_controls_changed', 'error'],
+  ['claimed_navigation_not_observed', 'warning'],
+  ['claimed_message_not_seen', 'warning'],
+  ['claimed_request_not_observed', 'warning'],
+  ['unclaimed_url_change', 'warning'],
+  ['no_observed_change', 'warning'],
+  ['previous_step_not_read', 'warning'],
+]);
+
+/**
+ * A note kind this version does not know is a `warning`, never an `error`.
+ *
+ * The note vocabulary is the recorder's, and the recorder is the same plugin: an older
+ * `graph_commit` naming a note a newer `graph_transition` writes must not turn a logging
+ * change into a refused edge. Erring towards committing is the safe direction precisely
+ * because nothing is lost — the note itself is carried into the report.
+ */
+export const UNKNOWN_NOTE_SEVERITY = 'warning';
+
+/**
+ * The commit decision as a `metadata.status` value.
+ *
+ * Every object the commit touches gets a decision, and the decision has to be expressible in
+ * the schema's own vocabulary rather than in a new field — `additionalProperties: false` leaves
+ * no room for a `commit_status`. Only `committed` and `inferred` reach the graph; `rejected` and
+ * `superseded` are report-only, and read as `draft` and `deprecated` there.
+ */
+export const TRANSITION_DECISIONS = new Map([
+  ['committed', 'verified'],
+  ['inferred', 'inferred'],
+  ['rejected', 'draft'],
+  ['superseded', 'deprecated'],
+]);
+
+/**
+ * The roles an `evidenceRef` may name (`common.schema.json#/$defs/evidenceRef`).
+ *
+ * A ref outside the enum is not dropped — the observation it names is still the evidence — but
+ * its role becomes `unknown`, which is the enum's own word for "the machinery knows it was
+ * evidence and cannot say of what".
+ */
+export const EVIDENCE_ROLES = new Set([
+  'identity', 'element', 'action', 'effect', 'api', 'detection', 'counterexample', 'unknown',
+]);
+
+/**
  * The vocabulary §7 says to converge on. Not a whitelist: an app is free to have
  * capabilities these names do not describe. It is the reference a near-duplicate is
  * compared against, so the model converges on one name per behaviour instead of

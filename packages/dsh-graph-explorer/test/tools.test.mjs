@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, Config } from '../lib/index.js';
@@ -51,11 +51,13 @@ const capture = (over = {}) => ({ url: 'http://x/', title: 'T', headings: [], in
 const act = (name, args = {}) => handlers.get('tools/execute')({ ...exec, name, arguments: args }, async () => ({ isError: false, value: null }));
 const observe = (args) => tools.get('graph_observe').execute(args, exec);
 const transition = (args) => tools.get('graph_transition').execute(args, exec);
+const commit = (args) => tools.get('graph_commit').execute(args, exec);
 
 // --- registration ---------------------------------------------------------
-check('both tools registered', [...tools.keys()].sort(), ['graph_observe', 'graph_transition']);
+check('all three tools registered', [...tools.keys()].sort(), ['graph_commit', 'graph_observe', 'graph_transition']);
 check('protocol section contributed', sections.map((s) => [s.name, s.order]), [['graph:exploration-protocol', 150]]);
 check('protocol teaches the transition tool', sections[0].text.includes('graph_transition'), true);
+check('protocol teaches where the run ends', sections[0].text.includes('graph_commit'), true);
 
 // --- refusals before anything has happened --------------------------------
 await refuses('observe with no evidence', () => observe({}), 'nothing to interpret');
@@ -138,6 +140,28 @@ check('file counts', (() => {
   const lines = (p) => readFileSync(join(cwd, 'graph-run', p), 'utf8').trim().split('\n').length;
   return [lines('observations.jsonl'), lines('states.jsonl'), lines('capabilities.jsonl'), lines('transitions.jsonl')];
 })(), [4, 3, 2, 3]);
+
+// --- the commit, through the same seam ------------------------------------
+// The walk above is a real run — the store wrote it, not a fixture — so this is the end-to-end
+// shape of the tool: it reads what the session recorded and reports a verdict. No application was
+// declared in this suite's config, so the verdict is a refusal, and a refusal must arrive as a
+// result rather than as an exception: the report is the product, and an agent that treats a
+// blocked commit as a crash would lose it.
+const verdict = await commit({});
+check('the commit reads the run this session wrote', [verdict.counts.states.committed, verdict.counts.transitions.committed, verdict.counts.capabilities], [2, 3, 2]);
+check('it knows which application it is about', verdict.application, null);
+check('an undeclared application blocks the document', [verdict.committed, verdict.blocked_by.map((blocker) => blocker.code)], [false, ['application_not_declared']]);
+check('a blocked commit still writes its report', verdict.report_path.endsWith('commit_report.json'), true);
+check('a blocked commit writes no graph', verdict.graph_path, null);
+check('the refusal names the setting to fix', verdict.blocked_by[0].detail.includes('application: {id, name}'), true);
+check('and says what to do next', verdict.next.includes('No graph was written'), true);
+check('the findings are summarised by severity', [verdict.warnings.errors, verdict.warnings.detail.length > 0], [0, true]);
+check('the invariants travelled with it', verdict.invariants.filter((result) => result.severity === 'error' && !result.ok).length, 0);
+check('the same run can be named explicitly', (await commit({ run_dir: 'graph-run' })).run_dir, join(cwd, 'graph-run'));
+const forced = await commit({ force: true });
+check('forcing writes the assembled document', existsSync(join(cwd, 'graph-run', 'graph.json')), true);
+check('forcing does not make the verdict a pass', forced.committed, false);
+await refuses('a directory that is not a run is refused', () => commit({ run_dir: 'nope' }), 'not an exploration run');
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

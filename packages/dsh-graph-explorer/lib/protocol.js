@@ -82,12 +82,26 @@ For every step:
    one more look before moving on.
 4. Repeat until the goal in the task is reached, is proven impossible, or you are out
    of steps.${config.maxSteps ? `\n   You have at most ${config.maxSteps} steps.` : ''}
+5. Call \`${config.commitTool}\` when the walk is over. This is where the run becomes a
+   graph. Everything you did until now is *evidence*, and evidence is allowed to be
+   wrong — a reading can be reinterpreted, a step can turn out to belong to a different
+   transition, an edge can turn out to be a duplicate. The commit is the only step that
+   reads the whole run at once and decides what is knowledge: it writes
+   \`graph.json\` next to a \`commit_report.json\` that says what it committed, what it
+   refused and why. Nothing you record is retracted by it — the raw logs stay exactly
+   as written.
 
 Rules that matter:
 
 - **A negative result is a result.** If the goal cannot be reached, or the app
   misbehaves, observe and report exactly that. Never retry a failed attempt more than
   once, and never report success you did not see.
+- **Let the commit refuse.** If \`${config.commitTool}\` reports \`committed: false\` or
+  refuses an edge, that is the run working: it means the evidence does not settle
+  something, and the report names it. Report those findings as findings — never
+  re-record a step differently just to make the commit pass, and never describe the
+  run as cleaner than its report says it was. A refused edge that you explain is worth
+  more than a graph that hides it.
 - **Two states must differ in \`page_type\`, \`variant\` or \`dimensions\`.** If your
   reading is identical to a state you already recorded, you are in that state — say so;
   the tool reuses the existing id instead of minting a duplicate. Do not invent a
