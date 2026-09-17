@@ -143,6 +143,21 @@ export const CAPTURE_EXPRESSION = `(() => {
     } else if (el.type === 'checkbox' || el.type === 'radio') {
       entry.checked = el.checked === true;
     }
+    // A collection is read for what it holds, not only for being there. "The list is on
+    // screen" and "the list has something in it" are two different facts, and the second is
+    // exactly what a dimension like projects: non_empty claims — so without a count it is a
+    // word nothing can check. The count is of the rows the container actually has, which is
+    // what a reader of the page would count, and it is read only for the row-shaped
+    // containers so the common case costs nothing.
+    var collection = entry.tag === 'ul' || entry.tag === 'ol' || entry.tag === 'dl'
+      || entry.tag === 'table' || entry.tag === 'tbody'
+      || entry.role === 'list' || entry.role === 'table' || entry.role === 'grid'
+      || entry.role === 'listbox';
+    if (collection) {
+      var rows = el.querySelectorAll('li,tr,dt,dd,[role="listitem"],[role="row"],[role="option"]');
+      entry.items = rows.length;
+      if (rows.length) entry.first_item = clip(clean(rows[0].textContent), 80);
+    }
     if (el.getAttribute('href')) entry.href = clip(el.getAttribute('href'), 200);
     return entry;
   };

@@ -703,7 +703,8 @@ export const ELEMENT_TARGET_EFFECTS = new Set([
 ]);
 
 /**
- * The effects that move a *state variable*, and the kind of variable each one moves.
+ * The effects that move a *state variable*, the kind of variable each one moves, and what
+ * the fact being moved is *for*.
  *
  * A state variable is a fact about the application that can hold more than one value while the
  * screen stays the same: whether the cart has items, whether a coupon is applied, whether the user
@@ -723,32 +724,56 @@ export const ELEMENT_TARGET_EFFECTS = new Set([
  *   - `visibility_changed` / `element_created` / `element_destroyed` are presence: what a state
  *     *contains*, which `elements[]` already records;
  *   - `validation_error` / `message` are text the page showed.
- * `storage_changed` is a stored key and `list_changed` is a semantic path — both are things the
- * application remembers between screens, which is exactly what a state variable is.
+ *
+ * The two survivors are not the same kind of thing, and conflating them was an error worth
+ * naming. `list_changed` is a *semantic* fact: the collection the step grew is one the screen was
+ * already showing, so the count is what the arrival means and a dimension is exactly how the graph
+ * holds it. `storage_changed` is a *persistence* fact: a key the application wrote down. It is
+ * stronger evidence than a dimension is — it is the run's proof that the state survives a reload —
+ * and it is not an observable. A browser can be asked "how many rows?" and cannot be asked "what
+ * does the app remember about this user?", so asking a state to assert a storage key as a
+ * dimension would produce a test that cannot be run; and asking storage nothing at all would throw
+ * away the only evidence in the run that the session is persistent.
+ *
+ * Hence `role`: `semantic` facts are (or should be) dimensions, and `persistence` facts are
+ * evidence about the state and belong in the report and in the graph's own notes — not in
+ * `identity.dimensions`.
  */
 export const STATE_VARIABLE_EFFECTS = new Map([
-  ['storage_changed', 'storage'],
-  ['list_changed', 'collection'],
+  ['storage_changed', { kind: 'storage', role: 'persistence' }],
+  ['list_changed', { kind: 'collection', role: 'semantic' }],
 ]);
 
-/**
- * The state variables a step's effects moved, as `{name, kind}`, deduped by name and sorted.
- *
- * Read off the effects rather than guessed from the page: an effect is the model's own account of
- * what changed, so this adds no claim of its own — it only says which of those changes are the
- * kind a state has to be able to hold.
- */
+/** The state variables a step's effects moved, as `{name, kind, role}`, deduped by name, sorted. */
 export const stateVariablesOf = (effects) => {
   const byName = new Map();
   for (const effect of Array.isArray(effects) ? effects : []) {
-    const kind = STATE_VARIABLE_EFFECTS.get(effect?.type);
-    if (!kind) continue;
+    const entry = STATE_VARIABLE_EFFECTS.get(effect?.type);
+    if (!entry) continue;
     const name = typeof effect?.target === 'string' ? effect.target.trim() : '';
     if (!name || byName.has(name)) continue;
-    byName.set(name, { name, kind });
+    byName.set(name, { name, kind: entry.kind, role: entry.role });
   }
   return [...byName.values()].sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
 };
+
+/**
+ * The variables a step moved that are a *fact about the screen* rather than about what the
+ * application remembers.
+ *
+ * This is the split the report is built on: only these can be a dimension, because only these can
+ * be read back from the page at runtime.
+ */
+export const semanticVariablesOf = (effects) => stateVariablesOf(effects).filter((variable) => variable.role === 'semantic');
+
+/**
+ * The variables a step moved that only say what was *remembered*.
+ *
+ * Kept, not dropped: a storage write is the run's only evidence that the state is persistent, and
+ * dropping it would leave the graph silent about the difference between a session that survives a
+ * reload and one that does not.
+ */
+export const persistenceVariablesOf = (effects) => stateVariablesOf(effects).filter((variable) => variable.role === 'persistence');
 
 /** The names a state's identity declares as its discriminating variables, sorted. */
 export const dimensionNamesOf = (identity) => (
@@ -774,6 +799,45 @@ export const sameVariableName = (left, right) => {
 };
 
 /**
+ * The words of a name, cut into tokens and made singular.
+ *
+ * `cart_items`, `cartItems` and `Cart Items` are one name spelled three ways, and a dimension is
+ * spelled by the model while an element's purpose is spelled by the model too — two spellings of one
+ * thing is the normal case here, not an error to report.
+ */
+const collectionTokens = (name) => String(name)
+  .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+  .toLowerCase()
+  .split(/[^a-z0-9]+/)
+  .filter(Boolean)
+  .map((token) => (token.length > 3 && token.endsWith('s') && !token.endsWith('ss') ? token.slice(0, -1) : token));
+
+/**
+ * Do two names look like the same *collection*?
+ *
+ * Looser than `sameVariableName` on purpose, and used only where a count is being attributed rather
+ * than a claim being checked. The live run declared the dimension `projects: non_empty` and declared
+ * the element as `project_list`, so the exact rule never fired and the one assertion that could have
+ * checked the dimension was never offered — the count was read and thrown away, which is worse than
+ * not reading it, because the graph then said nothing about a fact it had in hand.
+ *
+ * The relation is: the shorter name's tokens are a leading or trailing run of the longer one's. So
+ * `project` matches `project_list`, `item` matches `cart_item`, and `item` does *not* match
+ * `cart_item_price` — a prefix or suffix, never a word from the middle, because the head of a name
+ * says what a collection is and the middle says which one.
+ */
+export const sameCollectionName = (left, right) => {
+  const a = collectionTokens(left);
+  const b = collectionTokens(right);
+  if (!a.length || !b.length) return false;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length === long.length) return short.join(' ') === long.join(' ');
+  const head = long.slice(0, short.length).join(' ');
+  const tail = long.slice(long.length - short.length).join(' ');
+  return head === short.join(' ') || tail === short.join(' ');
+};
+
+/**
  * The variables a step moved that none of the given identities records as a dimension.
  *
  * `identities` is every endpoint of the step, because a variable can be a dimension on either
@@ -781,7 +845,7 @@ export const sameVariableName = (left, right) => {
  */
 export const unrecordedStateVariables = (effects, identities) => {
   const recorded = (Array.isArray(identities) ? identities : []).flatMap(dimensionNamesOf);
-  return stateVariablesOf(effects)
+  return semanticVariablesOf(effects)
     .filter((variable) => !recorded.some((name) => sameVariableName(name, variable.name)));
 };
 
@@ -1020,14 +1084,19 @@ const commitMetadata = ({ status, confidence, producer, createdAt, extra }) => {
  * sentence longer than the limit is cut on a word boundary and marked with an ellipsis, and the
  * whole instruction is kept beside it in `metadata.extra.run_instruction`, so the cut is visible
  * rather than silent.
+ *
+ * The lines are joined before the sentence is looked for, because **a line break is not
+ * punctuation**. Instructions arrive hard-wrapped — the harness prompts are, and so is any task
+ * written into a file — and reading the goal off the first physical line means taking a fragment
+ * that ends wherever the author's editor reached the margin. The 0.1.21 live run's goal was
+ * `Open http://127.0.0.1:4173/ in the browser, sign in with the credentials the page shows, and`,
+ * which is a quotation of the instruction that stops mid-sentence on a comma and a conjunction the
+ * sentence needed. 0.1.20 did not show this because its instruction happened to be one line long.
  */
 const GOAL_MAX_CHARS = 160;
 export const goalFromInstruction = (instruction) => {
   if (typeof instruction !== 'string') return null;
-  const line = instruction
-    .split('\n')
-    .map((part) => part.replace(/\s+/g, ' ').trim())
-    .find(Boolean);
+  const line = instruction.replace(/\s+/g, ' ').trim();
   if (!line) return null;
   const sentence = /^(.{10,}?[.!?])(?:\s|$)/.exec(line);
   const text = (sentence ? sentence[1] : line).trim();
@@ -1035,6 +1104,80 @@ export const goalFromInstruction = (instruction) => {
   const clipped = text.slice(0, GOAL_MAX_CHARS);
   const cut = clipped.lastIndexOf(' ');
   return (cut > 40 ? clipped.slice(0, cut) : clipped).trim() + '…';
+};
+
+/**
+ * A journey's name, derived from the goal it was given.
+ *
+ * A goal and a name are different fields doing different jobs, and the review was right that
+ * quoting the whole instruction into the name was the wrong call: the goal is a *sentence* — "Sign
+ * in with test@example.com and reach the authenticated Projects list" — and a name is a *handle*,
+ * the shortest string that still tells two walks apart in a list of them. A name that is a whole
+ * instruction is a name nobody reads, and the deadline of a goal is not a name.
+ *
+ * So the name is the goal's first clause, and nothing beyond it is invented: the cut is at the first
+ * comma, semicolon, colon, dash or "then", so "Sign in to the demo app, then add a product to the
+ * cart" is named `Sign in to the demo app` while its `goal` keeps every word. A single-clause goal is
+ * its own name, minus the sentence's closing punctuation, because a period is what makes it a
+ * sentence rather than a label.
+ *
+ * One piece of the text is dropped by rule rather than by cut: an instruction that opens by
+ * describing the tools is the operator's prompt and not the application's goal — our own
+ * `agent/pre-step` instruction begins with a preamble about the browser tools, and a journey called
+ * "Using the browser tools" names the machine rather than the walk. The whole instruction stays in
+ * `metadata.extra.run_instruction` and the whole goal in `goal`, so the dropped words are beside the
+ * name rather than gone.
+ *
+ * A name longer than the limit is cut on a word boundary and marked with an ellipsis, and a clause
+ * that reduces to nothing — an instruction that is only a preamble — returns null so the caller
+ * falls back to the endpoints rather than naming the walk with an empty string.
+ *
+ * A URL or an email address in a goal is a *parameter* of the walk and not part of its name, and it
+ * is cut before the clause boundary is looked for — which is not a detail. Our own instruction reads
+ * "open the Acme demo app at http://127.0.0.1:4173/ and sign in with test@example.com", and a cut at
+ * the first colon does not stop at the clause: it stops inside `http:`, and then inside `:4173`, so a
+ * name derived that way is `open the Acme demo app at http`. Cutting at the parameter first leaves
+ * `open the Acme demo app`, which is what the walk was: the address is still in `goal`, still in
+ * `run.json`, and still in the graph's `application.base_url` for anything that needs to *use* it.
+ *
+ * What the cut leaves behind is trimmed as well, because `open the demo app at` is a handle with a
+ * dangling connector on it. A trailing word that only related the name to the parameter it lost
+ * (`at`, `with`, `as`, `and`) is dropped with it — and *only* when a parameter was what was cut,
+ * which is the whole reason the word is dangling. Trimming indiscriminately is how `open the demo
+ * app and sign in` loses the `in` that makes `sign in` a verb, which is a name edited into a lie.
+ */
+const JOURNEY_NAME_MAX_CHARS = 60;
+const TRAILING_CONNECTORS = new Set(['at', 'with', 'using', 'and', 'then', 'to', 'for', 'on', 'by', 'from', 'into', 'as', 'via']);
+const PARAMETER_PATTERN = /(?:https?:\/\/|www\.)\S+|\b[\w.+-]+@[\w-]+\.[\w.-]+\b/u;
+export const journeyNameFromGoal = (goal) => {
+  if (typeof goal !== 'string') return null;
+  const text = goal.replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  // Dropped before the cut, not after: the preamble is separated from the task by the same comma
+  // the cut looks for, so cutting first would leave the preamble as the whole first clause.
+  const task = text.replace(/^(?:please\s+)?using the (?:browser|available|provided)?\s*tools?,?\s*/i, '').trim();
+  if (!task) return null;
+  // The parameter first, then the clause. `> 0` on each, because a cut at index 0 is a task that
+  // *begins* with the thing being cut, and the answer to that is not an empty name.
+  const parameter = task.search(PARAMETER_PATTERN);
+  const cutParameter = parameter > 0;
+  const head = cutParameter ? task.slice(0, parameter) : task;
+  const boundary = head.search(/(?:[;:,]|—|–|\b(?:and\s+)?then\b|\bafter\s+that\b|\bfollowed\s+by\b)/i);
+  let clause = (boundary > 0 ? head.slice(0, boundary) : head).trim();
+  clause = clause.replace(/[\s.;:,!?—–-]+$/u, '').trim();
+  // The dangling connector, repeatedly: "open the demo app at and sign in with" is a name built out
+  // of nothing but the words that pointed at the parameters that were cut. Never down to nothing —
+  // one word is a name however thin, and an empty one is what `null` is for.
+  let words = clause.split(' ');
+  while (cutParameter && words.length > 1 && TRAILING_CONNECTORS.has(words[words.length - 1].toLowerCase())) {
+    clause = words.slice(0, -1).join(' ').trim();
+    words = clause.split(' ');
+  }
+  if (!clause) return null;
+  if (clause.length <= JOURNEY_NAME_MAX_CHARS) return clause;
+  const clipped = clause.slice(0, JOURNEY_NAME_MAX_CHARS);
+  const lastSpace = clipped.lastIndexOf(' ');
+  return (lastSpace > 20 ? clipped.slice(0, lastSpace) : clipped).trim() + '…';
 };
 
 export function assembleJourneys({ transitions = [], edges = [], stateIds = new Set(), generatedAt = null, instruction = null }) {
@@ -1080,11 +1223,23 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
       // read off the log's `repeated` flag, because "repeated" is a fact about the walk so far and
       // the flag is a fact about the store's index.
       repeated: current.steps.some((step) => step.id === id),
+      // The name the model gave the walk this step is part of, in the user's words, when it gave
+      // one. Carried per step rather than per journey because the walk is cut into strands here and
+      // the model was naming the thing it was doing, not the numbers this function draws: which
+      // strand a claim belongs to is decided below, from which steps made it.
+      journey_name: typeof record.journey_name === 'string' && record.journey_name.trim()
+        ? record.journey_name.trim()
+        : null,
     });
   }
 
   const journeys = [];
   const used = new Set();
+  // Naming, kept as two facts rather than folded into the loop: which walks carry the model's own
+  // words, and which were named more than one way. Both are reported by the commit, because a
+  // journey's name is the one field a reader takes at face value.
+  const namedByModel = [];
+  const nameConflicts = [];
   // The run's instruction, quoted: `run.json` is the only place intent was ever written down.
   const instructionText = typeof instruction === 'string' && instruction.trim() ? instruction.trim() : null;
   const derivedGoal = goalFromInstruction(instructionText);
@@ -1107,6 +1262,19 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
     while (used.has(id)) id = 'journey_' + stem + '_' + suffix++;
     used.add(id);
 
+    // The walk's own name, in the user's words, when the model gave one on any of its steps. This
+    // is the third source of a name and the best one: a goal says what the walk was *for*, and the
+    // endpoints say only where it went, but the model naming the walk it was walking is the one
+    // statement that says what the walk *is*. Two steps can disagree — a run that names the same
+    // walk twice, or names it again after being cut in half — and the last claim in walk order wins,
+    // because the later word is the model's better-informed one, with every claim kept beside it in
+    // `journey_names_claimed` so the disagreement is readable rather than settled silently.
+    const claims = distinct(strand.steps.map((step) => step.journey_name).filter(Boolean));
+    const nameClaim = claims.length ? claims[claims.length - 1] : null;
+    const claimStep = nameClaim
+      ? [...strand.steps].reverse().find((step) => step.journey_name === nameClaim)
+      : null;
+
     // Evidence is observations and only observations: `common.schema.json#/$defs/evidenceRef`
     // points at a raw reading and at nothing else. So a journey's evidence is the readings its
     // steps were made from, deduplicated by reading and role.
@@ -1119,14 +1287,28 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
     }
 
     const stated = Boolean(goalText);
+    // The name is derived from the goal rather than being the goal: `goal` is the run's sentence and
+    // `name` is a handle for a list of walks (see `journeyNameFromGoal`). Kept as its own value
+    // because there are three sources of a name and the report counts them apart.
+    const nameFromGoal = stated ? journeyNameFromGoal(goalText) : null;
+    const derivedName = `Derived walk ${index + 1}: ${first.from_state} to ${last.to_state} (${strand.steps.length} step(s))`;
+    // Three sources, in the order of how much they say: the model's own name for this walk, then
+    // the run's stated goal, then the endpoints. The endpoints are always the worst of them — they
+    // say where a walk went and nothing about what it was — so they are the name only when nothing
+    // was ever stated.
+    const name = nameClaim ?? nameFromGoal ?? derivedName;
+    const nameSource = nameClaim
+      ? `the model's own name for this walk, claimed on ${claimStep?.id} of it (journey_name on the step record)`
+      : nameFromGoal
+        ? 'the first clause of the run\'s stated goal, cut at its first comma: a name is a handle for a walk, and the whole sentence is kept in `goal`'
+        : stated
+          ? 'the endpoints of the walk: the run stated a goal, but none of it could be read as a name for a walk'
+          : 'the endpoints of the walk, because neither the run nor the model named it';
+    if (claims.length > 1) nameConflicts.push({ journey: id, claimed: claims });
+    if (nameClaim) namedByModel.push(id);
     journeys.push({
       id,
-      // The name is what a reader sees in a test list, so a stated goal is a better name than
-      // the endpoints of the walk — and when there is one it is the goal, quoted. The derived
-      // name is kept in `metadata.extra.name_derived_from` either way.
-      name: stated
-        ? goalText
-        : `Derived walk ${index + 1}: ${first.from_state} to ${last.to_state} (${strand.steps.length} step(s))`,
+      name,
       ...(stated ? { goal: goalText } : {}),
       start_state: first.from_state,
       transitions: strand.steps.map((step) => step.id),
@@ -1156,9 +1338,19 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
           goal_source: goalSource,
           ...(instructionText ? { run_instruction: instructionText } : {}),
           criticality: 'not set: the walk was recorded, the priority was not judged, so the schema default (standard) applies',
-          name_derived_from: stated
-            ? `${first.from_state} to ${last.to_state}, the endpoints of the walk (the name is the stated goal instead)`
-            : `${first.from_state} to ${last.to_state}, the endpoints of the walk rather than a stated goal`,
+          // Where the name came from, said explicitly: a reader of the graph has to be able to tell
+          // the model's words from this module's arithmetic, and a name is the one field a reader
+          // takes at face value. `name_stated` is true only when a person's words are in it.
+          name_from: nameSource,
+          // The same fact as a word a caller can count, rather than as a sentence it would have to
+          // pattern-match. Three sources, three values, and `report.journeys` counts these.
+          name_source_kind: nameClaim ? 'model' : nameFromGoal ? 'goal' : 'endpoints',
+          name_stated: Boolean(nameClaim || nameFromGoal),
+          ...(claims.length ? { journey_names_claimed: claims } : {}),
+          ...(claims.length > 1
+            ? { name_conflict: `this walk was named ${claims.map((claim) => JSON.stringify(claim)).join(' and ')} by its own steps — the last claim in walk order is the name, and the earlier ones are kept here rather than dropped` }
+            : {}),
+          name_derived_from: `${first.from_state} to ${last.to_state}, the endpoints of the walk${nameClaim || stated ? ' (kept here rather than used as the name)' : ''}`,
         },
       }),
     });
@@ -1169,6 +1361,10 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
     steps: strands.reduce((total, strand) => total + strand.steps.length, 0),
     unusableSteps,
     breaks,
+    // The two facts about naming the caller reports: which walks the model named itself, and where
+    // a walk was named more than one way.
+    namedByModel,
+    nameConflicts,
   };
 }
 
@@ -1570,6 +1766,49 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     canonicalStates.map((record) => [record.state_id, record.identity ?? {}]),
   );
 
+  // --- what the readings counted -----------------------------------------
+  //
+  // `{projects: non_empty}` is a claim about how many rows a collection holds, and until this
+  // existed the graph could not check it: the capture read a list for *presence* and nothing read
+  // it for *size*, so the only assertion the commit could offer for such a dimension was a `value`
+  // comparison against the word itself — a check no browser can evaluate. `capture.js` now counts
+  // the rows of a row-shaped container, and this is the index the rest of the commit already uses
+  // (declared element → the reading that shows it), read for the count.
+  //
+  // Keyed by state, because the count is a fact about the surface a state was read at — the
+  // destination of a step, asked for the row count its own identity depends on.
+  const collectionFacts = new Map();
+  for (const record of canonicalStates) {
+    const facts = [];
+    for (const element of stateElements.get(record.state_id) ?? []) {
+      const purpose = element?.semantic?.purpose;
+      const declaration = purpose ? declarations.get(purpose) : null;
+      if (!declaration) continue;
+      for (const observationId of observationsByState.get(record.state_id) ?? []) {
+        const capture = observationsById.get(observationId)?.capture ?? null;
+        if (!capture) continue;
+        const entry = (capture.interactive ?? []).find((item) => {
+          if (!item || !Number.isInteger(item.items)) return false;
+          if (declaration.role && declaration.name && item.role === declaration.role && item.name === declaration.name) return true;
+          const locator = declaration.locator;
+          if (!locator) return false;
+          if (locator.strategy === 'testid' && item.testid === locator.value) return true;
+          if ((locator.strategy === 'id' || locator.strategy === 'css') && item.selector === locator.value) return true;
+          return false;
+        });
+        if (!entry) continue;
+        facts.push({
+          element: element.id,
+          purpose,
+          items: entry.items,
+          first_item: entry.first_item ?? null,
+          observation: observationId,
+        });
+      }
+    }
+    if (facts.length) collectionFacts.set(record.state_id, facts);
+  }
+
   const decisions = [];
   const committedEdges = [];
   const attemptsByCapability = new Map();
@@ -1742,16 +1981,24 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     }
     const stepApis = distinct([...declaredApis, ...observedForStep]);
 
-    // The state variables this step moved, and whether the graph can hold them.
+    // The variables this step moved, split by what the movement is *evidence of*.
     //
     // This is the third answer to a difference the model can see and the page cannot: a step that
     // changed something the application remembers is not a new screen, and it is not nothing. It
     // is a variable — and the report is where that has to be said, because the two ways of losing
-    // it are both silent. Naming it as a dimension keeps the two states apart without minting a
-    // state per value; a `value` assertion of the same name in the state's detection is what makes
-    // it checkable. Recording neither leaves a generator with two states it cannot tell apart at
-    // runtime, or with no state at all for a difference that is real.
+    // it are both silent. Naming a *screen* fact as a dimension keeps two states apart without
+    // minting a state per value; a `value` assertion of the same name in the state's detection is
+    // what makes it checkable. Recording neither leaves a generator with two states it cannot tell
+    // apart at runtime, or with no state at all for a difference that is real.
+    //
+    // A *persistence* fact is the other case, and it is not the same advice. `storage_changed` is
+    // the run's proof that what happened survives a reload, which is evidence about the state and
+    // not an observable: no browser can be asked what the application remembers, so telling the
+    // model to pin the key as a dimension would ask for a test that cannot be written. It is
+    // reported — named, and attributed to this edge — and it is not counted as unrecorded.
     const movedVariables = stateVariablesOf(winner.effects);
+    const semanticVariables = semanticVariablesOf(winner.effects);
+    const persistenceVariables = persistenceVariablesOf(winner.effects);
     const endpointIdentities = [
       identityByStateId.get(winner.record.from_state) ?? {},
       identityByStateId.get(winner.record.to_state) ?? {},
@@ -1765,18 +2012,226 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         code: 'state_variable_not_in_state_identity',
         severity: 'info',
         basis: 'evidence_check',
-        detail: `this step changed ${named}, and neither ${winner.record.from_state} nor ${winner.record.to_state} records it as a dimension. A value the application remembers between screens is a state variable: if it is what makes the destination a different situation, name it in that state's identity.dimensions ({${example}: non_empty}) and pin the same name in its detection as {"type":"value","target":"${example}","operator":"equals","expected":"<the value>"} — a dimension nothing asserts cannot be checked, and one state per value reports a three-valued variable as three screens. If nothing downstream reads it, it belongs in the effect and nowhere else.`,
+        detail: `this step changed ${named}, and neither ${winner.record.from_state} nor ${winner.record.to_state} records it as a dimension. A collection the screen is showing is a state variable: if it is what makes the destination a different situation, name it in that state's identity.dimensions ({${example}: non_empty}) and pin the same name in its detection with an assertion a browser can actually evaluate — {"type":"value","target":"${example}","operator":"greater_than","expected":0} when the evidence counted the rows, since a reader of the page cannot tell "three projects" from "one project" without counting. A dimension nothing asserts cannot be checked, and one state per value reports a three-valued variable as three screens. If nothing downstream reads it, it belongs in the effect and nowhere else.`,
+      });
+    }
+    if (persistenceVariables.length) {
+      findings.push({
+        scope: id,
+        code: 'persistence_evidence_recorded',
+        severity: 'info',
+        basis: 'evidence_check',
+        detail: `the reading at the end of this step shows ${persistenceVariables.map((variable) => JSON.stringify(variable.name)).join(', ')} written to the page's own storage, so ${winner.record.to_state} is remembered rather than merely displayed. Kept as evidence and deliberately not offered as a dimension: no browser can be asked what the application remembers about a user, so a value assertion over a storage key is a check nothing can evaluate. It belongs in this edge's evidence and in a test's setup, or as a precondition on the states that depend on it.`,
       });
     }
     const variableRollup = {
       moved: movedVariables,
       // By name: `unrecordedStateVariables` reads the effects again, so the entries are equal as
       // values and not as objects, and an identity comparison would put every variable in both
-      // lists at once.
-      recorded: movedVariables.filter(
+      // lists at once. Over the *semantic* half, because "recorded" means a state identity names
+      // it as a dimension: a storage key was never a candidate to be one, so it appears in neither
+      // of these lists and in `persistence` instead — and a rollup that called it "recorded" would
+      // be saying the graph holds a difference it deliberately does not.
+      recorded: semanticVariables.filter(
         (variable) => !unrecordedVariables.some((entry) => entry.name === variable.name),
       ),
       unrecorded: unrecordedVariables,
+      // The two lists the old single rollup conflated: what the screen shows, and what the
+      // application remembers. Named separately so a reader — model or generator — cannot mistake
+      // one for the other, which is exactly the mistake the merged list invited.
+      semantic: semanticVariables.map((variable) => variable.name),
+      persistence: persistenceVariables.map((variable) => variable.name),
+    };
+
+    // --- what this step proves, as an assertion a test could carry ------
+    //
+    // The graph has one place for a check and the model is the only thing that writes it, which is
+    // right (a check is a claim about what matters) and leaves the one gap the review found: a step
+    // whose evidence *already proves* something leaves the graph with no assertion at all, and a
+    // generator then has to invent the assertion for the very step the machinery watched. So the
+    // candidates are derived here, from the step's own effects and the reading at the end of it,
+    // and written into the commit report beside the edge — never into the edge's `assertions[]`,
+    // which is the model's list and stays exactly as the model wrote it.
+    //
+    // Every candidate has to clear the same bar: the machinery's own evidence must show the thing
+    // it claims. An effect the reading at the end of the step does not corroborate is *not*
+    // proposed, because that would be the commit writing a check it cannot itself pass.
+    const arrivalIdentity = identityByStateId.get(winner.record.to_state) ?? {};
+    const arrivalDimensions = arrivalIdentity.dimensions ?? {};
+    const afterCapture = afterObservation ? observationsById.get(afterObservation)?.capture ?? null : null;
+    const candidateAssertions = [];
+    const declinedAssertions = [];
+    const addCandidate = (assertion, basis, detail) => {
+      const key = JSON.stringify(assertion);
+      if (candidateAssertions.some((candidate) => JSON.stringify(candidate.assertion) === key)) return;
+      candidateAssertions.push({ assertion, basis, detail, from: afterObservation });
+    };
+    // The same purpose-to-id resolution every other reference here goes through, so a candidate
+    // names the element the graph declares rather than the word the effect used.
+    const effectElementId = (effect) => {
+      const purpose = purposeOf(effect?.target);
+      return purpose === null ? null : ctx.elementIdByPurpose.get(purpose) ?? null;
+    };
+    const effectElementPresent = (effect) => {
+      const purpose = purposeOf(effect?.target);
+      const declaration = purpose === null ? null : declarations.get(purpose);
+      return declaration ? elementPresentIn(afterCapture, declaration) : null;
+    };
+    for (const effect of winner.effects) {
+      if (effect.type === 'state_entered') {
+        const named = typeof effect.to === 'string' ? effect.to.trim() : '';
+        if (named && stateIds.has(named)) {
+          addCandidate(
+            { type: 'state', state: named, operator: 'equals' },
+            'effect',
+            `the step claims it arrived in ${named}, and ${named} is a state this graph commits.`,
+          );
+        } else if (named) {
+          declinedAssertions.push({ effect: effect.type, reason: 'state_target_is_not_committed', target: named });
+        }
+        continue;
+      }
+      if (effect.type === 'navigation' || effect.type === 'url_changed') {
+        const raw = typeof effect.to === 'string' ? effect.to.trim() : '';
+        const route = raw ? routeOf(raw) ?? raw : null;
+        if (route) {
+          addCandidate(
+            { type: 'url', operator: 'matches', expected: route, description: `arrived at ${raw}` },
+            'effect',
+            `the step claims it navigated to ${raw}, which is ${route}.`,
+          );
+        }
+        continue;
+      }
+      if (effect.type === 'element_created' || effect.type === 'element_destroyed') {
+        const element = effectElementId(effect);
+        if (!element) continue;
+        const wants = effect.type === 'element_created' ? 'visible' : 'hidden';
+        const present = effectElementPresent(effect);
+        // Only when the reading the step produced agrees. `null` — no capture, or a capture with
+        // no interactive list — is not agreement, because a candidate has to be a claim the
+        // evidence supports rather than one it merely does not contradict.
+        if (present === null) {
+          declinedAssertions.push({ effect: effect.type, reason: 'no_reading_to_corroborate_it', target: element });
+          continue;
+        }
+        const agrees = effect.type === 'element_created' ? present === true : present === false;
+        if (!agrees) {
+          declinedAssertions.push({ effect: effect.type, reason: 'reading_does_not_show_it', target: element });
+          continue;
+        }
+        addCandidate(
+          { type: 'element_state', element, operator: 'equals', expected: wants },
+          'effect',
+          `the step claims it ${effect.type === 'element_created' ? 'created' : 'destroyed'} ${element}, and the reading at the end of the step shows it ${wants}.`,
+        );
+        continue;
+      }
+      if (effect.type === 'value_changed') {
+        const element = effectElementId(effect);
+        if (!element || typeof effect.to !== 'string') continue;
+        // Read back from the capture, not from the effect: the effect says what the model believed
+        // the field would hold, and a `value_changed` nobody can confirm is exactly the kind of
+        // assertion that fails on the first run.
+        const purpose = purposeOf(effect.target);
+        const recorded = afterCapture && purpose !== null
+          ? (afterCapture.interactive ?? []).find((item) => item && item.role === declarations.get(purpose)?.role
+            && item.name === declarations.get(purpose)?.name)?.value
+          : undefined;
+        if (typeof recorded === 'string' && recorded === effect.to) {
+          addCandidate(
+            { type: 'element_value', element, operator: 'equals', expected: effect.to },
+            'effect',
+            `the step claims the field now holds ${JSON.stringify(effect.to)}, and the reading at the end of the step shows the same value.`,
+          );
+        } else {
+          declinedAssertions.push({
+            effect: effect.type,
+            reason: typeof recorded === 'string' ? 'reading_shows_a_different_value' : 'reading_cannot_confirm_the_value',
+            target: element,
+          });
+        }
+        continue;
+      }
+    }
+    // The destination's own dimensions, offered against a count when the evidence has one. This is
+    // the third shape of the same problem: a dimension is the model's word for a difference the
+    // screen does not spell out, and `{projects: non_empty}` is uncheckable until something says
+    // how many. The capture counts a collection's rows (capture.js), so when a reading bound to
+    // the destination counted them, the candidate is the count — not the word.
+    for (const [name, value] of Object.entries(arrivalDimensions)) {
+      const facts = collectionFacts.get(winner.record.to_state) ?? [];
+      // Exact first, then tolerant. A name that matches exactly is taken; the looser relation is
+      // consulted only when nothing did, because `projects` and `project_list` are two spellings of
+      // one collection but `projects` and `project` are not — and a suggestion that is right for the
+      // wrong reason is a failing test nobody can explain.
+      const exact = facts.filter(
+        (fact) => sameVariableName(fact.purpose, name) || sameVariableName(fact.element, name),
+      );
+      const related = exact.length ? exact : facts.filter(
+        (fact) => sameCollectionName(fact.purpose, name) || sameCollectionName(fact.element, name),
+      );
+      // Two collections that could each be the one the dimension names is not a tie to break
+      // quietly: the count would be of one and the dimension about another, which is exactly the
+      // assertion that passes for the wrong reason. Said, and declined, so the model can name the
+      // dimension after the element it means.
+      if (related.length > 1) {
+        declinedAssertions.push({
+          effect: 'dimension',
+          reason: 'more_than_one_collection_could_be_the_one',
+          target: name,
+          detail: `${JSON.stringify(name)} is declared as ${JSON.stringify(value)}, and ${related.length} collections on ${winner.record.to_state} could be the one it names (${related.map((fact) => fact.element).join(', ')}). Name the dimension after the element it means and the count can be attributed.`,
+        });
+        continue;
+      }
+      const countable = related[0];
+      if (!countable) continue;
+      const word = String(value).toLowerCase();
+      const wantsRows = ['non_empty', 'not_empty', 'has_items', 'some'].includes(word);
+      const wantsZero = ['empty', 'none', 'no_items'].includes(word);
+      if (wantsRows && countable.items > 0) {
+        addCandidate(
+          { type: 'value', target: name, operator: 'greater_than', expected: 0 },
+          'dimension',
+          `${winner.record.to_state} declares the dimension ${JSON.stringify(name)} as ${JSON.stringify(value)}, and the reading at the end of the step counted ${countable.items} row(s) in ${countable.element} — so the dimension is checkable as a count.`,
+        );
+      } else if (wantsZero && countable.items === 0) {
+        addCandidate(
+          { type: 'value', target: name, operator: 'equals', expected: 0 },
+          'dimension',
+          `${winner.record.to_state} declares the dimension ${JSON.stringify(name)} as ${JSON.stringify(value)}, and the reading at the end of the step counted no rows in ${countable.element} — so the dimension is checkable as a count.`,
+        );
+      } else {
+        declinedAssertions.push({
+          effect: 'dimension',
+          reason: 'no_reading_counted_the_collection',
+          target: name,
+          detail: `${JSON.stringify(name)} is declared as ${JSON.stringify(value)}, and no reading bound to ${winner.record.to_state} carries a row count for the collection it names.`,
+        });
+      }
+    }
+
+    // --- which reading documents this step ------------------------------
+    //
+    // The reading the action produced, which is the reading the step's evidence calls `action`,
+    // and the reading it started from. Kept on the edge — in the commit's own account, not in the
+    // schema's fields, because `transition.schema.json` has no place for it and the review's point
+    // stands: an edge whose evidence cannot say which reading documented the action is an edge a
+    // reader has to infer.
+    const beforeObservation = winner.record.before_observation ?? readingWithRole('identity') ?? null;
+    const beforeCapture = beforeObservation ? observationsById.get(beforeObservation)?.capture ?? null : null;
+    const stepLinkage = {
+      action_id: winner.record.action_id ?? observationsById.get(afterObservation)?.action_id ?? null,
+      before_observation: beforeObservation,
+      after_observation: afterObservation,
+      before_role: 'identity',
+      after_role: 'action',
+      // What the two readings were compared against each other: the surface the step started from
+      // and the surface it left. Recorded because the difference between them is the whole of what
+      // the machinery observed about this step, and a report that says "the step changed a
+      // collection" without saying what it saw change is asking to be taken on trust.
+      before_surface: beforeCapture ? surfaceOf(beforeCapture).length : null,
+      after_surface: afterCapture ? surfaceOf(afterCapture).length : null,
     };
 
     committedEdges.push({
@@ -1824,7 +2279,23 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
             // The state variables this step moved, and which of them the graph can hold. On the
             // edge rather than only in the report, because the question "is this difference a
             // dimension or a state?" is asked about a *step*, and the edge is where the step is.
+            // `semantic` and `persistence` split it by what the movement is evidence *of*: a
+            // collection the screen shows (a dimension), and a key the application remembers (not
+            // an observable at all).
             state_variables: variableRollup,
+            // The readings this step was *made of*: the one the action produced and the one it
+            // started from, by id, plus what the machinery saw each look like. The edge's
+            // `evidence[]` says what each reading is evidence for; this says which reading is the
+            // step itself, which is the question a reader of the graph asks first.
+            step: stepLinkage,
+            // What the step's own effects prove, as assertions a generator could carry, and what
+            // was declined and why. Deliberately not written into `assertions[]`: that list is the
+            // model's, and a commit that wrote into it would be making the claim itself. This is
+            // the closest thing to "what the machinery watched happen", graded by what the
+            // evidence can support, so that a test generator has something to start from when the
+            // model supplied no assertion for the step that mattered.
+            candidate_assertions: candidateAssertions,
+            candidate_assertions_declined: declinedAssertions,
           },
           recorder: {
             observed_change: winner.record.observed_change ?? null,
@@ -2297,18 +2768,37 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   // An observation points at the edge it participated in, and only a *committed* edge exists as
   // far as the graph is concerned: a reading that was part of a refused walk is still evidence of
   // a state, but pointing it at an edge the graph refused would be a dangling reference.
+  //
   // An observation can sit on two edges — the reading a walk produced is the reading the next walk
-  // started from — and `observation.transition` is a single field. The edge the reading *produced*
-  // claims it: `action` and `effect` refs beat `identity`, and the first edge to claim a reading
-  // wins a tie, so the answer does not depend on map iteration order.
+  // started from — and `observation.transition` is a single field. Only the reading a step *made*
+  // points at that step: the refs that say so are the ones an action or an effect produced
+  // (`action`/`effect`), because the schema defines `observation.transition` as "the transition this
+  // observation documents". The reading a step *started from* documents that step's identity, not
+  // the step, and giving it the transition too was the misattribution the live run showed: a
+  // reading taken before an action carried the id of the action it preceded, so a reader of
+  // `graph.json` saw a reading "documenting" a step it was the *input* to, with no way to tell the
+  // two apart. The sibling relation is real and is recorded — as `metadata.extra.linkage`, where
+  // the schema has room for it — but not in the field that means "documents".
   const EVIDENCE_ROLE_RANK = { action: 2, effect: 2 };
   const transitionByObservation = new Map();
+  const precedesByObservation = new Map();
   for (const edge of committedEdges) {
+    const produced = edge.metadata?.extra?.commit?.step?.after_observation ?? null;
+    const startedFrom = edge.metadata?.extra?.commit?.step?.before_observation ?? null;
     for (const ref of edge.evidence ?? []) {
       const rank = EVIDENCE_ROLE_RANK[ref.role] ?? (ref.role === 'unknown' ? 0 : 1);
+      if (rank < 2) continue;
+      if (produced && ref.observation !== produced) continue;
       const held = transitionByObservation.get(ref.observation);
       if (held && held.rank >= rank) continue;
-      transitionByObservation.set(ref.observation, { transition: edge.id, rank });
+      transitionByObservation.set(ref.observation, { transition: edge.id, rank, role: 'after_action' });
+    }
+    // The reading the step started from, when it is not also the reading the step produced — the
+    // first step of a walk reads one page and then acts on it, and one reading cannot be both.
+    if (startedFrom && startedFrom !== produced) {
+      const held = precedesByObservation.get(startedFrom);
+      if (held) held.precedes.push(edge.id);
+      else precedesByObservation.set(startedFrom, { precedes: [edge.id], action_id: edge.metadata?.extra?.commit?.step?.action_id ?? null });
     }
   }
 
@@ -2363,6 +2853,39 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       cookies: Array.isArray(capture?.cookie_names) ? capture.cookie_names : [],
     };
     const capturedKeyCount = capturedKeys.localStorage.length + capturedKeys.sessionStorage.length + capturedKeys.cookies.length;
+    // What this reading *is* in the walk, which is the question the review asked of the live graph
+    // and the schema has no field for. `observation.transition` says which step the reading
+    // documents; this says where it sits relative to the steps around it, by the machine's own
+    // account: which action produced it (the `action_id` the recorder wrote when it took the
+    // reading), which step it documents, and which step it is the input to. A reading with no
+    // producing action is the run's entry reading, and saying so is the difference between
+    // "unlabelled" and "nothing came before it".
+    const linkage = (() => {
+      const producedBy = transitionByObservation.get(observation.id);
+      const precedes = precedesByObservation.get(observation.id);
+      const actionId = observation.action_id ?? producedBy?.transition ?? null;
+      const role = producedBy
+        ? 'after_action'
+        : precedes
+          ? 'before_action'
+          : (index === 0 ? 'entry' : 'unlinked');
+      if (role === 'unlinked' && !observation.action_id) return null;
+      return {
+        observation_role: role,
+        action_id: observation.action_id ?? null,
+        action: observation.tool ? { tool: observation.tool, arguments: observation.tool_arguments ?? null } : null,
+        documents: producedBy ? producedBy.transition : null,
+        precedes: precedes ? precedes.precedes : [],
+        ...(role === 'entry' ? { note: 'the first reading of the run: it is the surface the first action was taken on, and no action produced it.' } : {}),
+        ...(role === 'before_action'
+          ? {
+            note: `this reading was the surface ${precedes.precedes.join(', ')} started from, so it documents that step's source rather than the step.`
+              + (index === 0 ? ' It is also the first reading of the run, and no action produced it.' : ''),
+          }
+          : {}),
+        ...(actionId && !producedBy && !precedes ? { action_id: actionId } : {}),
+      };
+    })();
     return {
       id: observation.id,
       type: 'browser_state',
@@ -2393,6 +2916,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
           phase: observation.phase ?? null,
           tool_arguments: observation.tool_arguments ?? null,
           capture_error: observation.capture_error ?? null,
+          ...(linkage ? { linkage } : {}),
           ...(externalArtifact ? { artifact_outside_run: externalArtifact } : {}),
           ...(capturedKeyCount ? { keys_captured: capturedKeys } : {}),
         },
@@ -2500,6 +3024,149 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       + `${journeys.length} walk(s) reassembled from ${assembled.steps} step(s), with ${assembled.unusableSteps.length} step(s) that could not be walked through.`,
   };
 
+  // --- features: the vocabulary the model brought, joined to the evidence ---
+  //
+  // `feature.schema.json` is the layer between code and user behaviour, and it had no source at
+  // all: `features` was hardcoded empty, `feature_closure` could only ever say "nothing is
+  // covered", and gap 6 in the README has been open since the first commit because of it. The
+  // missing half is not information — it is *provenance*. Nothing in a browser session says what
+  // product area a screen belongs to; that is a word a person brings, exactly like a capability
+  // name or a journey's goal. So the model supplies the word (`feature` on the step that belongs
+  // to it) and the machinery supplies the membership, from the edges that claimed it: which
+  // capabilities those steps perform, which states they join, which walk contains them, which
+  // endpoints they called. That split is the whole design of this module, applied to the one
+  // entity left without it.
+  //
+  // Nothing is invented here. A feature exists only when a step claimed it, its `name` is the
+  // model's spelling rather than a tidied one, and a feature with no transition under it cannot
+  // exist at all — minting one from a name alone would put an entity in the graph that no
+  // evidence touches, which is the failure mode every rule in this file is aimed at.
+  const featureOfTransition = new Map();
+  for (const record of transitions) {
+    const transitionId = record.transition_id ?? record.id;
+    const claimed = typeof record.feature === 'string' ? record.feature.trim() : '';
+    if (transitionId && claimed) featureOfTransition.set(transitionId, claimed);
+  }
+  // Grouped case-insensitively, because "Authentication" and "authentication" are one feature that
+  // was spelled twice, not two features — and the first spelling in walk order is the name, with
+  // every spelling kept in `metadata.extra.spellings_seen`. Nothing is merged that differs by more
+  // than case: a second spelling that is a different word is a second feature, and saying so is the
+  // model's job.
+  const featuresByName = new Map();
+  for (const edge of committedEdges) {
+    const claimed = featureOfTransition.get(edge.id);
+    if (!claimed) continue;
+    const key = claimed.toLowerCase();
+    const entry = featuresByName.get(key) ?? { name: claimed, spellings: [], edges: [] };
+    if (!entry.spellings.includes(claimed)) entry.spellings.push(claimed);
+    if (!entry.edges.includes(edge.id)) entry.edges.push(edge.id);
+    featuresByName.set(key, entry);
+  }
+  const featureIdUsed = new Set();
+  const featureRecords = [];
+  const unassigned = { capabilities: [], states: [], transitions: [], journeys: [] };
+  for (const entry of featuresByName.values()) {
+    const subjects = entry.edges.map((edgeId) => committedEdges.find((edge) => edge.id === edgeId)).filter(Boolean);
+    // The id is a slug of the model's word, so the schema's `feature_` prefix holds whatever the
+    // name looks like — and a name with nothing alphanumeric in it cannot produce one, which is a
+    // refusal rather than a fabrication.
+    const stem = /[a-z0-9]/i.test(entry.name) ? slugify(entry.name) : '';
+    if (!stem) {
+      graphWarnings.push(
+        `features: the step(s) ${entry.edges.join(', ')} claimed the feature ${JSON.stringify(entry.name)}, which has no letters or digits in it and so cannot become a feature id (the schema requires feature_<name>). The claim was not committed: name the product area in words, e.g. "authentication".`,
+      );
+      continue;
+    }
+    let id = 'feature_' + stem;
+    let suffix = 2;
+    while (featureIdUsed.has(id)) id = `feature_${stem}_${suffix++}`;
+    featureIdUsed.add(id);
+
+    const capabilityIds = distinct(subjects.map((edge) => edge.action?.capability).filter(Boolean));
+    // A composite that contains one of this feature's capabilities is part of the feature too:
+    // `login` is built from `fill_login_email` and `fill_login_password`, and a feature that named
+    // only the two steps would hide the behaviour a generator expands when it tests the feature.
+    // Whole composites only — the relation is declared, and this reads it rather than guessing.
+    const containing = capabilityRecords
+      .filter((capability) => Array.isArray(capability.composed_of)
+        && capability.composed_of.some((step) => capabilityIds.includes(step)))
+      .map((capability) => capability.id);
+    const stateIds = distinct(subjects.flatMap((edge) => [edge.from_state, edge.to_state]));
+    const journeyIds = journeys
+      .filter((journey) => journey.transitions.some((transitionId) => entry.edges.includes(transitionId)))
+      .map((journey) => journey.id);
+    const apiIds = distinct(subjects.flatMap((edge) => (Array.isArray(edge.apis) ? edge.apis : [])));
+
+    featureRecords.push({
+      id,
+      // The model's word, as the model spelled it. `name` is what a reader sees, and tidying it
+      // would put a name in the graph that nothing ever said.
+      name: entry.name,
+      capabilities: distinct([...capabilityIds, ...containing]),
+      ...(stateIds.length ? { states: stateIds } : {}),
+      transitions: entry.edges,
+      ...(journeyIds.length ? { journeys: journeyIds } : {}),
+      ...(apiIds.length ? { apis: apiIds } : {}),
+      metadata: commitMetadata({
+        // `inferred` and not `verified`: the word is a person's reading of what the application is
+        // for, not something the page said, and the graph's `status` is about the evidence. The
+        // *membership* below is derived and exact, which is what makes the feature usable — but the
+        // name it is filed under was never observed.
+        status: 'inferred',
+        producer: run.model ? `llm:${run.model}` : 'llm',
+        createdAt: run.started_at ?? undefined,
+        extra: {
+          declared: {
+            name: `${entry.name} — the model's own word, claimed on the step(s) ${entry.edges.join(', ')}`,
+            claimed_by: 'graph_transition `feature` argument',
+          },
+          // Provenance for the schema's `metadata`, because `feature.schema.json` has no `evidence`
+          // property and the temptation is to put readings here. Readings attach to the states and
+          // transitions; a feature attaches to those, so its evidence is one hop away and named.
+          observed: {
+            transitions: entry.edges.length,
+            capabilities: capabilityIds.length,
+            states: stateIds.length,
+            journeys: journeyIds.length,
+            apis: apiIds.length,
+          },
+          derived_from: 'the transitions whose step records claimed this name: their capabilities, the states they join, the walks that contain them, the endpoints they called',
+          // Where the id came from, because the id is a slug and the name is prose: a reader has to
+          // be able to see that `feature_project_management` is the singular word the model wrote.
+          id_from: `slugify(${JSON.stringify(entry.name)}) → ${id}`,
+          ...(entry.spellings.length > 1
+            ? { spellings_seen: entry.spellings, spelling_note: `this feature was named ${entry.spellings.length} ways and they differ only by case; the first in walk order is the name` }
+            : {}),
+          related_features: 'not set: which features change together is the model\'s judgement and nothing in the evidence implies it',
+          user_value: 'not set: why this feature exists for the user is prose nothing in a browser session supplies',
+          note: `the name is the model's; the membership was derived from the evidence of ${entry.edges.length} step(s) and can be re-derived from this graph alone.`,
+        },
+      }),
+    });
+  }
+  // What no step put a name to. Reported rather than attached to something: a feature invented to
+  // cover an orphan is the graph making a claim, and the honest output of an exploration that named
+  // one area and walked three is a graph that says so.
+  const covered = {
+    capabilities: new Set(featureRecords.flatMap((feature) => feature.capabilities ?? [])),
+    states: new Set(featureRecords.flatMap((feature) => feature.states ?? [])),
+    transitions: new Set(featureRecords.flatMap((feature) => feature.transitions ?? [])),
+    journeys: new Set(featureRecords.flatMap((feature) => feature.journeys ?? [])),
+  };
+  unassigned.capabilities = capabilityRecords.map((capability) => capability.id).filter((id) => !covered.capabilities.has(id));
+  unassigned.states = stateRecords.map((state) => state.id).filter((id) => !covered.states.has(id));
+  unassigned.transitions = committedEdges.map((edge) => edge.id).filter((id) => !covered.transitions.has(id));
+  unassigned.journeys = journeys.map((journey) => journey.id).filter((id) => !covered.journeys.has(id));
+  if (featureRecords.length) {
+    const orphans = unassigned.capabilities.length + unassigned.states.length + unassigned.transitions.length + unassigned.journeys.length;
+    graphWarnings.push(
+      `features: ${featureRecords.length} feature(s) were committed from the names the steps claimed, with their membership derived from those steps — the name is the model's, and nothing here was inferred from a URL or a screen.`
+      + (orphans
+        ? ` ${orphans} object(s) belong to no feature: ${[...unassigned.capabilities, ...unassigned.states, ...unassigned.transitions, ...unassigned.journeys].slice(0, 12).join(', ')}. Name the feature on a step of the walk that produced them, or leave them uncovered — an exploration that named one area and walked three says so here.`
+        : ' Every committed object belongs to one.'),
+    );
+  }
+
   const graph = {
     schema_version: '0.1',
     generated_at: generatedAt,
@@ -2530,7 +3197,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         }),
       }
       : null,
-    features: [],
+    features: featureRecords,
     capabilities: capabilityRecords,
     states: stateRecords,
     transitions: committedEdges,
@@ -2608,6 +3275,27 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     // attributed is a hand-attribution job, and the text has to be visible to do it.
     stated_goals: journeysWithGoal.length,
     instruction: run.instruction ?? null,
+    // Naming, counted rather than described: `named_by_model` is the walks the model named itself
+    // (which is a better name than either the goal or the endpoints), and `name_conflicts` is where
+    // one walk was named more than one way — a model that names a walk twice is telling the commit
+    // something, and the commit passes that on rather than settling it in private.
+    named_by_model: journeys.filter((journey) => journey.metadata?.extra?.name_source_kind === 'model').length,
+    names_from_goals: journeys.filter((journey) => journey.metadata?.extra?.name_source_kind === 'goal').length,
+    names_derived: journeys.filter((journey) => journey.metadata?.extra?.name_source_kind === 'endpoints').length,
+    name_conflicts: assembled.nameConflicts,
+  };
+  // Features are the one entity the model names and the machinery populates, so the report says
+  // both halves at once: what was claimed, what it became, and what no step put a name to. A model
+  // reading this after a commit learns the one thing it can no longer change by hand — the walk is
+  // over, so a feature nobody named has to be named in a later run.
+  report.features = {
+    claimed: [...featuresByName.values()].map((entry) => entry.name),
+    committed: featureRecords.length,
+    ids: featureRecords.map((feature) => feature.id),
+    // Every object no feature covers, by kind. Not an error and not repaired: the graph is allowed
+    // to say that a part of it nobody named.
+    unassigned,
+    note: 'A feature is claimed by the model on the step that belongs to it (graph_transition `feature`) and its membership is then derived from that step: the capability it performs, the states it joins, the walk that contains it, the endpoints it called. Nothing here is inferred from a URL or a screen — a page does not say what a product area is for. Feature ids are slugs of the name and the name is the model\'s spelling, so `metadata.extra.declared.name` is the authoritative form.',
   };
   report.observations = { records: observations.length, carried: observationRecords.length };
   // APIs are the one part of the graph the machinery found rather than the model, so the report
@@ -2636,7 +3324,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     '`findings[].severity` describes the candidate record, not the document: `error` means a claim was refused (and the refusal is the repair), `warning` means something was dropped or weakened, `info` means it was noted and carried through.',
     'The raw logs are not touched by a commit. Every record this report judged is still in the run directory exactly as the walk wrote it, which is why a rejected candidate can be re-judged later without re-walking anything.',
     'One candidate does not become one edge: candidates sharing a `transition_id` are the same edge walked more than once, and only the best of them is committed. `decisions[]` records what happened to the rest.',
-    '`journeys[]` is derived, not decided: it is the transitions log read back in walk order and cut where a step does not start where the previous one ended, or where its edge is not a committed edge between two committed states. The walk is evidence; the goal is the run\'s own instruction, quoted verbatim from `run.json` and attributed to the journey only when the run walked one strand (`metadata.extra.goal_stated`). `journeys[].name` is that goal when there is one, and the endpoints of the walk when there is not.',
+    '`journeys[]` is derived, not decided: it is the transitions log read back in walk order and cut where a step does not start where the previous one ended, or where its edge is not a committed edge between two committed states. The walk is evidence; the name is the model\'s own word for the walk when a step claimed one (`journey_name`, recorded per step in `metadata.extra.journey_names_claimed`), the run\'s instruction verbatim from `run.json` when the run walked one strand and the name was not claimed, and the endpoints of the walk otherwise — `metadata.extra.name_from` says which, and `name_stated` says whether any of it was a person\'s words.',
   ];
 
   report.decisions = decisions;
@@ -2673,7 +3361,7 @@ export function invariantsOf(graph) {
   const seenIds = new Map();
   const elementIds = new Map();
   const duplicates = [];
-  for (const [scope, list] of [['states', states], ['transitions', transitions], ['capabilities', capabilities], ['journeys', journeys], ['observations', graph.observations ?? []]]) {
+  for (const [scope, list] of [['states', states], ['transitions', transitions], ['capabilities', capabilities], ['journeys', journeys], ['features', graph.features ?? []], ['observations', graph.observations ?? []]]) {
     for (const item of list) {
       if (!item?.id) continue;
       const known = seenIds.get(item.id);
@@ -3002,20 +3690,30 @@ export function invariantsOf(graph) {
   });
 
   // 10. feature closure.
+  //
+  // Features used to have no source in browser evidence, and that is still true of the *name*: a
+  // page never says what product area it belongs to. What changed is that the name now has a place
+  // to come from — the step that claims it — so this check has something to count instead of a
+  // constant. It stays a `should`: an exploration that named one area and walked three is a real
+  // and useful graph, and refusing it would make the naming rule into a gate.
+  const features = graph.features ?? [];
   const uncovered = {
-    capabilities: capabilities.map((capability) => capability.id),
-    states: states.map((state) => state.id),
-    transitions: transitions.map((transition) => transition.id),
+    capabilities: capabilities.map((capability) => capability.id).filter((id) => !features.some((feature) => (feature.capabilities ?? []).includes(id))),
+    states: states.map((state) => state.id).filter((id) => !features.some((feature) => (feature.states ?? []).includes(id))),
+    transitions: transitions.map((transition) => transition.id).filter((id) => !features.some((feature) => (feature.transitions ?? []).includes(id))),
   };
   const uncoveredCount = uncovered.capabilities.length + uncovered.states.length + uncovered.transitions.length;
+  const totalCount = capabilities.length + states.length + transitions.length;
   results.push({
     code: 'feature_closure',
     name: '§14.10 feature closure (should, not must)',
     severity: 'warning',
     ok: uncoveredCount === 0,
-    detail: uncoveredCount
-      ? `no features are committed, so all ${uncoveredCount} objects (${capabilities.length} capabilities, ${states.length} states, ${transitions.length} transitions) are uncovered. Features have no source in browser evidence.`
-      : 'every object is covered by a feature.',
+    detail: !features.length
+      ? `no features are committed, so all ${totalCount} objects (${capabilities.length} capabilities, ${states.length} states, ${transitions.length} transitions) are uncovered: no step of this run claimed a product feature. A feature can only come from the model — nothing in a page says what a product area is for — and it is claimed on the step that belongs to it (\`feature\` on graph_transition), which is what gives the machinery the membership to derive.`
+      : uncoveredCount
+        ? `${uncoveredCount} of ${totalCount} object(s) belong to no feature — ${Object.entries(uncovered).filter(([, ids]) => ids.length).map(([kind, ids]) => `${kind}: ${ids.slice(0, 8).join(', ')}${ids.length > 8 ? ` (+${ids.length - 8} more)` : ''}`).join('; ')}. Membership is derived from the transitions that claimed each name, so an object is uncovered when no step on or around it claimed one. Name the feature on a step of the walk that produced it, or leave it — this is a warning, and an honest graph that says which parts nobody named is worth more than one that invents a feature to close the check.`
+        : `every one of ${totalCount} object(s) is covered by one of ${features.length} feature(s).`,
   });
 
   // 11/12. Hygiene and confidence floor — reported as what this commit actually did.

@@ -331,9 +331,19 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
     recreations: () => recreations,
 
     /** Allocate the next machine-evidence record. Immutable once written. */
-    addObservation({ tool, toolArgs, phase, capture, error, screenshot, settle }) {
+    addObservation({ tool, toolArgs, phase, actionIndex, capture, error, screenshot, settle }) {
       const seq = observationCount + 1;
       const id = 'obs_' + String(seq).padStart(4, '0');
+      // A reading is taken *of* something, and the schema's own vocabulary for that is
+      // `evidenceRef.role` ('identity' | 'action' | 'effect' | …). This is the same fact
+      // written on the raw record, because the record is what a reader who has only
+      // observations.jsonl sees: `action_id` says which step this reading was taken after,
+      // so every reading is attributable to a step rather than to the run as a whole. The
+      // `after` phase is what capture() writes — the reading is taken once the action has
+      // been performed — and the step number is the one the action consumed, not a new one.
+      const actionId = Number.isInteger(actionIndex) && actionIndex > 0
+        ? 'action_' + String(actionIndex).padStart(4, '0')
+        : null;
       const record = {
         id,
         seq,
@@ -341,6 +351,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
         tool,
         phase,
         tool_arguments: toolArgs,
+        ...(actionId ? { action_id: actionId, action_index: actionIndex, observation_role: 'after_action' } : {}),
         url: capture ? capture.url : null,
         title: capture ? capture.title : null,
         capture: capture ?? null,
@@ -538,6 +549,9 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
       assertions,
       precondition_list,
       description,
+      journey_name,
+      feature,
+      action_id,
       before_observation,
       after_observation,
       observed_change,
@@ -587,6 +601,20 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
         assertions: assertions ?? [],
         preconditions: precondition_list ?? [],
         description: description ?? null,
+        // The step's own name, when the model gave it one. A journey named by the run's
+        // instruction is a run, not a walk, and the name is a claim like any other: it is
+        // written beside the step it came from so the commit can attribute it to the walk
+        // that step is part of, and so a reader of the log can see where it came from.
+        journey_name: typeof journey_name === 'string' && journey_name.trim() ? journey_name.trim() : null,
+        // The feature this step is part of, by the model's own words. Features have no
+        // machine source (nothing in a page says what a product is for), so the model
+        // supplies the vocabulary and the commit assembles the graph's `features[]` from
+        // the entities that claim one.
+        feature: typeof feature === 'string' && feature.trim() ? feature.trim() : null,
+        // Which action this step *was*, by the reading's own id. The reading the action
+        // produced carries it; keeping it on the step is what lets the graph say which
+        // reading documents the step, rather than only which reading came after it.
+        action_id: typeof action_id === 'string' && action_id ? action_id : null,
         // What each observation is evidence *for*, which is what the schema's `role`
         // means. The reading before the action is evidence for where the step started;
         // the reading the action itself produced is evidence for the action and for what
@@ -675,6 +703,17 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
     transitions: () => [...walk],
     /** Steps walked, which is not `transitionCount` once an edge is walked twice. */
     walkLength: () => walk.length,
+    /**
+     * The feature names the run has claimed, in the order they were first used.
+     *
+     * A feature is vocabulary, like a capability name and unlike a state: the same words
+     * used on two steps are one feature, and the commit's job is to decide which entities
+     * belong to it. Exposed so a tool can answer "what have you called things" — the
+     * question that keeps a run from recording `login` and `sign in` as two features.
+     */
+    featureNames: () => [...new Set(walk.map((record) => record.feature).filter(Boolean))],
+    /** The journey names the run has claimed, in the order they were first used. */
+    journeyNames: () => [...new Set(walk.map((record) => record.journey_name).filter(Boolean))],
     lastTransition: () => (walk.length ? walk[walk.length - 1] : null),
     observationCount: () => observationCount,
     nextStep: () => ++stepCount,

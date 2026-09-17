@@ -7,8 +7,10 @@ It records evidence, the model's reading of each state, and each transition — 
 capability applied in one state, landing in another — with the machinery's own
 account of the step checked against the model's. `graph_commit` then reconciles the
 whole run into a `graph.json` that validates against the target JSON Schemas, beside
-a `commit_report.json` that says what it committed, what it refused and why. See
-[The commit](#the-commit) and
+a `commit_report.json` that says what it committed, what it refused and why, and
+`graph_test` turns that graph into a Playwright spec for one of its journeys. See
+[The commit](#the-commit),
+[Generating a test](#generating-a-test) and
 [What this proves, and what it does not](#what-this-proves-and-what-it-does-not).
 
 ## The design in one line
@@ -30,7 +32,7 @@ Why not a second browser plugin? Two plugins mean two Chromium processes and two
 disagree about which page exists, and the observer reports a blank page forever.
 One page, one owner. Never mount both.
 
-## The three seams
+## The seams
 
 | Seam | API | Role |
 | --- | --- | --- |
@@ -38,6 +40,7 @@ One page, one owner. Never mount both.
 | Semantic tools | `ctx.tools.register(defineTool({...}))` | `graph_observe` and `graph_transition` — the only paths by which a state or an edge reaches the candidate graph |
 | Protocol | `ctx.systemPrompt.section({...})` | The act → observe → record loop the model follows |
 | Reconciliation | `ctx.tools.register(defineTool({...}))` | `graph_commit` — the only path from candidate records to a committed graph |
+| Generation | `ctx.tools.register(defineTool({...}))` | `graph_test` — the graph is its only input, so a spec is reproducible from `graph.json` alone |
 
 `tools/execute` is an around-waterfall. The wrapper only ever reads `exec` and
 returns the real result — a wrapper that changed or dropped a result would
@@ -65,6 +68,7 @@ graph-run/
   evidence/           # one PNG per captured step
   graph.json          # written by graph_commit, only when the rules are satisfied
   commit_report.json  # written by graph_commit, always
+  <journey>.spec.ts   # written by graph_test, from graph.json alone
 ```
 
 All four `.jsonl` files are append-only and never rewritten, so a later reading
@@ -479,11 +483,23 @@ done, never what was being attempted. There is exactly one place in the run wher
 written down, and that is `run.json` — the instruction the host supplied, captured from the
 harness's `agent/pre-step` before the first action — so that is what the commit quotes:
 
-- `name` is the stated goal when the run walked **one** strand, and the derived walk name when it
-did not — `Derived walk 1: state_login to state_dashboard (3 step(s))`. The restriction is the
-  point: the instruction names the run, not each of its journeys, so a walk that broke into three
-  strands has three walks and one instruction, and giving all three the same name would attribute
-  a goal nobody stated to two of them. `goal_source` carries which of the two applied.
+- `name` comes from three sources, in the order of how much they say: **the model's own
+  `journey_name`** if a step claimed one — the model walked it and is the only party who saw
+  what it was for — then the run's stated goal, then the endpoints. The goal is *shortened*
+  rather than copied, because `goal` is already the whole sentence and `name` is a handle for
+  a list of walks: the first clause, cut at its first comma or connective, with any URL or
+  email cut first (a cut at the first colon stops inside `http:`, which is how a name becomes
+  `open the Acme demo app at http`), and a trailing connector dropped only when a parameter
+  is what was cut — because `open the demo app at` has lost the thing the `at` pointed at,
+  while `open the demo app and sign in` has not. If whatever survives is longer than a
+  title it is clipped at a word boundary with an ellipsis. `name_from` records which of the
+  three applied, in a sentence, and `name_stated` says whether a person's words are in it at
+  all — a name is the one field a reader takes at face value. The endpoints are the name only
+  when nothing was ever stated: they say where a walk went and nothing about what it was.
+- the restriction on the goal is unchanged, and still the point: the instruction names the
+  run, not each of its journeys, so a walk that broke into three strands has three walks and
+  one instruction, and giving all three the same name would attribute a goal nobody stated
+  to two of them. `goal_source` carries which of the two applied.
 - `criticality` is **omitted rather than guessed**. The schema's `criticality` is a closed
   enum (`smoke | critical | standard | extended`, default `standard`), so writing prose there
   would be a schema violation; the reason goes in `metadata.extra.criticality` and the
@@ -492,10 +508,11 @@ did not — `Derived walk 1: state_login to state_dashboard (3 step(s))`. The re
   `llm:<model>`, because no model judged this, the importer read it off the log;
 - `metadata.extra.run_instruction` carries the instruction verbatim, `goal_stated` says whether
   this journey's name is that instruction, and when there was no instruction to quote the graph
-  carries a warning saying that a test generator has to supply the goal before a derived journey
-  becomes a test. An empty instruction is not a goal, and neither is one the host never sent: the
-  field is omitted and the warning stands, because "the run was asked to do nothing" and "nobody
-  said what the run was for" are the same graph.
+  carries a warning saying that `graph_test` has no goal to put on the test it generates, so a
+  derived journey's `test("Derived walk 1: …")` is what the spec will be filed under. An empty
+  instruction is not a goal, and neither is one the host never sent: the field is omitted and the
+  warning stands, because "the run was asked to do nothing" and "nobody said what the run was for"
+  are the same graph.
 
 Evidence is carried across from the steps and deduplicated by observation and role. It has
 to be: the schema's `evidenceRef` points at observations, never at transitions, so a
@@ -564,6 +581,75 @@ enforces the parts of the target format it can judge, and the validator catches 
 it got wrong. Both are needed — the plugin can be wrong about the schema, and the schema
 cannot see the run.
 
+## Generating a test
+
+`graph_test` reads a committed `graph.json` and writes one Playwright spec for one of its
+journeys. The graph is its **only** input: not the logs, not the run, not this session. So
+the spec is reproducible — delete the run directory, keep `graph.json`, and the same call
+returns the same bytes — and the only thing that varies between two calls is which journey
+was named.
+
+```jsonc
+{ "journey": "Sign in to Acme Demo App", "run_dir": "graph-run" }
+```
+
+`journey` takes an id, a name, or a description. With exactly one journey in the graph it
+can be omitted; with several, the tool **refuses and lists them** rather than picking one,
+because a spec that clicks through the wrong walk passes for the wrong reason. The search
+is id → name → substring → shared words, and `matched_by` says which one fired, so a fuzzy
+match is visible in the result rather than hidden in a hunch.
+
+```ts
+/**
+ * Generated from a committed graph — not written by hand.
+ * ...
+ */
+test("Sign in to Acme Demo App", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("textbox", { name: "Email" }).fill("test@example.com");
+  await page.getByRole("textbox", { name: "Password" }).fill(process.env.TEST_PASSWORD!);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+  await expect(page.getByTestId("current-user")).toHaveText("test@example.com");
+});
+```
+
+Three things about that file are decisions rather than transcription.
+
+**The spec follows the walk, not the claim.** Lines come from transitions — what the run
+did — and the checks come from `state.detection`, the model's own answer to "how do I know
+I am on this screen". A capability declared `composite` over behaviours whose steps act on
+other elements is reported (`composite_step_targets_a_different_element`) and the transition
+is written anyway: the composition is a claim about the application, and a test is a record
+of what happened.
+
+**It refuses three things, and says so where the refusal is.** A storage key is never
+asserted — no browser can be asked what the application remembers, so the evidence that a
+session survives is reported and the check is left to whoever writes the reload test. An
+element with no actionable role is never clicked: a heading is something a screen *has*, and
+saying what a user does to it is the model's job, not the generator's. And a value the run
+did not keep is never invented — `[set]` in the store becomes `process.env.TEST_PASSWORD!`
+and a `requires[]` entry naming the element it came from, which is the whole difference
+between a spec that says what it needs and one that contains a made-up password.
+
+**Every line carries its provenance, in the result if not in the file.** `steps[]` names the
+transition, the capability, the element, the locator and the readings that produced each
+action; `assertions[]` says whether a check came from the walk, from the graph's own
+detection, or from a candidate the commit derived — and a candidate that repeats a line the
+arrival block already wrote is reported as a duplicate rather than written twice. `gaps[]` is
+everything the graph implies and the spec cannot say, each in one actionable sentence,
+because a gap is the model's next exploration.
+
+**`ok` is not "a file was written".** A spec with a blocking gap is written *and* is not ok:
+it drops the step the graph could not turn into an action, so it would pass without
+performing it. Read the gaps before treating the file as a test.
+
+The generator is a pure function (`lib/generate.js`) with a thin tool wrapper around it, so
+its rules are tested one at a time against hand-written graphs: locator ranking, journey
+selection and its refusals, every assertion type and every operator, the row-count
+translation of a dimension, and the whole body of a spec compared character for character.
+
 ## Install
 
 **Tarball, not a `link:` directory.** A directory install resolves the real path,
@@ -574,14 +660,18 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.20.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.20.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.22.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.22.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
 spec string, so re-installing the same path **at the same version** reuses the
-cached copy and silently keeps the old code. `--force` does not help. Bump
-`version` in `package.json` and repack to actually deploy.
+cached copy and silently keeps the old code. `--force` does not help, and neither
+does deleting the installed directory first — the copy is served from the store,
+not from `node_modules`. Bump `version` in `package.json` and repack to actually
+deploy. That is how 0.1.22 came about: the two fixes the 0.1.21 live run found
+were packed and installed at 0.1.21, the profile kept 0.1.21's `generate.js`, and
+`grep -c withheldByEvidence` on the *installed* file returned `0`.
 
 The installer's own output is not proof of what landed. Verify the artifact, not
 the exit code:
@@ -621,6 +711,7 @@ unresolvable peer can never turn a plugin install into a hard failure.
     observeTool: graph_observe       # rename the semantic tool
     transitionTool: graph_transition # rename the transition tool
     commitTool: graph_commit         # rename the reconciliation tool
+    generateTool: graph_test         # rename the spec generator
     runDirName: graph-run            # where evidence lands (relative to the workspace)
     application:                     # which application this graph is about
       id: app_acme                   # stable, prefixed; not derived from the URL
@@ -674,12 +765,12 @@ This is refused rather than repaired, in two places, for two different reasons:
 outside the project. A rewritten path is how a config typo becomes a surprise on
 disk.
 
-## Why three tools, not ten
+## Why four tools, not ten
 
 A semantic layer usually grows one tool per noun — `observe_state`, `identify_state`,
 `save_state`, `find_similar_state`, `record_transition`, `add_capability`,
-`query_graph`.
-This plugin has three. The merges are deliberate, because each split
+`query_graph`, `generate_test`.
+This plugin has four. The merges are deliberate, because each split
 creates a state the graph can be left in that has no meaning:
 
 | Split in two | The half-recorded state it allows |
@@ -716,10 +807,21 @@ sloppy because the commit is where sloppiness gets caught, and the commit can be
 because it judges the whole run at once instead of one step at a time.
 
 **The tool count is not the goal; the number of half-recorded states is.** Each of the
-three exists because removing it would leave a claim that is neither evidence nor
+four exists because removing it would leave a claim that is neither evidence nor
 knowledge — a reading nobody saved, an edge judged before it could be compared,
-evidence that is not a graph. `graph_observe` and `graph_transition` write candidates;
-`graph_commit` is the only writer of the graph.
+evidence that is not a graph, a test that is not derived from anything.
+`graph_observe` and `graph_transition` write candidates; `graph_commit` is the only
+writer of the graph; `graph_test` writes one file and never touches the graph.
+
+**`graph_test` is a tool and not a mode of the commit**, although it could be one.
+Generating is the only step in the chain whose input is a *finished* artifact — the walk
+is over, the graph is on disk, and nothing it does can change either. So it takes a path,
+is run again, and returns the same spec: its input is one file, which is the thing the
+run itself is not. It is also the only step whose *normal* outcome is a refusal: "that
+journey is not in this graph" and "this spec drops a step the graph could not make an
+action out of" are answers rather than errors, and a mode folded into the commit would
+have to give them in the commit's own report, where a reader looking for a test would not
+think to look.
 
 **What the browser does not provide.** `dsh-browser` is 12 tools (`open`, `navigate`,
 `click`, `type`, `select`, `wait`, `screenshot`, `get_text`, `get_html`, `eval`,
@@ -859,6 +961,62 @@ show for it. 0.1.17 asks that question at the reading as well, *before* it write
 reading's own capture contradicts is refused, with the page that is actually in hand quoted back,
 and since nothing was recorded the model simply reads again — no action has to be repeated.
 
+**Proven by a live agent run, 0.1.20.** The sign-in walk again, and the run the review that
+produced 0.1.21 was written from: `ok: true`, 2 states, 3 capabilities, 3 edges, 1 journey,
+`features: []`, 7 warnings, and one assertion on the whole graph — the `login` edge's own
+`current_user` check. The journey's `goal` is the instruction quoted and its `name` is that
+instruction, which is the defect item 4 of the review named: a name is a handle and the run's
+instruction is a sentence, so the walk was named after the operator's prompt. The graph
+validates, and what it does not say is the point of the release: nothing in it claims a
+feature, nothing names the walk, and the composite `login` absorbs the submitting click
+without saying so.
+
+**Proven by a live agent run, 0.1.21.** The same sign-in walk, asked for the new content and
+then for the test. The graph: 2 states, 4 capabilities, 3 edges, **1 feature**
+(`authentication`, claimed on every step), and a composite that now contains the interaction
+that finishes it — `login.composed_of = [fill_login_email, fill_login_password,
+submit_login]`, with `submit_login` recorded as its own capability *and* as the last step of
+`login` in one call, which is the shape item 1 and item 2 of the review ask for and the
+shape `composite_part_never_walked` reports from. `journey_name` claimed on the submit step
+gives the walk its own name, `Sign in to Acme and see the projects list`, while `goal` keeps
+the whole instruction; the commit reports 6 `info` notes, no warnings, and `graph_test`
+generates `ok: true` with no blocking gap — 3 of 3 steps became an action.
+
+Three things only a real run could have produced, and all three are in the record: the first
+two changed the code, in 0.1.22 (see gap 14), and the third needed no change.
+
+- **The generated spec filled the password box with the literal string `[redacted]`.** The
+  store had written `[set]` — the recorder read the field back and that is what it found —
+  but the model transcribed its own placeholder into `arguments`, so the generator, which
+  believed the argument, wrote a test that fails for a reason that has nothing to do with the
+  application. The reading is the party that observed the value, so the reading now wins, and
+  the disagreement is a warning rather than a silent repair
+  (`argument_disagrees_with_the_reading`). This is refusal 3 rewritten as a rule with a
+  counterexample behind it, and it is the reason there is a 0.1.22: the run that found it
+  found it in a spec this plugin had already written.
+- **The journey's `goal` was `Open http://127.0.0.1:4173/ in the browser, sign in with the
+  credentials the page shows, and`** — a quotation of the instruction that stops mid-sentence
+  on the conjunction it needed. The rule said "the first sentence"; the code took the first
+  *line*, and this instruction is hard-wrapped, so the goal ended at the margin. 0.1.20's
+  instruction happened to be one line. A line break is not punctuation, and it no longer
+  counts as one.
+- **The first generation was blocked, and the block was right.** `collection_has_no_usable_locator`:
+  the `projects` dimension could only resolve to `element_project_item`, a row with no
+  locator a browser can act on, so the count check had nothing to count. Declaring the
+  container the evidence already showed fixed it. What remains is a warning this release
+  deliberately leaves in place: the dimension name matched two elements, so the count check
+  was dropped rather than guessed at, and the spec carries one check where the graph had two
+  candidates.
+
+**That run's own graph, regenerated under 0.1.22.** The spec now reads
+`fill(process.env.TEST_PASSWORD!)` where 0.1.21 wrote `fill("[redacted]")`; the gaps are
+`argument_disagrees_with_the_reading` and `dimension_could_be_more_than_one_element` at
+`warning` and `persistence_evidence_not_asserted` at `info`; selection reports `matched_by` as
+`the journey name "Sign in to Acme and see the projects list", exactly`; and
+`goalFromInstruction` on that 9-line instruction returns `Open http://127.0.0.1:4173/ in the
+browser, sign in with the credentials the page shows, and record what you find.` — the sentence,
+where the recorded graph has the margin.
+
 **Known gaps, in the order they will bite:**
 
 1. **Closed in 0.1.13: a document is observed from its first byte.** The hooks used to be
@@ -882,7 +1040,8 @@ and since nothing was recorded the model simply reads again — no action has to
    `Config` has no key for an init script. Unpatched, the hooks still arrive by eval, and both
    the marker and the empty list say so honestly instead of claiming the document was quiet.
 2. **Some rules are judgement, not proof.** `feature_closure` is reported rather than
-   enforced (`features` has no source at all, see gap 6), and `reachability` is a warning
+   enforced (and since 0.1.21 `features` has a source at all — see gap 6), and
+   `reachability` is a warning
    as well — but for a different and narrower reason now. Since 0.1.12 it floods from the
    derived journey start states, so it is a real check that *passes* on a real walk (the
    0.1.12 live run above); it stays a warning because a walk that avoided a state is not
@@ -897,14 +1056,24 @@ and since nothing was recorded the model simply reads again — no action has to
    attempted*, so `metadata.extra.goal_stated` is `false` and `criticality` is left to the
    schema default. Closing the other half needs a model that says what it was trying to do,
    i.e. a `goal` on the journey rather than a derived name.
-4. **State ids grow without bound.** Every dimension the model chooses is concatenated
+4. **State ids grow without bound, and two long ones can collide.** Every dimension the
+   model chooses is concatenated
    into the id, so a field value can end up in one, and a derived journey id inherits the
    whole thing:
    `journey_login_anonymous_auth_signed_out_to_login_anonymous_auth_signed_out_form_cre`
    is one real 0.1.12 id (the slug is cut off at a length budget). The dimensions are the
    model's to choose and they are all real, so the fix is a budget (a limit on dimensions,
    or a hash past N) rather than a check — and the same budget wants to apply to derived
-   journey ids, which are built from two of them.
+   journey ids, which are built from two of them. The budget that exists is `slugify`'s
+   40-character cut, and it is a cut rather than a distinguishing device: two identities
+   that agree for forty characters get the same id, which the store then treats as one
+   state. 0.1.21 gave the symptom a second surface rather than a fix — the generated spec is
+   filed under the journey's id, so the 0.1.21 sign-in walk named its file
+   `journey_login_anonymous_to_project_list_.spec.ts` (cut mid-word, with the separator the
+   cut landed on still on the end), and a second journey differing only past the cut would
+   overwrite the first. Trimming that trailing separator is not a fix either: it would make
+   `slugify('a…a b')` and `slugify('a…a')` the same id, which is the collision the cut is
+   already risking, arrived at deliberately.
 5. **Closed in 0.1.16: element state can outrank state identity.** The half the machinery can
    do without making a judgement call is the half that was missing — not *is this a state?*
    but *what changed?*. The note names the previous state, the step's `value_changed` effect,
@@ -915,11 +1084,19 @@ and since nothing was recorded the model simply reads again — no action has to
    state as the form without it"* — and the `dimensions` parameter description asks what the
    application would say, not what the user typed. What is still the model's call is whether
    the two readings really are one page; the note declines to make it, and reports instead.
-6. **`features` has no source.** `application` is now declared in config (see
-   [Configuration](#configuration)), but `features` is a judgement about the app's own
-   structure rather than something the machinery can observe, so it needs a model-facing
-   tool. Optional in the schema, so its absence costs a valid graph rather than a
-   committable one — but `graph_commit` has to be able to emit it.
+6. **Closed in 0.1.21: `features` has a source.** `application` is declared in config (see
+   [Configuration](#configuration)), and `features` was the other judgement about the app's
+   own structure that nothing could observe — the 0.1.20 live runs committed
+   `features: []` however many pages they walked. It is now a `feature` argument on
+   `graph_transition`: the words a step names, reused verbatim, and the commit assembles
+   `features[]` from the capabilities, states, transitions and journeys that claim one,
+   with the provenance in `metadata` (the schema's `feature` object has no field for it and
+   `additionalProperties: false`). Optional in the schema still, so a run that names no
+   feature commits a valid graph with none — but the protocol now asks for the words, and
+   the parameter description says why they are the model's to supply. What remains open is
+   not the source but the *shape*: whether the set a run names for one application is
+   discriminating enough to be useful is a judgement no check here can make, which is why
+   `feature_closure` is still a report.
 7. **Closed in 0.1.12: there *is* an entry state.** This file used to claim that
    `graph.schema.json` has no field saying where a journey starts, and that the fix belonged
    in the schema. That was wrong, and the check it excused was worse than useless: it
@@ -1053,11 +1230,77 @@ and since nothing was recorded the model simply reads again — no action has to
      what was declared — `apis` on the edge is the union, `apis_declared` and `apis_observed` say who
      claimed what — and the report counts the endpoints no step referenced, because an endpoint the
      run called and the graph never mentions is a behaviour the graph cannot generate.
+13. **Closed in 0.1.21: the graph can be turned into a test, and the two halves of the run
+   that only a model can supply now have somewhere to go.** Item 12 closed six seams in what a
+   walk *records*; this closes the seam on the far side — a graph that is complete and
+   correct is still not a test, and the step from one to the other is where a third of the
+   review's findings lived. `graph_test` generates a Playwright spec from `graph.json`
+   alone (see [Generating a test](#generating-a-test)), which forced four rules out into the
+   open that were previously implicit: **locator ranking** (role and accessible name over the
+   test id over the raw selector, with a non-control role falling back to what the run
+   recorded, because `getByRole("generic", …)` matches everything); **journey selection**,
+   which refuses an ambiguity instead of resolving it, with `matched_by` saying how it chose; a
+   **dimension asserted as a count of the rows the reading counted** (`li,tr,…` — the same
+   selector `capture.js` counts with, so the generated check counts the same things the
+   evidence did); and a **refusal list** that is not the error list — a storage key, a
+   non-actionable element, an invented value.
+
+   The same release teaches the protocol the content the review asked for and the machinery
+   could not produce: `journey_name` (without it a journey keeps the run's whole instruction
+   as its name and goal, which *is* the 0.1.20 bug — the generator then has to shorten a
+   sentence back into a title, and `journeyNameFromGoal` does it by cutting at the first
+   parameter and trimming only the connectors that cut left dangling), `feature`, and the one
+   composite rule whose absence was visible in the live graph — a composite that absorbs the
+   interaction that finishes it. `login` recorded as `composed_of: [fill_login_email,
+   fill_login_password]` with the submitting click folded into it is a claim the walk does not
+   support, so the protocol now says to record the click as its own capability **and** a step
+   of the behaviour in the same call (`capability_behaviour: "login"`), and the generator
+   reports the mismatch when a graph says otherwise. Two of the review's nine items were
+   content rather than machinery — `cap_submit_login` existing, and `cap_login.composed_of`
+   naming it — and the 0.1.21 live run produced both, on the first attempt, with `feature`,
+   `journey_name` and the composite step supplied in the same call as the click; see
+   [What this proves, and what it does not](#what-this-proves-and-what-it-does-not). The
+   protocol was the fix: no check could have derived `submit_login` from a walk that recorded
+   the click as `login`, and a run that still does not produce it now ends in a warning
+   naming the missing step instead of a test that clicks a form and checks nothing about it.
+14. **Closed in 0.1.22: the two things the 0.1.21 live run found, found by reading the spec it
+   generated.** Item 13 shipped a generator and a protocol; the run then produced a graph that
+   was right and a spec that was wrong, which is the only way this pair of defects could be
+   found, because both of them are the *same shape*: something else the model wrote, believed
+   instead of the machinery's own reading.
+
+   **The argument is not the value.** The capture reads a field before and after an action and
+   files the second reading, so a password the store redacted appears in the step's effects as
+   `to: "[set]"` no matter what the model typed into `arguments`. `[set]` means *the recorder
+   saw a value and is not keeping it*, and a model that writes `"[redacted]"` or `"***"` or
+   anything else into `arguments` has not kept it either — it has written a placeholder, and a
+   spec built from the model's words fills the box with that placeholder. So when the two
+   disagree, the reading wins: the value becomes `process.env.TEST_<PURPOSE>` like any other
+   withheld value, and the step carries a `warning` naming both sides
+   (`argument_disagrees_with_the_reading`). It fires on the *disagreement* rather than on the
+   redaction, so a run that writes `[set]` into the argument — or writes nothing — stays
+   silent, and the graph is left exactly as the model committed it: this is a rule about what
+   a spec may assert, not a correction of the graph. `withheldByEvidence` resolves the effect
+   to the element by id or by collection name, so an effect targeting `password_input` and an
+   element whose purpose is `password` still match.
+
+   **A line break is not punctuation.** `goalFromInstruction` took the first *line* of the
+   instruction, and the 0.1.21 task was hard-wrapped, so the journey's goal ended `… the
+   credentials the page shows, and`. 0.1.20's instruction was one line, which is why the rule
+   looked correct for a release. It now joins the lines first and takes the first *sentence*,
+   still cutting at a parameter and still clipping at a word boundary with an ellipsis.
+
+   Both are pinned. `test/generate.test.mjs` has six checks on the reading-over-argument
+   rule (the override, the report, what the step says it believed, the id-shaped match, the
+   silent case, and an effect on a *different* field, which must not override anything), and
+   `test/commit.test.mjs` has one on a wrapped sentence and one on a goal that is clipped
+   rather than left a fragment. `test/prove-generate.py` breaks each rule in the source and
+   requires the suite to fail — nine rules, including these two.
 
 ## Tests
 
 ```sh
-npm test        # 8 suites, no browser and no harness
+npm test        # 9 suites, no browser and no harness
 ```
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
@@ -1066,7 +1309,7 @@ shapes), the diff and the cross-check (every warning kind, the one error, malfor
 effects, missing captures), the reconciler (a synthesized run committed end to end,
 then every rule one at a time — gates, refutation, supersession, ownership, dropped
 references, state variables and unasserted dimensions, and the filesystem behaviour of a
-refused and a forced commit), and a fake-harness integration pass over all three tools'
+refused and a forced commit), and a fake-harness integration pass over all four tools'
 refusal paths, including the digest's own account of what the walk moved.
 
 The journey rules get the same treatment, and they need it more than most: the assembler
@@ -1090,6 +1333,31 @@ directory was — and asserts the other half: every record returns `null`, nothi
 remembered (no state, no vocabulary, no advanced walk), the sequence is not burned, the
 failure is counted, and a later success clears the *current* problem while leaving the count
 of unwritten records alone, because a gap is a gap.
+
+The generator gets its own suite, `test/generate.test.mjs`, over a graph written by hand — two
+states, four transitions, a composite capability, a redacted password, a declared
+`candidate_assertions` list — because a spec is a program whose every line has to have come from
+somewhere in the graph, and "it produced a file" is not a claim anything can be checked against.
+The suite pins the whole body of a generated spec character for character, then takes one rule at a
+time: the summary counts, the `requires[]` entry a withheld value produces, the three refusals (a
+storage key is not asserted, a role a browser cannot act on is not clicked, a value the run did not
+keep is not invented), the duplicate detection that stops a candidate repeating a line the arrival
+block already wrote, the row-count translation of a dimension, every assertion type and every
+operator, the journey search with its refusals and its `matched_by`, and the live-run case where an
+argument disagreed with the step's own reading. A graph in, a string out, and no browser or harness
+anywhere in it.
+
+Every rule in that suite was checked the way the other suites' rules are — by breaking it and
+reading the failure. `test/prove-generate.py` reverts nine of them one at a time and every one makes
+the suite fail, naming the expectation that caught it: the dimension's resolution through
+`sameCollectionName`, the role-and-name ranking, the withheld-value path, the folded negation, the
+undeclared target, the arrival state's own detection, the argument-versus-reading rule, the matching
+of a reading to the field it was read from, and `journeyNameFromGoal`'s dangling connector. The
+first attempt at that last one proved nothing and is the reason the file is worth reading: removing
+the `cutParameter &&` gate is *behaviourally* identical, because a connector can only dangle when a
+parameter was cut, so the proof breaks the rule instead — a connector set that includes the `in` of
+"sign in" — and the suite catches it. It runs on `python3`, changes nothing that survives, and
+prints `after restoring: 9/9 suites passed` when it is done.
 
 The race between an action and the reading taken after it gets a suite that reproduces it,
 `test/settle.test.mjs`, because it is the one failure the recorder was built to catch and

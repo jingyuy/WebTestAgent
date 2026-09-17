@@ -65,6 +65,7 @@ const act = (name, args = {}) => handlers.get('tools/execute')({ ...exec, name, 
 const observe = (args) => tools.get('graph_observe').execute(args, exec);
 const transition = (args) => tools.get('graph_transition').execute(args, exec);
 const commit = (args) => tools.get('graph_commit').execute(args, exec);
+const generate = (args) => tools.get('graph_test').execute(args, exec);
 
 // The one thing about a walk that no browser can witness: what the run was asked to do. It arrives
 // from `agent/pre-step` before the first action, it is written into `run.json` once, and the commit
@@ -72,7 +73,7 @@ const commit = (args) => tools.get('graph_commit').execute(args, exec);
 await handlers.get('agent/pre-step')({ messages: [{ content: [{ type: 'text', text: 'Log in and check the dashboard.' }] }] }, async () => ({}));
 
 // --- registration ---------------------------------------------------------
-check('all three tools registered', [...tools.keys()].sort(), ['graph_commit', 'graph_observe', 'graph_transition']);
+check('all four tools registered', [...tools.keys()].sort(), ['graph_commit', 'graph_observe', 'graph_test', 'graph_transition']);
 check('protocol section contributed', sections.map((s) => [s.name, s.order]), [['graph:exploration-protocol', 150]]);
 check('protocol teaches the transition tool', sections[0].text.includes('graph_transition'), true);
 check('protocol teaches where the run ends', sections[0].text.includes('graph_commit'), true);
@@ -293,6 +294,57 @@ check('but the instruction is on both strands anyway, so it can be attributed by
   written.journeys.map((journey) => [journey.metadata.extra.run_instruction, journey.metadata.extra.goal_source.startsWith('withheld:')]),
   [['Log in and check the dashboard.', true], ['Log in and check the dashboard.', true]]);
 check('forcing does not make the verdict a pass', forced.committed, false);
+
+// --- the generator, through the same seam ---------------------------------
+// The graph on disk is the generator's only input, which is what makes a generated spec
+// reproducible: the same file gives the same spec, today or a year from now, with no raw evidence
+// and no model. This is the end-to-end shape of the tool — read the graph the commit wrote, turn
+// one journey into code, write it beside the graph — and the walk above is a real run, so the
+// journeys in it are the ones the commit derived rather than ones a fixture declared.
+//
+// Nothing is named first, because a graph the walk produced has more than one journey in it: an
+// unasked-for choice between them is the one thing this tool must not make.
+const unnamed = await generate({});
+check('a graph with more than one journey is not guessed at when none is named',
+  [unnamed.ok, unnamed.spec_path, unnamed.candidates.map((candidate) => candidate.id)],
+  [false, null, written.journeys.map((journey) => journey.id)]);
+const chosen = written.journeys[0].id;
+const generated = await generate({ journey: chosen });
+check('the generator reads the graph the commit wrote',
+  [generated.graph_path, generated.run_dir, generated.journey.id],
+  [join(cwd, 'graph-run', 'graph.json'), join(cwd, 'graph-run'), chosen]);
+check('and writes the spec beside it, named after the journey rather than the title',
+  [generated.spec_path, generated.filename.endsWith('.spec.ts'), generated.spec_path.endsWith(generated.filename)],
+  [join(cwd, 'graph-run', 'generated', generated.filename), true, true]);
+// The string in the result is the file, byte for byte. A tool that reported one spec and wrote
+// another would make the answer useless as evidence about what was generated, so this compares the
+// two rather than trusting the path.
+check('and the file it wrote is the spec it returned',
+  readFileSync(generated.spec_path, 'utf8') === generated.spec, true);
+check('the spec imports the runner and opens the route the walk started at',
+  [generated.spec.includes('from "@playwright/test"'), generated.spec.includes('await page.goto("/")')],
+  [true, true]);
+check('every step of the walk is reported, acted on or not, with what decided it',
+  generated.steps.every((step) => typeof step.transition === 'string' && step.interaction !== undefined), true);
+// This walk recorded no interactive elements at all — its captures have real URLs and an empty
+// surface — so no step of it can become an action, and the spec says so instead of pretending
+// otherwise. That is the case worth asserting here: a generator that wrote a file and reported
+// success for a walk whose every step it dropped would be the failure this rule exists to prevent.
+check('a walk whose steps name no element is not reported as a spec that performs them',
+  [generated.ok, generated.counts.actions, generated.counts.blocking_gaps === generated.counts.gaps,
+    generated.gaps.every((gap) => gap.code === 'step_targets_no_element')],
+  [false, 0, true, true]);
+check('and the file is written anyway, with the gaps as the record of what it drops',
+  [existsSync(generated.spec_path), generated.next.includes('This spec is not ok')], [true, true]);
+// A journey the graph does not have is answered with the ones it does, never with a guess: the
+// difference between "you named it wrong" and "I found something close enough" is the difference
+// between a spec for the journey that was asked for and a spec for another one.
+const missed = await generate({ journey: 'add a product to the cart' });
+check('a journey the graph does not have is refused, with the ones that exist',
+  [missed.ok, missed.spec_path, missed.candidates.length],
+  [false, null, written.journeys.length]);
+await refuses('and a directory with no committed graph is not silently generated from',
+  () => generate({ run_dir: 'no-such-run' }), 'has no graph.json');
 // What the captures recorded about each state is a field of the document, beside the identity the
 // model wrote: it is the half of a state identity that is not a judgement, so it survives to disk
 // where a reader — or the next rule — can compare two states without re-reading the run.
@@ -399,10 +451,11 @@ check('a composition recorded on a later call lands on the capability, not besid
   [['cap_buy_item', 'composite', ['cap_return_to_cart']], ['cap_return_to_cart', 'navigation', null]]);
 // And the goal, on a walk that is one strand again because the log the recreation kept is the walk
 // from the repair onwards: the instruction the host supplied before the first action is now the
-// journey's name and its goal, quoted rather than inferred from the shape of the walk.
+// journey's goal, and its first clause is the name — a goal is a sentence and a name is a handle,
+// so the two fields say different things rather than one being a copy of the other.
 check('the walk that is one strand carries the run\'s instruction as its goal, quoted',
-  settled.journeys.map((journey) => [journey.name, journey.goal, journey.metadata.extra.goal_stated, journey.transitions.length]),
-  [['Log in and check the dashboard.', 'Log in and check the dashboard.', true, 3]]);
+  settled.journeys.map((journey) => [journey.goal, journey.name, journey.metadata.extra.goal_stated, journey.transitions.length]),
+  [['Log in and check the dashboard.', 'Log in and check the dashboard', true, 3]]);
 // The same two rules at the end of a longer, repaired run: the fingerprint is derived from the
 // readings of the second run (the first run's evidence was deleted with its directory, and nothing
 // here guesses at what it said), and the pair rule is asked of that document rather than of the
@@ -445,8 +498,26 @@ check('the step that changes only a remembered value is recorded',
 queue = [capture({ url: 'http://x/cart-with-items', title: 'Cart (1 item)' })];
 await act('browser_click', { selector: '#add' });
 const remembered = await observe({ page_type: 'cart_with_items', detection: [{ type: 'url' }] });
-check('and the next digest names what it moved, because no state recorded it as a dimension',
-  remembered.graph.state_variables, { moved: ['cart.count'], recorded: [], unrecorded: ['cart.count'] });
+// The digest divides the question in two, because the answer differs: a storage key is something
+// the application remembers, which no browser can be asked about, so nothing asks for a dimension
+// here — while a collection is something the screen shows, and *that* is the dimension the answer
+// asks for. Both are reported, so a model can act on the one it can act on.
+check('and the digest files a remembered value as persistence rather than as a dimension nobody recorded',
+  remembered.graph.state_variables,
+  { moved: ['cart.count'], recorded: [], unrecorded: [], persistence: ['cart.count'] });
+queue = [capture({ url: 'http://x/cart-with-items', title: 'Cart (1 item)' })];
+await act('browser_click', { selector: '#add' });
+await observe({ page_type: 'cart_with_items', detection: [{ type: 'url' }] });
+await transition({
+  capability: 'add_to_cart',
+  effects: [{ type: 'list_changed', target: 'cart.items', to: '3' }],
+});
+queue = [capture({ url: 'http://x/cart-with-items', title: 'Cart (1 item)' })];
+await act('browser_click', { selector: '#add' });
+const collected = await observe({ page_type: 'cart_with_items', detection: [{ type: 'url' }] });
+check('while a collection no state records as a dimension is named, because that one can be checked',
+  collected.graph.state_variables,
+  { moved: ['cart.count', 'cart.items'], recorded: [], unrecorded: ['cart.items'], persistence: ['cart.count'] });
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

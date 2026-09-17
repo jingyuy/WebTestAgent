@@ -16,7 +16,7 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitRun, assembleJourneys, dimensionNamesOf, goalFromInstruction, invariantsOf, observableOf, outranksAsEvidence, reconcile, readRun, sameVariableName, stateVariablesOf, unrecordedStateVariables } from '../lib/commit.js';
+import { commitRun, assembleJourneys, dimensionNamesOf, goalFromInstruction, invariantsOf, journeyNameFromGoal, observableOf, outranksAsEvidence, reconcile, readRun, sameCollectionName, sameVariableName, stateVariablesOf, unrecordedStateVariables } from '../lib/commit.js';
 import { createRun } from '../lib/session.js';
 import { losslessPaths } from './lossless.mjs';
 
@@ -388,14 +388,17 @@ check('one walk, three steps, cut where the refused edge is', report.journeys,
   {
     assembled: 1, walked: 3, unusable_steps: 1, breaks: 1, entry_states: ['state_login'],
     stated_goals: 1, instruction: 'Log in and check the dashboard.',
+    // Naming, counted: this fixture's steps claim no `feature` and no `journey_name`, so the goal
+    // is the only statement of intent in the whole run and it names the walk.
+    named_by_model: 0, names_from_goals: 1, names_derived: 0, name_conflicts: [],
   });
 const [journey] = graph.journeys;
 check('the journey is named after the walk it is', journey.id, 'journey_login_to_dashboard_authenticated');
 // The run's instruction is the only place intent was ever written down, and the run walked exactly
 // one strand, so the instruction is a goal for this walk — quoted, never paraphrased, because a
 // goal the machinery made up would be the one claim in the graph with no evidence of any kind.
-check('the walk carries the run\'s own instruction as its goal, and as its name',
-  [journey.goal, journey.name], ['Log in and check the dashboard.', 'Log in and check the dashboard.']);
+check('the walk carries the run\'s own instruction as its goal, and its first clause as its name',
+  [journey.goal, journey.name], ['Log in and check the dashboard.', 'Log in and check the dashboard']);
 check('the goal is marked as stated rather than inferred from the walk',
   [journey.metadata.extra.goal_stated, journey.metadata.extra.run_instruction],
   [true, 'Log in and check the dashboard.']);
@@ -963,6 +966,11 @@ check('a state variable is recognised by its own name or by its last segment, be
     sameVariableName(null, 'cart'), sameVariableName(undefined, undefined),
   ],
   [true, true, true, false, false, false]);
+// The two halves of a variable, and the whole point of the split: a *collection* is a dimension
+// candidate — it is something the screen is showing, so a browser can be asked about it — and a
+// *storage key* is not. The rule below asks only about the first, which is why the middle case
+// answers nothing: `cart.count` written to storage is a fact about what the application remembers,
+// and demanding a dimension for it would demand an assertion no browser can evaluate.
 check('and a variable no state records is the one worth reporting',
   [
     unrecordedStateVariables(
@@ -973,11 +981,16 @@ check('and a variable no state records is the one worth reporting',
       [{ type: 'storage_changed', target: 'cart.count' }],
       [{ dimensions: { cart: 'non_empty' } }, {}],
     ).map((variable) => variable.name),
+    unrecordedStateVariables(
+      [{ type: 'list_changed', target: 'cart.count' }],
+      [{ dimensions: { cart: 'non_empty' } }, {}],
+    ).map((variable) => variable.name),
     dimensionNamesOf({ dims: 1 }),
   ],
-  [[], ['cart.count'], []]);
+  [[], [], ['cart.count'], []]);
 
-// The rule itself: a step moved a storage key, and the state it arrived in says nothing about it.
+// The rule itself: a step changed a collection the screen is showing, and the state it arrived in
+// says nothing about it.
 const movedVariable = rule({
   observations: [OBS('obs_0001', 'http://x/cart'), OBS('obs_0002', 'http://x/cart')],
   states: [
@@ -989,7 +1002,7 @@ const movedVariable = rule({
   ],
   transitions: [EDGE({
     id: 'transition_add', transition_id: 'transition_add', from_state: 'state_a', to_state: 'state_b',
-    effects: [{ type: 'storage_changed', target: 'cart.count', to: '3' }],
+    effects: [{ type: 'list_changed', target: 'cart.items', to: '3' }],
   })],
 });
 const unrecordedVariable = finding(movedVariable.report, 'state_variable_not_in_state_identity');
@@ -997,13 +1010,65 @@ check('a step that moved a variable no state records says so, as a note on the s
   [unrecordedVariable?.scope ?? null, unrecordedVariable?.severity, unrecordedVariable?.basis],
   ['transition_add', 'info', 'evidence_check']);
 check('and says which variable, of which kind, and what to do with it',
-  [(unrecordedVariable?.detail ?? '').includes('cart.count (storage)'),
+  [(unrecordedVariable?.detail ?? '').includes('cart.items (collection)'),
     (unrecordedVariable?.detail ?? '').includes('neither state_a nor state_b'),
-    (unrecordedVariable?.detail ?? '').includes('identity.dimensions ({count: non_empty})')],
+    (unrecordedVariable?.detail ?? '').includes('identity.dimensions ({items: non_empty})')],
   [true, true, true]);
+check('and the dimension it asks for is the countable form, which is the whole arithmetic gap',
+  (unrecordedVariable?.detail ?? '').includes('{"type":"value","target":"items","operator":"greater_than","expected":0}'), true);
 check('the edge carries the rollup, so the graph says what the step could not hold',
   movedVariable.graph.transitions.find((edge) => edge.id === 'transition_add')?.metadata?.extra?.commit?.state_variables ?? null,
-  { moved: [{ name: 'cart.count', kind: 'storage' }], recorded: [], unrecorded: [{ name: 'cart.count', kind: 'storage' }] });
+  {
+    moved: [{ name: 'cart.items', kind: 'collection', role: 'semantic' }],
+    recorded: [],
+    unrecorded: [{ name: 'cart.items', kind: 'collection', role: 'semantic' }],
+    semantic: ['cart.items'],
+    persistence: [],
+  });
+
+// The other half of the same question, and the one the live run got wrong: a step that wrote to
+// the page's own storage changed something the application *remembers*, which is evidence and not
+// an observable. It is reported — the walk did something the screen did not show — and it is
+// deliberately not offered as a dimension, because a `value` assertion over a storage key is a
+// check no browser can evaluate. Demanding one would be asking the model for a test that cannot be
+// written, which is a worse failure than saying nothing.
+const storageVariable = rule({
+  observations: [OBS('obs_0001', 'http://x/login'), OBS('obs_0002', 'http://x/projects')],
+  states: [
+    STATE({ identity: { page_type: 'login' } }),
+    STATE({
+      id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002',
+      identity: { page_type: 'project_list' }, identity_key: '["project_list","",[]]',
+    }),
+  ],
+  transitions: [EDGE({
+    id: 'transition_login', transition_id: 'transition_login', from_state: 'state_a', to_state: 'state_b',
+    effects: [{ type: 'storage_changed', target: 'acme-demo-state', to: '[object]' }],
+  })],
+});
+const remembered = finding(storageVariable.report, 'persistence_evidence_recorded');
+check('a write to the application\'s own storage is reported as evidence, not as a lost dimension',
+  [
+    finding(storageVariable.report, 'state_variable_not_in_state_identity') ?? null,
+    remembered?.scope ?? null, remembered?.severity, remembered?.basis,
+  ],
+  [null, 'transition_login', 'info', 'evidence_check']);
+check('and the finding says the key, the state it makes durable, and why it is not a dimension',
+  [
+    (remembered?.detail ?? '').includes('"acme-demo-state"'),
+    (remembered?.detail ?? '').includes('state_b is remembered rather than merely displayed'),
+    (remembered?.detail ?? '').includes('no browser can be asked what the application remembers'),
+  ],
+  [true, true, true]);
+check('and the rollup files it as persistence rather than as an unrecorded dimension',
+  storageVariable.graph.transitions[0]?.metadata?.extra?.commit?.state_variables ?? null,
+  {
+    moved: [{ name: 'acme-demo-state', kind: 'storage', role: 'persistence' }],
+    recorded: [],
+    unrecorded: [],
+    semantic: [],
+    persistence: ['acme-demo-state'],
+  });
 
 // The other half: named as a dimension *and* pinned by an assertion. Now nothing is reported,
 // and that is the whole point — the graph can hold the difference without a second state for it.
@@ -1013,14 +1078,14 @@ const recordedVariable = rule({
     STATE({ identity: { page_type: 'cart' } }),
     STATE({
       id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002',
-      identity: { page_type: 'cart_with_items', dimensions: { count: 'non_empty' } },
-      identity_key: '["cart_with_items","",[["count","non_empty"]]]',
-      detection: [{ type: 'url' }, { type: 'value', target: 'count', operator: 'equals', expected: 'non_empty' }],
+      identity: { page_type: 'cart_with_items', dimensions: { items: 'non_empty' } },
+      identity_key: '["cart_with_items","",[["items","non_empty"]]]',
+      detection: [{ type: 'url' }, { type: 'value', target: 'items', operator: 'equal', expected: 'non_empty' }],
     }),
   ],
   transitions: [EDGE({
     id: 'transition_add', transition_id: 'transition_add', from_state: 'state_a', to_state: 'state_b',
-    effects: [{ type: 'storage_changed', target: 'cart.count', to: '3' }],
+    effects: [{ type: 'list_changed', target: 'cart.items', to: '3' }],
   })],
 });
 check('a variable the state names as a dimension is left alone',
@@ -1029,7 +1094,13 @@ check('a variable the state names as a dimension is left alone',
   [undefined, undefined]);
 check('and the rollup says it was recorded rather than lost',
   recordedVariable.graph.transitions[0]?.metadata?.extra?.commit?.state_variables ?? null,
-  { moved: [{ name: 'cart.count', kind: 'storage' }], recorded: [{ name: 'cart.count', kind: 'storage' }], unrecorded: [] });
+  {
+    moved: [{ name: 'cart.items', kind: 'collection', role: 'semantic' }],
+    recorded: [{ name: 'cart.items', kind: 'collection', role: 'semantic' }],
+    unrecorded: [],
+    semantic: ['cart.items'],
+    persistence: [],
+  });
 
 // A dimension and an assertion are two halves of one thing: the word is the identity, the
 // assertion is what a generated test checks. A dimension with no assertion is a state nothing can
@@ -1130,8 +1201,19 @@ check('an instruction is a goal, quoted as it was written',
 check('the first sentence is the task; the rest is usually the details',
   goalFromInstruction('Sign in to the demo app, then add a product to the cart. Use the seeded account.'),
   'Sign in to the demo app, then add a product to the cart.');
-check('only the first line is read, so a task with details under it is still one goal',
+check('a task with its details under it is still one goal, however the author wrapped it',
   goalFromInstruction('Log in and check the dashboard.\n\nUse the seeded account.'), 'Log in and check the dashboard.');
+// A line break is not punctuation. The 0.1.21 live run's goal was the first *physical* line of a
+// hard-wrapped instruction, so it read `… the credentials the page shows, and` — a quotation that
+// stopped mid-sentence on the conjunction that joined it to the rest.
+check('and a sentence wrapped across lines is read whole, not up to the margin',
+  goalFromInstruction('Open the demo app in the browser, sign in with the credentials the page\nshows, and record what you find.\nRules: one action per step.'),
+  'Open the demo app in the browser, sign in with the credentials the page shows, and record what you find.');
+check('and a goal whose first sentence runs past the limit is cut and marked, not left a fragment',
+  (() => {
+    const wrapped = goalFromInstruction('Add a product ' + 'and a second product '.repeat(20) + '\nto the cart.');
+    return [wrapped.endsWith('\u2026'), wrapped.includes('\n')];
+  })(), [true, false]);
 check('a line with no full stop at all is taken whole',
   goalFromInstruction('Add a product to the cart'), 'Add a product to the cart');
 check('a goal that will not fit is cut on a word boundary and marked',
@@ -1142,13 +1224,37 @@ check('a goal that will not fit is cut on a word boundary and marked',
 check('an instruction that is not a string is no goal, and whitespace is not either',
   [goalFromInstruction(null), goalFromInstruction('   '), goalFromInstruction(undefined)], [null, null, null]);
 
+// The same instruction, read a second time as a *name* for the walk. A goal is a sentence and a
+// name is a handle: quoting a whole instruction into `name` produced a journey called "Using the
+// browser tools, open ...", which names the operator's prompt rather than the walk.
+check('a single-clause goal is its own name, minus the full stop that made it a sentence',
+  journeyNameFromGoal('Log in and check the dashboard.'), 'Log in and check the dashboard');
+check('a goal with a continuation is named by its first clause, and the goal keeps every word',
+  journeyNameFromGoal('Sign in to the demo app, then add a product to the cart.'), 'Sign in to the demo app');
+check('the cut is at every way two clauses are joined',
+  ['Add a product to the cart; then check out', 'Open the cart — add a product', 'Sign in and then log out']
+    .map(journeyNameFromGoal),
+  ['Add a product to the cart', 'Open the cart', 'Sign in']);
+check('an instruction that opens by describing the tools is the operator\'s prompt, not the app\'s goal',
+  journeyNameFromGoal('Using the browser tools, open the demo app and sign in.'), 'open the demo app and sign in');
+check('a name that will not fit is cut on a word boundary and marked',
+  (() => {
+    const clipped = journeyNameFromGoal('Sign in to the demo application as the seeded user and reach the authenticated project list');
+    return [clipped.endsWith('\u2026'), clipped.length <= 61, clipped.startsWith('Sign in to the demo application as the seeded')];
+  })(), [true, true, true]);
+check('and a goal that yields no clause at all is no name, so the endpoints name the walk instead',
+  [journeyNameFromGoal('Using the browser tools,'), journeyNameFromGoal('   '), journeyNameFromGoal(null)], [null, null, null]);
+
 const stated = assembled([step('transition_go', 'state_a', 'state_b')], [edge('transition_go', 'state_a', 'state_b')], undefined,
   'Log in and check the dashboard.');
 check('one strand means the instruction describes exactly this walk',
-  [stated.journeys[0].goal, stated.journeys[0].name], ['Log in and check the dashboard.', 'Log in and check the dashboard.']);
+  [stated.journeys[0].goal, stated.journeys[0].name], ['Log in and check the dashboard.', 'Log in and check the dashboard']);
 check('and the whole instruction is kept beside the goal, so a cut one is visible as cut',
   [stated.journeys[0].metadata.extra.run_instruction, stated.journeys[0].metadata.extra.goal_stated],
   ['Log in and check the dashboard.', true]);
+check('and the journey says the name came from the goal rather than from the model',
+  [stated.journeys[0].metadata.extra.name_source_kind, stated.journeys[0].metadata.extra.name_stated],
+  ['goal', true]);
 
 const twoWithInstruction = assembled(
   [step('transition_go', 'state_a', 'state_b'), step('transition_away', 'state_c', 'state_d')],
@@ -1206,6 +1312,202 @@ refuses('a directory that is not a run is refused', () => commitRun({ dir: scrat
 // only copy of what happened is the one on disk.
 writeFileSync(join(undeclaredRun.dir, 'states.jsonl'), '{ this is not json\n', 'utf8');
 refuses('a malformed log line is refused, not repaired', () => commitRun({ dir: undeclaredRun.dir }), 'never repaired in place');
+
+// ---------------------------------------------------------------------------
+// 0.1.21: the count, the linkage, the feature, the name
+// ---------------------------------------------------------------------------
+// Four rules that exist so that a *generator* has something to work from, which is the milestone
+// this version was written for. Each is tested against the fixture the live run produced, because
+// the live run is where each of them was found wanting.
+
+// `projects: non_empty` was the live run's uncheckable dimension, and the reason it was uncheckable
+// was that the model named the dimension `projects` while naming the element `project_list`, so the
+// exact name match never fired.
+check('two spellings of one collection are recognised as one',
+  [sameCollectionName('projects', 'project_list'), sameCollectionName('cart_items', 'cartItems'),
+    sameCollectionName('project_list', 'projects')],
+  [true, true, true]);
+check('but a word from the middle of a name is not the head or the tail of it',
+  [sameCollectionName('item', 'cart_item_price'), sameCollectionName('cart', 'shopping_cart_items')],
+  [false, false]);
+check('and two names with nothing in common are two collections',
+  [sameCollectionName('projects', 'invoices'), sameCollectionName('projects', '')],
+  [false, false]);
+
+const COUNTED_ELEMENT = { semantic_purpose: 'project_list', role: 'list', name: 'Projects', locator: '[data-testid="project-list"]' };
+const countedObservation = (id, rows) => ({
+  ...OBS(id, 'http://x/projects'),
+  tool: 'browser_click',
+  capture: { url: 'http://x/projects', interactive: [{ role: 'list', name: 'Projects', items: rows, ...(rows ? { first_item: 'Alpha' } : {}) }] },
+});
+const countedWalk = ({ rows, dimensions = { projects: 'non_empty' }, elements = [COUNTED_ELEMENT] }) => rule({
+  observations: [OBS('obs_0001', 'http://x/login'), countedObservation('obs_0002', rows)],
+  states: [
+    STATE(),
+    STATE({
+      id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002',
+      identity: { page_type: 'project_list', dimensions },
+      identity_key: '["project_list","",[["projects","non_empty"]]]',
+      detection: [{ type: 'url' }],
+      elements,
+    }),
+  ],
+  transitions: [EDGE({
+    id: 'transition_login', transition_id: 'transition_login', from_state: 'state_a', to_state: 'state_b',
+    before_observation: 'obs_0001',
+    after_observation: 'obs_0002',
+    // Both readings carry role `action`, which is the shape that caused the misattribution: a
+    // recorder that cannot tell the reading it acted on from the reading it produced writes the
+    // same role on both, and the rank rule alone then gives the step to whichever it reaches last.
+    // Only the edge's own `after_observation` says which of them is the step.
+    evidence: [{ observation: 'obs_0001', role: 'action' }, { observation: 'obs_0002', role: 'action' }],
+    effects: [{ type: 'state_entered', to: 'state_b' }],
+  })],
+});
+const counted = countedWalk({ rows: 3 });
+const countedCommit = counted.graph.transitions[0].metadata.extra.commit;
+const counterCandidate = countedCommit.candidate_assertions.find((candidate) => candidate.basis === 'dimension');
+check('a dimension a reading counted becomes an assertion of the count, not of the model\'s word',
+  counterCandidate?.assertion, { type: 'value', target: 'projects', operator: 'greater_than', expected: 0 });
+check('and the candidate says which reading counted it and how many rows it saw',
+  [counterCandidate?.from, (counterCandidate?.detail ?? '').includes('counted 3 row(s) in element_project_list')],
+  ['obs_0002', true]);
+check('and it is offered as a candidate rather than written into the edge\'s own assertions',
+  [counted.graph.transitions[0].assertions ?? [], countedCommit.candidate_assertions.map((candidate) => candidate.basis)],
+  [[], ['effect', 'dimension']]);
+check('a dimension the reading counted zero rows for is declined, not proposed as a passing check',
+  (() => {
+    const commit = countedWalk({ rows: 0 }).graph.transitions[0].metadata.extra.commit;
+    return [commit.candidate_assertions.filter((candidate) => candidate.basis === 'dimension').length,
+      commit.candidate_assertions_declined.find((item) => item.effect === 'dimension')?.reason];
+  })(),
+  [0, 'no_reading_counted_the_collection']);
+check('an empty collection is countable too, when that is what the dimension claims',
+  (() => {
+    const commit = countedWalk({ rows: 0, dimensions: { projects: 'empty' } }).graph.transitions[0].metadata.extra.commit;
+    return commit.candidate_assertions.find((candidate) => candidate.basis === 'dimension')?.assertion;
+  })(),
+  { type: 'value', target: 'projects', operator: 'equals', expected: 0 });
+check('two collections that could be the one named is not a tie broken in private',
+  (() => {
+    const two = countedWalk({
+      rows: 3,
+      elements: [COUNTED_ELEMENT, { semantic_purpose: 'project_list_summary', role: 'list', name: 'Projects', locator: '[data-testid="project-summary"]' }],
+    }).graph.transitions[0].metadata.extra.commit;
+    const declined = two.candidate_assertions_declined.find((item) => item.reason === 'more_than_one_collection_could_be_the_one');
+    return [two.candidate_assertions.filter((candidate) => candidate.basis === 'dimension').length, declined?.target];
+  })(),
+  [0, 'projects']);
+
+// Item 5 of the review, which was the misattribution: `obs_0001` documented the step it was the
+// *input* to. The rule: only the reading an action produced documents that action.
+check('the reading a step was made from does not document the step, and says whose source it is',
+  (() => {
+    const [before] = counted.graph.observations;
+    return [before.transition ?? null, before.metadata.extra.linkage.observation_role,
+      before.metadata.extra.linkage.precedes, before.metadata.extra.linkage.documents];
+  })(),
+  [null, 'before_action', ['transition_login'], null]);
+check('while the reading the action produced documents it, and is named as the step\'s own',
+  (() => {
+    const after = counted.graph.observations[1];
+    return [after.transition, after.metadata.extra.linkage.observation_role,
+      after.metadata.extra.linkage.documents, after.metadata.extra.linkage.action];
+  })(),
+  ['transition_login', 'after_action', 'transition_login', { tool: 'browser_click', arguments: null }]);
+check('and the edge says which two readings it was made of, by id',
+  [countedCommit.step.before_observation, countedCommit.step.after_observation, countedCommit.step.before_role, countedCommit.step.after_role],
+  ['obs_0001', 'obs_0002', 'identity', 'action']);
+check('a step that started where it arrived points at one reading, not two',
+  (() => {
+    const selfLoop = rule({ transitions: [EDGE({ evidence: [{ observation: 'obs_0001', role: 'action' }] })] });
+    const linkage = selfLoop.graph.observations[0].metadata.extra.linkage;
+    return [linkage.observation_role, linkage.documents, linkage.precedes];
+  })(),
+  ['after_action', 'transition_go', []]);
+
+// Item 9 of the review: `features: []` was the missing semantic layer. The name is the model's word,
+// the membership is derived, and what no step named is reported rather than covered by invention.
+const featuredWalk = rule({
+  capabilities: [CAP, { kind: 'capability', id: 'cap_login', capability_id: 'cap_login', name: 'login', composed_of: ['cap_go'] }],
+  observations: [OBS('obs_0001', 'http://x/login'), countedObservation('obs_0002', 3)],
+  states: [
+    STATE(),
+    STATE({ id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002', identity: { page_type: 'project_list' }, identity_key: '["project_list","",[]]' }),
+  ],
+  transitions: [EDGE({
+    id: 'transition_login', transition_id: 'transition_login', from_state: 'state_a', to_state: 'state_b',
+    action: { capability: 'cap_go' },
+    feature: 'Authentication',
+    evidence: [{ observation: 'obs_0001', role: 'identity' }, { observation: 'obs_0002', role: 'action' }],
+  })],
+});
+const feature = featuredWalk.graph.features[0];
+check('a feature exists because a step named it, with the model\'s own spelling as its name',
+  [feature?.id, feature?.name], ['feature_authentication', 'Authentication']);
+check('and its membership is the steps that named it, and the composite that contains their capability',
+  [feature?.capabilities, feature?.states, feature?.transitions, feature?.journeys],
+  [['cap_go', 'cap_login'], ['state_a', 'state_b'], ['transition_login'], ['journey_a_to_b']]);
+check('the feature says who named it and where its id came from, because a name is not evidence',
+  [feature?.metadata.extra.declared.claimed_by, feature?.metadata.extra.id_from,
+    feature?.metadata.extra.observed.transitions],
+  ['graph_transition `feature` argument', 'slugify("Authentication") → feature_authentication', 1]);
+check('and the report says what no feature covers, rather than covering it',
+  [featuredWalk.report.features.claimed, featuredWalk.report.features.committed, featuredWalk.report.features.unassigned.transitions],
+  [['Authentication'], 1, []]);
+check('a name with nothing alphanumeric in it cannot become an id, and the claim is not committed',
+  (() => {
+    const named = rule({ transitions: [EDGE({ feature: '???' })] });
+    return [named.graph.features, named.graph.warnings.some((line) => line.includes('has no letters or digits'))];
+  })(),
+  [[], true]);
+check('a feature closure that is not complete warns, and says exactly what nobody named',
+  (() => {
+    const partial = rule({
+      capabilities: [CAP, { kind: 'capability', id: 'cap_other', capability_id: 'cap_other', name: 'other' }],
+      transitions: [EDGE({ feature: 'Authentication' })],
+    });
+    const result = invariantsOf(partial.graph).find((entry) => entry.code === 'feature_closure');
+    // A warning and not a gate: naming one area and walking three is a real, useful graph, and the
+    // check's job is to say which parts nobody named rather than to refuse the run.
+    return [result.ok, result.severity, result.detail.includes('capabilities: cap_other'), result.detail.includes('1 of 4 object(s)')];
+  })(),
+  [false, 'warning', true, true]);
+
+// Naming by the model, which outranks the goal: the model naming the walk it is walking says what
+// the walk *is*, and the goal says only what it was for.
+const claimedJourney = rule({
+  observations: [OBS('obs_0001', 'http://x/login'), OBS('obs_0002', 'http://x/projects')],
+  states: [STATE(), STATE({ id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002', identity: { page_type: 'project_list' }, identity_key: '["project_list","",[]]' })],
+  transitions: [EDGE({
+    id: 'transition_login', transition_id: 'transition_login', from_state: 'state_a', to_state: 'state_b',
+    journey_name: 'Sign in to Acme Demo',
+    evidence: [{ observation: 'obs_0001', role: 'identity' }, { observation: 'obs_0002', role: 'action' }],
+  })],
+});
+check('the model\'s own name for the walk is the journey\'s name, and outranks the goal',
+  [claimedJourney.graph.journeys[0].name, claimedJourney.graph.journeys[0].metadata.extra.name_source_kind,
+    claimedJourney.report.journeys.named_by_model],
+  ['Sign in to Acme Demo', 'model', 1]);
+check('and every claim is kept beside the name, so a disagreement is readable',
+  (() => {
+    const twice = rule({
+      observations: [OBS('obs_0001', 'http://x/login'), OBS('obs_0002', 'http://x/projects')],
+      states: [STATE(), STATE({ id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002', identity: { page_type: 'project_list' }, identity_key: '["project_list","",[]]' })],
+      transitions: [EDGE({
+        id: 'transition_login', transition_id: 'transition_login', from_state: 'state_a', to_state: 'state_b',
+        journey_name: 'Sign in',
+        evidence: [{ observation: 'obs_0001', role: 'identity' }, { observation: 'obs_0002', role: 'action' }],
+      }), EDGE({
+        id: 'transition_back', transition_id: 'transition_back', from_state: 'state_b', to_state: 'state_a',
+        journey_name: 'Log in to the demo',
+        evidence: [{ observation: 'obs_0002', role: 'identity' }],
+      })],
+    });
+    return [twice.graph.journeys[0].name, twice.graph.journeys[0].metadata.extra.journey_names_claimed,
+      twice.report.journeys.name_conflicts];
+  })(),
+  ['Log in to the demo', ['Sign in', 'Log in to the demo'], [{ journey: 'journey_a_to_a', claimed: ['Sign in', 'Log in to the demo'] }]]);
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);
