@@ -320,6 +320,11 @@ export const NOTE_SEVERITY = new Map([
   // controls_changed` is the error in this family, and for the opposite reason: there the
   // identity the edge *names* does not hold for both of its endpoints.)
   ['identity_read_from_element_state', 'warning'],
+  // Two readings bound to one state whose controls have nothing in common, reported by the commit
+  // and refused at the reading that would have made it worse. A warning for the same reason the
+  // note above is one: the state is a real state and the edges through it are real edges — what is
+  // doubtful is which screen one of its readings was of, and only the model can say.
+  ['state_readings_share_no_surface', 'warning'],
 ]);
 
 /**

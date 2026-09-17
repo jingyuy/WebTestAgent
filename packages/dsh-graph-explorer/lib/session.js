@@ -592,6 +592,18 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
 
     stateCount: () => stateRecordById.size,
     /**
+     * Every reading bound to a state, in the order they were made.
+     *
+     * `states()` carries one record per identity, so it names the reading a state was first seen
+     * in and says nothing about the readings after it — and those later readings are evidence for
+     * the same state, which is the whole reason the store records them. Derived from the index
+     * rather than kept beside it, so a rebuilt run directory cannot leave a second index to
+     * forget to clear.
+     */
+    observationsForState: (stateId) => [...stateIdByObservation.entries()]
+      .filter(([, id]) => id === stateId)
+      .map(([observationId]) => observationId),
+    /**
      * Every state record this run has written, in the order they were first seen.
      *
      * A state record is not only an identity: it is also the run's element declarations, and

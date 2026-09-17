@@ -167,6 +167,7 @@ refuse *before* they record anything.
 | a `detection` on an element no state has declared | the purposes the run *has* declared |
 | a literal value against a field the capture masks (`[set]`) | the collector's mask, and the `{"operator": "exists"}` form that says the same thing honestly |
 | a detection the capture of that very reading contradicts — a claim about a screen the action has already left | what the capture *does* show, so the page in hand is recognisable |
+| a reading whose controls have nothing in common with the readings already bound to the state it names — a mislabel no claim ever contradicted | both screens side by side, and the `dimensions` entry that would make it a state of its own instead |
 | an effect (`value_changed`, `visibility_changed`, `element_created`, `element_destroyed`, `validation_error`) whose target is a path (`login.email`) | `semantic_purpose` — the effect names the element itself, not a path within it |
 | a `capability_input` / `capability_output` the schema closes (`{"type":"string","sensitive":true}`) | the offending key and the ten keys the schema allows |
 
@@ -193,6 +194,20 @@ account of the page, and the capture is free to disagree. And **a note is never 
 `identity_read_from_element_state` means the two endpoints the edge names still hold — what is
 doubtful is the extra identity, not the edge — so the graph commits with the doubt in its
 `warnings[]` rather than being blocked by it.
+
+The surface refusal is the newest of them, and it is refused for the reason the refuted one is:
+a refused reading records nothing, so the page has not moved and no action has to be repeated,
+whereas accepting it binds a reading to a state it is not of — permanently, since evidence is
+append-only. It is also the only one of these questions that can be asked when the reading makes
+no claim at all. A detection is checked against the capture of the reading that carries it, so a
+mislabel is caught only when the detection happens to name the surface it contradicts, and a
+state whose detection is a bare route assertion is contradicted by nothing. The controls are then
+the only evidence there is, and they need no claim: values, messages, counts and storage all
+change within one state — that is what makes them effects — while the controls are what the state
+*is*, so two readings of one state are two readings of one screen and readings that share no
+control are not. The commit asks the same question of the whole log and **reports** it
+(`state_readings_share_no_surface`, `warning`), because by then both readings are evidence and
+only the model can say which of them was misnamed.
 
 ### Provenance
 
@@ -544,8 +559,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.17.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.17.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.18.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.18.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -912,18 +927,27 @@ and since nothing was recorded the model simply reads again — no action has to
    run), or record a log epoch the commit can see — which needs a decision about whether a
    multi-epoch run is refused or committed with the break in its warnings, and would put a
    fact in `run.json` that its "written once, never rewritten" rule currently forbids.
-10. **A mislabel the capture cannot refute is still invisible.** Found by the 0.1.16 live run,
-   and only half closed by the reading-time refusal that run bought: a detection is checked
-   against the capture of *its own* reading, so a claim the page contradicts is caught — but a
-   reading whose detection is a `url` assertion on a single-page application holds at every
-   reading, and `variant` and `dimensions` are the model's words, never compared to the page at
-   all. An action that moves the screen without moving the URL can therefore still bind a
-   reading to the state it left, and evidence being append-only, the binding cannot be
-   withdrawn. The refusal narrows the hole to readings that assert nothing about the surface
-   they are on; closing it needs an invariant the machinery can compute across every reading of
-   one state — the interactive surface, say, or a diff of it — rather than another question put
-   to the model. That is a policy call about how much disagreement makes one state two, which is
-   why it is a gap and not a check.
+10. **Mostly closed in 0.1.18: a reading whose controls share nothing with its state's other
+   readings is refused where it is made.** Found by the 0.1.16 live run, and only half closed by
+   the refusal that run bought: a detection is checked against the capture of *its own* reading,
+   so a claim the page contradicts is caught — but a reading whose detection is a `url` assertion
+   on a single-page application holds at every reading, and `variant` and `dimensions` are the
+   model's words, never compared to the page at all. An action that moved the screen without
+   moving the URL could therefore still bind a reading to the state it had just left, and evidence
+   being append-only, the binding could not be withdrawn. The invariant it needed is the reading's
+   **interactive surface**: values, messages, counts and storage all change within one state —
+   that is what makes them effects — while the controls are what the state *is*. `graph_observe`
+   compares the controls of the reading being made against the controls of every reading already
+   bound to the identity it names, and refuses when the two have nothing in common, quoting both
+   surfaces and naming the `dimensions` entry that would make it a state of its own instead. Which
+   reading is the wrong one is still the model's judgement; what the machinery contributes is that
+   it can *see* two screens where the model is looking at one. The residual is the bluntness, and
+   it is deliberate: *how much* may two screens differ and still be one state is the application's
+   answer, not the machinery's, so the rule fires only on "nothing in common at all" and two
+   readings that share a single control go unremarked — a partial surface change is still
+   unaudited, and a threshold that could tell such a case apart would be invented here rather than
+   in the application. The commit keeps the same finding as a backstop, for a log written before
+   this rule or a reading whose surface was empty when it was made.
 
 ## Tests
 
@@ -997,6 +1021,17 @@ shapes of that refusal — a claim the capture refutes read as itself, an `absen
 the element, a declaration that never located one and so answers the same way to every capture —
 and then that the corrected walk commits with the dashboard as a state of its own, the login
 state's own detection intact and no `detection_refuted_by_evidence` anywhere.
+
+That mislabelled reading is now refused earlier and for a blunter reason — its controls have
+nothing in common with the controls of the readings already bound to `state_login` — so the suite
+asserts that refusal's own shape too: both surfaces quoted, the `dimensions` escape hatch named,
+and nothing written to `states.jsonl`, which is what makes re-reading instead of re-walking the
+right answer. Then the other side of the rule, which is what keeps it from being noise: a second
+reading of the same screen that has merely grown a control is accepted, reuses the state, and is
+noted about nothing. The commit-side half gets its smallest inputs in `commit.test.mjs`, where the
+log can be written by hand: two readings that share no control at all are reported
+`state_readings_share_no_surface` at `warning` with the document still committing, two that share
+a single control are left alone, and a reading that lists no control refutes nothing.
 
 What they cannot check is that a real page looks like the capture claims. That is what
 a live run against a browser is for, and both are needed: the diff logic is the piece

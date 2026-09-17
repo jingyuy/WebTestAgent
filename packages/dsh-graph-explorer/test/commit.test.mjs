@@ -192,6 +192,7 @@ check('six readings collapse to three states', [report.states.candidates, report
 check('every state has at least one reading', report.states.readings, 3);
 check('the variant is its own state, not a repeat', graph.states.map((state) => state.id).sort(),
   ['state_dashboard_authenticated', 'state_login', 'state_login_remember_me_yes']);
+check('and no state here is a reading of two screens', finding(report, 'state_readings_share_no_surface'), undefined);
 
 // --- capabilities: dedup by name, and the kind from the first sighting ------
 check('two capabilities, minted once each', [report.capabilities.candidates, report.capabilities.committed], [2, 2]);
@@ -370,6 +371,57 @@ check('a claim the capture confirms is carried', confirmed.graph.states[0].detec
   { type: 'element_state', element: 'element_submit', operator: 'equals', expected: 'visible' },
 ]);
 check('no refutation finding when the evidence agrees', finding(confirmed.report, 'detection_refuted_by_evidence'), undefined);
+
+// Two readings bound to one state whose controls have nothing in common. A detection is checked
+// against the capture of the reading that carries it, so a misbinding is caught there only when
+// the detection happens to name the surface it contradicts — and a state whose detection is a
+// bare route assertion is contradicted by nothing at all. The surfaces are then the only evidence
+// there is, and they do not need a claim to be read.
+const reading = (id, interactive) => ({
+  id, recorded_at: '2026-01-01T00:00:00.000Z', tool: 'browser_click', phase: 'after',
+  capture: { url: 'http://x/login', interactive },
+});
+const FORM_SURFACE = [
+  { role: 'textbox', name: 'Email', selector: '#email' },
+  { role: 'button', name: 'Sign in', selector: '#signin' },
+];
+const LIST_SURFACE = [
+  { role: 'button', name: 'Projects', selector: '#nav-projects' },
+  { role: 'button', name: 'Log out', selector: '#logout' },
+];
+const twoScreens = rule({
+  observations: [reading('obs_0001', FORM_SURFACE), reading('obs_0002', LIST_SURFACE)],
+  states: [STATE(), STATE({ kind: 'sighting', observation_id: 'obs_0002', evidence: 'repeat_observation' })],
+});
+check('two readings of one state that share no control are reported as two screens',
+  finding(twoScreens.report, 'state_readings_share_no_surface')?.scope, 'state_a');
+check('and it is a warning rather than a gate: both screens are real, it is the identity that is doubtful',
+  [finding(twoScreens.report, 'state_readings_share_no_surface')?.severity, twoScreens.report.ok], ['warning', true]);
+check('and the report names both readings and the controls that put them apart',
+  [
+    finding(twoScreens.report, 'state_readings_share_no_surface')?.detail.includes('obs_0002 shows button:Log out'),
+    finding(twoScreens.report, 'state_readings_share_no_surface')?.detail.includes('obs_0001 shows button:Sign in'),
+  ], [true, true]);
+
+// The blunt end of the rule, which is what keeps it from being noise. Two readings that share a
+// single control are one screen as far as the machinery can tell, and it says nothing — the
+// fixture's dashboard is exactly this shape, and a threshold that could tell the difference would
+// be invented here rather than in the application.
+const overlapping = rule({
+  observations: [reading('obs_0001', FORM_SURFACE), reading('obs_0002', [...FORM_SURFACE, { role: 'checkbox', name: 'Remember me', selector: '#remember' }])],
+  states: [STATE(), STATE({ kind: 'sighting', observation_id: 'obs_0002', evidence: 'repeat_observation' })],
+});
+check('two readings that share even one control are left alone',
+  finding(overlapping.report, 'state_readings_share_no_surface'), undefined);
+
+// A reading that lists no control at all refutes nothing: the honest answer to "is this another
+// screen?" is then that there is no evidence either way, and the rule declines rather than guess.
+const noControls = rule({
+  observations: [reading('obs_0001', FORM_SURFACE), reading('obs_0002', [])],
+  states: [STATE(), STATE({ kind: 'sighting', observation_id: 'obs_0002', evidence: 'repeat_observation' })],
+});
+check('and a reading that lists no control is not evidence of a different screen',
+  finding(noControls.report, 'state_readings_share_no_surface'), undefined);
 
 // A state with no usable detection cannot be asserted into, so the graph refuses the document.
 const undetectable = rule({

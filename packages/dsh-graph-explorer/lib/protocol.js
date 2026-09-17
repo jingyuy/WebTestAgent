@@ -87,6 +87,21 @@ For every step:
      before for the same behaviour: the vocabulary is what makes a capability a
      reusable helper rather than a one-off. If the tool returns \`vocabulary_notes\`, it
      saw a name close to one already in use — converge on one of them.
+
+     One of those notes means the opposite, and the difference is the difference
+     between a behaviour and a step. A **composite** is the behaviour a user would ask
+     for (\`login\`); a **step** is one interaction that serves it
+     (\`fill_login_email\`), and a composite contains its steps. So \`login\`
+     overlapping \`fill_login_email\` is the shape a composite and its sub-capability
+     are supposed to have, not a collision: record both, with
+     \`capability_kind: composite\` on the one that is the behaviour and the step's own
+     kind on the other, and do not rename the composite after one of its steps —
+     \`login\` renamed to \`fill_login_email\` is the whole sign-in reported as one
+     keystroke. Converge when the two names are two ways of saying *one* behaviour:
+     \`add_to_cart\` and \`add_item_to_cart\` are one capability, and so are \`search\`
+     and \`search_product\`. When the note offers a name from the schema's vocabulary for
+     a behaviour you recognise, that name wins — the vocabulary is the list the graph is
+     being converged onto.
    - \`effects\` — what changed, one entry each. \`navigation\`, \`url_changed\` and
      \`state_entered\` need \`to\`; \`value_changed\` and \`visibility_changed\` need
      \`target\` and \`to\`; \`message\` needs \`message\`; \`request\` needs \`api\`; and

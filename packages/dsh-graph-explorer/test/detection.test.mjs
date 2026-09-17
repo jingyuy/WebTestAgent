@@ -264,15 +264,24 @@ check('the password step records its effect on the field, not on a path', passwo
 // every reading bound to its state, and the capture that refutes it is already written, so the
 // claim can never become true. Refusing it is not a judgement about the identity — it is the
 // observation that this reading and that claim cannot both be evidence for one state.
-const dashboard = () => capture({
+//
+// Two checks refuse it here, and the order is the point. The one that fires is the weaker-looking
+// of the two and the more fundamental: the controls of this reading have nothing in common with
+// the controls of the readings already bound to the state, so this page is not the screen the
+// state names. That question can be asked about *any* reading, including one whose detection
+// names no element — which is where the claim check has nothing to work with, because a state
+// whose detection is a bare route assertion is refuted by nothing at all.
+const dashboard = (extra = []) => capture({
   // The same route the form was on: the demo app is a single page, and the sign-in click replaces
-  // the screen without navigating. Nothing about this case turns on the URL.
+  // the screen without navigating. Nothing about this case turns on the URL, and that is exactly
+  // why the surface is the only evidence there is.
   url: 'http://x/login',
   title: 'Projects',
   interactive: [
     { role: 'button', name: 'Projects', selector: '#nav-projects' },
     { role: 'button', name: 'Settings', selector: '#nav-settings' },
     { role: 'button', name: 'Log out', selector: '#logout' },
+    ...extra,
   ],
   storage: { 'acme-demo-state': '{"user":"test@example.com"}' },
 });
@@ -293,14 +302,16 @@ await refuses('a reading named after the page the action was taken on is refused
     detection: [{ type: 'url' }, { type: 'element_state', target: 'sign_in_button', operator: 'exists' }],
     elements: LOGIN_ELEMENTS,
   }),
-  'detection_refuted_by_evidence');
-check('and the refusal shows the page the reading is really on',
+  'nothing in common with the readings already bound to state state_login');
+check('and the refusal puts both screens side by side, so the page in hand is recognisable',
   await (async () => {
     try {
       await observe({ page_type: 'login', detection: [{ type: 'element_state', target: 'sign_in_button', operator: 'exists' }], elements: LOGIN_ELEMENTS });
       return null;
     } catch (error) { return error.message; }
-  })().then((message) => [message.includes('"sign_in_button"'), message.includes('button:Log out')]), [true, true]);
+  })().then((message) => [
+    message.includes('button:Log out'), message.includes('textbox:Email'), message.includes('`dimensions`'),
+  ]), [true, true, true]);
 check('and the refusal erases nothing, because it recorded nothing', log('states.jsonl').length, 4);
 
 const signedIn = await observe({
@@ -341,6 +352,23 @@ const signedInStep = await transition({
 check('and the step over it is an edge into the state the action produced',
   [signedInStep.chain_break, signedInStep.disagreements], [null, []]);
 
+// The other half of the rule, and the reason it is blunt: a screen that grew a control is still
+// the same screen. Anything sharper — a ratio, a count of new controls — would be a threshold
+// invented here and defended nowhere, because how much two screens may differ and still be one
+// state is the application's answer, not the machinery's. "Nothing at all in common" needs no
+// threshold, and this is what that costs: a state whose readings merely overlap goes unremarked.
+queue = [dashboard([{ role: 'link', name: 'Help', selector: '#help' }])];
+await act('browser_click', { selector: '#help' });
+const grown = await observe({
+  page_type: 'dashboard',
+  variant: 'authenticated',
+  detection: [{ type: 'element_state', target: 'logout_button', operator: 'visible' }],
+  elements: DASHBOARD_ELEMENTS,
+});
+check('a second reading of the same screen is accepted, even one the first reading did not have',
+  [grown.graph.state.state_id, grown.graph.state.new, grown.reading_notes],
+  ['state_dashboard_authenticated', false, []]);
+
 // --- the whole run, committed --------------------------------------------
 // The point of all of it: a graph in which nothing the model wrote was quietly dropped, and a
 // state that carries the detection it was recorded with — including the entry written in the
@@ -353,6 +381,8 @@ check('no effect was dropped at commit, either',
   verdict.warnings.detail.filter((finding) => finding.code === 'effects_dropped'), []);
 check('and no detection in the committed graph is refuted by its own evidence — the finding that cost the live run its graph',
   verdict.warnings.detail.filter((finding) => finding.code === 'detection_refuted_by_evidence'), []);
+check('and no state in the committed graph was read as two screens',
+  verdict.warnings.detail.filter((finding) => finding.code === 'state_readings_share_no_surface'), []);
 check('the value the capture contradicts is carried, and reported as a note',
   [...new Set(verdict.warnings.detail.filter((finding) => finding.code === 'detection_value_not_in_evidence').map((finding) => finding.severity))], ['info']);
 check('the identity minted from a form\'s progress is reported, as a warning',
