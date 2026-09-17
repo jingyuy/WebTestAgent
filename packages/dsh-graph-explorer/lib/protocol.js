@@ -57,12 +57,27 @@ For every step:
    - \`dimensions\` — the few facts that separate two states that share a route:
      \`{"projects":"empty"}\`, \`{"form_error":"duplicate_name"}\`. This is what keeps
      "the projects page" from collapsing five genuinely different states into one.
+     A dimension is a fact about the *application*: what it holds, what it refuses,
+     which record is open. Element state is not a dimension — a form with a value in
+     it is the same state as the form without it, and filling it is a \`value_changed\`
+     effect on a self-loop rather than a transition into a state of its own. Ask what
+     the app would say at that moment: \`{"form_error":"duplicate_name"}\` is the app
+     answering; \`{"email":"filled"}\` is you having typed.
    - \`elements\` — only the elements a test would act on, each with a
      \`semantic_purpose\` (the identity — never a CSS path), \`role\`, \`name\`,
      \`locator\` (evidence, not identity).
    - \`detection\` — how a test proves it is in this state: \`url\`, \`element_state\`,
      \`element_value\`, \`message\`, \`absence\`. A state with no detection cannot be
-     asserted, so the tool will refuse it.
+     asserted, so the tool will refuse it. The condition goes in \`operator\` — or in
+     \`value\`/\`expected\` — never in a key of your own: for a state word write
+     \`{"type":"element_state","target":"sign_in_button","operator":"visible"}\`, and for
+     a value \`{"type":"element_value","target":"email_input","value":"test@example.com"}\`.
+     An element in a detection resolves against the \`semantic_purpose\` a state has
+     declared, so declare the element in the reading that first sees it. A detection is
+     checked against the capture of the very reading that carries it: a claim the page
+     contradicts is refused, so name the screen the page is on *now* — after an action
+     that moved it, a detection describing the screen you left is refuted by your own
+     evidence, and the tool will not record the reading.
    - \`summary\` — one sentence, from the user's point of view.
 3. Call \`${config.transitionTool}\` to record what that action DID: which capability
    you applied, and what it changed. A state says where the app is; a transition says
@@ -76,9 +91,14 @@ For every step:
      \`state_entered\` need \`to\`; \`value_changed\` and \`visibility_changed\` need
      \`target\` and \`to\`; \`message\` needs \`message\`; \`request\` needs \`api\`; and
      \`validation_error\`, \`list_changed\`, \`storage_changed\`, \`element_created\`,
-     \`element_destroyed\` need \`target\`. Prefer semantic paths (\`order.total\`) over
-     selectors, and set \`"observed": true\` only for what the evidence shows — an
-     effect you inferred is a weaker claim, and it should say so.
+     \`element_destroyed\` need \`target\`. What \`target\` is depends on the effect:
+     for the element-shaped ones (\`value_changed\`, \`visibility_changed\`,
+     \`element_created\`, \`element_destroyed\`, \`validation_error\`) it is the
+     element's \`semantic_purpose\` — \`email_input\`, not \`login.email\` and not a
+     selector, and the tool refuses a target no state has declared; for the rest
+     (\`storage_changed\`, \`list_changed\`) it is a semantic path or key
+     (\`localStorage.draft\`, \`order.items\`). Set \`"observed": true\` only for what the
+     evidence shows — an effect you inferred is a weaker claim, and it should say so.
    - \`arguments\` — the concrete values used this time, e.g. \`{"coupon_code":"SAVE10"}\`.
    - \`guard\` — the condition that made this transition possible, if there is one.
 
@@ -111,9 +131,16 @@ Rules that matter:
 - **Two states must differ in \`page_type\`, \`variant\` or \`dimensions\`.** If your
   reading is identical to a state you already recorded, you are in that state — say so;
   the tool reuses the existing id instead of minting a duplicate. Do not invent a
-  dimension to make a state look new.
+  dimension to make a state look new, and do not build one out of what the user has
+  typed or clicked: a walk that mints a state per keystroke reports a two-screen app as
+  a dozen states. When a step only put something into a field, it is a self-loop on the
+  state you were already in.
 - **Read the app's own words.** Error and success text is evidence; copy it into
   \`detection\` rather than paraphrasing it.
+- **Never write a credential into the graph.** A password field's value is captured as
+  \`[set]\` — the collector never records the secret — so a detection asserting one can
+  never hold: assert that the field holds something (\`operator: "exists"\`) or that the
+  form is gone.
 - **Do not claim what you did not see.** If a value, message or element was not in the
   evidence, leave it out. Confidence, not decoration, is what the graph is for.
 - **\`${config.observeTool}\` is the only way states reach the graph.** A browser action

@@ -152,6 +152,48 @@ watched. Nothing is claimed that was not seen; what the quiet window cannot see 
 whose next update was never announced, which is why the note names that case and says to wait
 for the change explicitly if one was expected.
 
+### A claim is checked where it is made
+
+The commit is the only writer of the graph, and it is where the rules live — but it runs when
+the walk is over, and by then the page each claim was about is gone. A claim the commit would
+refuse, or drop, arriving at the end of a run is the worst of both worlds: the tool took it,
+the graph does not have it, and the correction has nothing left to correct. So the two
+recording tools now ask the commit's own questions while the page is still on screen, and
+refuse *before* they record anything.
+
+| Written | Refused at the reading, with |
+| --- | --- |
+| `{"type": "element_state", "target": "sign_in_button", "state": "visible"}` | the condition belongs in `operator`, and the refusal says so |
+| a `detection` on an element no state has declared | the purposes the run *has* declared |
+| a literal value against a field the capture masks (`[set]`) | the collector's mask, and the `{"operator": "exists"}` form that says the same thing honestly |
+| a detection the capture of that very reading contradicts — a claim about a screen the action has already left | what the capture *does* show, so the page in hand is recognisable |
+| an effect (`value_changed`, `visibility_changed`, `element_created`, `element_destroyed`, `validation_error`) whose target is a path (`login.email`) | `semantic_purpose` — the effect names the element itself, not a path within it |
+| a `capability_input` / `capability_output` the schema closes (`{"type":"string","sensitive":true}`) | the offending key and the ten keys the schema allows |
+
+Refusing is the right answer only where the commit would drop or refuse the entry — or, in the
+refuted case, where the commit grades it `error` and then finds the state unassertable, which is
+the one outcome worse than a wrong reading: a walk that drove the application correctly, and a
+document that will not exist. That case also cannot be answered with a note, because the reading
+the claim would be bound to is **already written and immutable**: the refutation is permanent, so
+the claim can never become true later, and telling the model about it at commit time would be
+telling it about a correction it can no longer make. Where the commit *reports*, by contrast, the
+reading reports too, with the commit's own finding code so the two names cannot drift: a value
+assertion whose text no captured element carries is recorded as written and noted
+`detection_value_not_in_evidence`, and a state minted out of a form's progress — the
+only difference from the state before it being `value_changed` on a field — is noted
+`identity_read_from_element_state`. Both notes travel **twice**, and that is deliberate: once in
+`graph_observe`'s digest, where the reading is made and a model can still act on them, and once
+on the transition that records the step, which is what the commit reads when the graph is
+assembled. A note that only the digest carried would be a note the graph never learned.
+
+Two rules decide which is which. **A masked value is impossible, a mismatched one is a
+judgement.** `[set]` can never equal what the model wrote, so accepting the claim would put a
+cell in the graph that is vacuous at best; `filled` against `test@example.com` is the model's
+account of the page, and the capture is free to disagree. And **a note is never an error**:
+`identity_read_from_element_state` means the two endpoints the edge names still hold — what is
+doubtful is the extra identity, not the edge — so the graph commits with the doubt in its
+`warnings[]` rather than being blocked by it.
+
 ### Provenance
 
 `run.json` answers *could someone reproduce this run?* — what code, what
@@ -502,8 +544,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.14.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.14.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.17.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.17.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -740,6 +782,35 @@ also demonstrates the next gap, from the other side: the graph it committed is s
 because the model wrote `"output": {"page": "settings"}` — a value where the schema requires an
 `argumentValueSpec` — and neither the tool's own hint (see gap 8) nor the commit caught it.
 
+**Proven by a live agent run, 0.1.17.** The same four-action sign-in walk against `demo-app`, and
+the first run whose every claim survived the commit: `ok: true`, no gates, 2 states, 3
+capabilities and 3 edges — the two fills as **self-loops** on the login state (`value_changed` on
+the field it filled), and one `login` edge into
+`state_project_list_authenticated_projects_one` carrying `state_entered`,
+`storage_changed:localStorage.acme-demo-state`, `element_destroyed:sign_in_button` and
+`element_created:add_project_button`. Four readings became two states, because the two keystroke
+sightings deduplicated onto the state they were already in: gap 5's lesson applied by the model
+rather than by a check. The graph validates against the normative schemas, and its only findings
+are three `effect_targets_resolved` notes at `info`, where an effect named `email_input` and the
+graph carries `element_email_input`.
+
+It was the third attempt at that walk, and the two before it are why the reading tools refuse.
+The 0.1.15 run's report named nine findings — two detections dropped for having nothing to check,
+two effects dropped for naming a path, a masked-value assertion, a state minted out of a
+keystroke — and every one of them arrived at the commit, where the page each claim was about was
+gone. 0.1.16 moved those questions to where the claim is made (see
+[A claim is checked where it is made](#a-claim-is-checked-where-it-is-made)). The 0.1.16 run then
+found the case that move left open, and it is the nastiest shape this failure takes: the click
+authenticated the session, the reading that followed named the *login* state and carried the login
+form's detection, and the capture of that very reading showed the dashboard. `graph_observe` took
+it — an identity is the model's judgement, and a reading is allowed to be wrong — and the state
+was bound to a reading that refuted its own detection. Evidence is append-only, so the refutation
+was permanent: the commit graded it `error`, dropped the detection, found the state unassertable
+and refused the document. A walk that drove the application correctly, and a run with nothing to
+show for it. 0.1.17 asks that question at the reading as well, *before* it writes: a claim this
+reading's own capture contradicts is refused, with the page that is actually in hand quoted back,
+and since nothing was recorded the model simply reads again — no action has to be repeated.
+
 **Known gaps, in the order they will bite:**
 
 1. **Closed in 0.1.13: a document is observed from its first byte.** The hooks used to be
@@ -786,10 +857,16 @@ because the model wrote `"output": {"page": "settings"}` — a value where the s
    model's to choose and they are all real, so the fix is a budget (a limit on dimensions,
    or a hash past N) rather than a check — and the same budget wants to apply to derived
    journey ids, which are built from two of them.
-5. **Element state can outrank state identity.** The model may treat a filled-in field
-   as a new state, which mints a state per value. The schema's `identity` is about the
-   page, not the widget, but the tool cannot tell the two apart — it only knows the
-   tuple it was handed, and the honest thing is to report the id rather than guess.
+5. **Closed in 0.1.16: element state can outrank state identity.** The half the machinery can
+   do without making a judgement call is the half that was missing — not *is this a state?*
+   but *what changed?*. The note names the previous state, the step's `value_changed` effect,
+   and the self-loop that was meant instead: `identity_read_from_element_state`, carried by
+   `graph_observe` in the reading's `reading_notes` **and** on the edge that records the step,
+   so the commit reports it (`warning`) and a reader of the run learns it too. The protocol
+   now says the same thing where the model reads it — *"a form with a value in it is the same
+   state as the form without it"* — and the `dimensions` parameter description asks what the
+   application would say, not what the user typed. What is still the model's call is whether
+   the two readings really are one page; the note declines to make it, and reports instead.
 6. **`features` has no source.** `application` is now declared in config (see
    [Configuration](#configuration)), but `features` is a judgement about the app's own
    structure rather than something the machinery can observe, so it needs a model-facing
@@ -806,16 +883,22 @@ because the model wrote `"output": {"page": "settings"}` — a value where the s
    `reachability` are both real checks against a real entry state. What remains is only the
    limitation in gap 2 — an entry state derived from a sample answers *what this walk
    reached*, not *what the application can reach*.
-8. **`capability_output` is unconstrained, and its hint is wrong.** Found by the 0.1.13 live run
-   above, which committed an invalid graph and reported `ok: true`. The tool's parameter is
-   `{type:'object', additionalProperties:true}` and its description reads *"What the capability
-   yields, e.g. `{"discount":"number"}`"* — but `capability.schema.json#/properties/output`
-   is an `argumentValueSpec` map, so the correct form is `{"discount":{"type":"number"}}`. A model
-   following the hint writes a value where a spec belongs, and nothing between the tool call and
-   `graph.json` checks it: the commit's rules are about identity, evidence and dangling
-   references, not about the shape of a model-authored field. Two fixes, both small and both
-   owed: correct the hint, and validate the assembled document against the normative schemas
-   before calling the result `ok`.
+8. **Closed in 0.1.16: `capability_output` is checked, and its hint is right.** Found by the 0.1.13
+   live run above, which committed an invalid graph and reported `ok: true`. The tool's parameter
+   was `{type:'object', additionalProperties:true}` and its description read *"What the capability
+   yields, e.g. `{"discount":"number"}`"* — but `capability.schema.json#/properties/output` is an
+   `argumentValueSpec` map, so the correct form is `{"discount":{"type":"number"}}`. A model
+   following the hint wrote a value where a spec belongs, and nothing between the tool call and
+   `graph.json` checked it. Both halves are fixed: the hints and the parameter descriptions show
+   both forms, and `graph_transition` now validates `capability_input` and `capability_output`
+   against the same rule the schema uses — a bare type name from the closed set, or an object
+   whose keys are the ten the schema allows (`additionalProperties: false`, which is exactly why
+   `{"password":{"type":"string","sensitive":true}}` was accepted here and refused there). The
+   refusal names the offending key and the ten that are legal, and it fires **before**
+   `store.addCapability`, so the vocabulary never learns a signature the schema would refuse.
+   The half that remains open is the general one: the **assembled document** is still not
+   validated against the normative schemas before the result is called `ok`. This closes the
+   field a live run actually got wrong, not the class.
 9. **A repaired log is the tail of the run, and nothing says so on disk.** Found while
    closing the store's write path (0.1.14): when `graph-run/` is deleted mid-run, the store
    recreates it and carries on, which is right — but the new log holds only what came after
@@ -829,11 +912,23 @@ because the model wrote `"output": {"page": "settings"}` — a value where the s
    run), or record a log epoch the commit can see — which needs a decision about whether a
    multi-epoch run is refused or committed with the break in its warnings, and would put a
    fact in `run.json` that its "written once, never rewritten" rule currently forbids.
+10. **A mislabel the capture cannot refute is still invisible.** Found by the 0.1.16 live run,
+   and only half closed by the reading-time refusal that run bought: a detection is checked
+   against the capture of *its own* reading, so a claim the page contradicts is caught — but a
+   reading whose detection is a `url` assertion on a single-page application holds at every
+   reading, and `variant` and `dimensions` are the model's words, never compared to the page at
+   all. An action that moves the screen without moving the URL can therefore still bind a
+   reading to the state it left, and evidence being append-only, the binding cannot be
+   withdrawn. The refusal narrows the hole to readings that assert nothing about the surface
+   they are on; closing it needs an invariant the machinery can compute across every reading of
+   one state — the interactive surface, say, or a diff of it — rather than another question put
+   to the model. That is a policy call about how much disagreement makes one state two, which is
+   why it is a gap and not a check.
 
 ## Tests
 
 ```sh
-npm test        # 7 suites, no browser and no harness
+npm test        # 8 suites, no browser and no harness
 ```
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
@@ -879,6 +974,29 @@ disagreements; and a page that never moves is waited for rather than read throug
 page whose *own* request is still open is held until that request lands and renders. Written
 before the code that satisfies it, it failed first with `["capture", "capture"]` and a
 reading of `["button:Login"]` — the recorded defect, reproduced on demand.
+
+The claims a reading carries get their own suite, `test/detection.test.mjs`, for the reason
+the claims exist at all: `tools/execute` accepts a detection, `graph_observe` writes it, and
+`graph_commit` — which is where the rule about it lives — only sees it once the page it
+describes is closed. Every case in the suite is a finding from the live 0.1.15 sign-in walk,
+and the shape they share is the whole argument for the checks: the tool took a claim that the
+commit later refused or dropped, and the correction arrived with nothing left to correct. So
+the suite asserts the question asked early — a detection whose condition sits in a key nothing
+reads is refused **naming `operator`**; a reference to an element no state declared is refused
+naming the purposes that are declared; an element-shaped effect targeting `login.email` is
+refused, and the same effect targeting `email_input` is recorded; a capability signature with a
+key the schema closes (`sensitive`) is refused, and the corrected call is the capability's first
+sighting — and then asks the commit the same questions about a graph it committed from a
+recorded run, asserting no `detection_dropped` and no `effects_dropped` at all, that the object
+form the protocol invites (`{semantic_purpose: …}`) resolves to an element id, and that the value
+the capture contradicts is carried as written with the severity the commit gives it (`info`).
+The last case is the one that cost the 0.1.16 live run its graph, and it is the one a model
+reaches by being right about the page and wrong about the step: the click authenticated the
+session, and the reading that followed named the screen the click had left. It asserts all three
+shapes of that refusal — a claim the capture refutes read as itself, an `absence` claim that has
+the element, a declaration that never located one and so answers the same way to every capture —
+and then that the corrected walk commits with the dashboard as a state of its own, the login
+state's own detection intact and no `detection_refuted_by_evidence` anywhere.
 
 What they cannot check is that a real page looks like the capture claims. That is what
 a live run against a browser is for, and both are needed: the diff logic is the piece

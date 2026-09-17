@@ -60,6 +60,7 @@ import {
   EVIDENCE_ROLES,
   NOTE_SEVERITY,
   PAGE_TYPE_PATTERN,
+  purposeOf,
   SEVERITIES,
   TRANSITION_DECISIONS,
   UNKNOWN_NOTE_SEVERITY,
@@ -115,7 +116,7 @@ export function readRun(dir) {
 }
 
 /** The path of a URL, which is the part worth pinning a state to. */
-const routeOf = (url) => {
+export const routeOf = (url) => {
   try {
     const parsed = new URL(url);
     return parsed.pathname || '/';
@@ -254,8 +255,8 @@ export function normalizeAssertion(entry, ctx) {
   }
 
   if (type === 'absence') {
-    const purpose = typeof entry.element === 'string' ? entry.element : entry.target;
-    const element = purpose ? ctx.elementIdByPurpose.get(String(purpose)) : null;
+    const purpose = purposeOf(entry.element !== undefined ? entry.element : entry.target);
+    const element = purpose ? ctx.elementIdByPurpose.get(purpose) : null;
     if (element) assertion.element = element;
     else if (typeof entry.target === 'string') assertion.target = entry.target;
     assertion.operator = 'not_exists';
@@ -266,7 +267,8 @@ export function normalizeAssertion(entry, ctx) {
   const wantsElement = type === 'element_state' || type === 'element_value';
   if (wantsElement) {
     const raw = entry.element !== undefined ? entry.element : entry.target;
-    const element = raw === undefined ? null : ctx.elementIdByPurpose.get(String(raw));
+    const purpose = purposeOf(raw);
+    const element = purpose === null ? null : ctx.elementIdByPurpose.get(purpose);
     if (!element) {
       return {
         dropped: 'element_reference_does_not_resolve',
@@ -315,6 +317,80 @@ export function normalizeAssertion(entry, ctx) {
 }
 
 /**
+ * Will this entry survive into the graph, asked while it can still be fixed?
+ *
+ * `normalizeAssertion` is the rule; this is the same rule asked as a yes/no question. The
+ * difference is *when* it is asked. Every branch of `normalizeAssertion` that gives up
+ * (`element_reference_does_not_resolve`, `element_assertion_has_nothing_to_check`,
+ * `state_assertion_names_no_state`, …) is silent from the model's side: the entry is dropped
+ * at commit time, minutes after the page it describes was closed, and the model that wrote it
+ * cannot tell a state whose detection held from one whose detection evaporated.
+ *
+ * So the tool asks here too, with the ctx it *can* build from what has been recorded so far —
+ * `route` from the reading in hand, `stateIds` from the states the store has, and
+ * `elementIdByPurpose` from the purposes those states declared, plus any declared by the call
+ * being validated. That is deliberately weaker than the commit's registry (which is built from
+ * the readings that survived to be canonical), so anything refused here would also be dropped
+ * there; the reverse is not guaranteed, and that gap is why the commit still reports drops.
+ *
+ * Returns `null` when the entry would survive, or `{reason, detail}` when it would not.
+ */
+export function assertionSurvival(entry, ctx) {
+  const result = normalizeAssertion(entry, ctx);
+  if (result.assertion) return null;
+  return { reason: result.dropped ?? 'not_an_assertion', detail: result.detail ?? null };
+}
+
+/**
+ * Whether a reading contains an element.
+ *
+ * Matched on what the capture actually recorded — role and accessible name, or the testid /
+ * selector the locator names — because the capture has no `semantic_purpose`: the purpose is
+ * the model's word for the element, and the role+name is the page's. This is the only place
+ * where a claim in the graph can be checked against a raw reading instead of against another
+ * claim, so it is worth the care.
+ *
+ * `false` is a *positive* finding: the capture was read and the element was not in it. `null`
+ * is the absence of evidence (no capture at all) and refutes nothing. Exported because
+ * `graph_observe` asks the same question of the reading in hand — a claim this predicate
+ * refutes at the moment it is made can never become true later, since the reading it is bound
+ * to is immutable, so the tool refuses it where the page can still be read again.
+ */
+export const elementPresentIn = (capture, declaration) => {
+  if (!capture) return null;
+  const entries = Array.isArray(capture.interactive) ? capture.interactive : [];
+  for (const entry of entries) {
+    if (!entry) continue;
+    if (declaration.role && declaration.name && entry.role === declaration.role && entry.name === declaration.name) return true;
+    const locator = declaration.locator;
+    if (!locator) continue;
+    if (locator.strategy === 'testid' && entry.testid === locator.value) return true;
+    if ((locator.strategy === 'id' || locator.strategy === 'css') && entry.selector === locator.value) return true;
+  }
+  return false;
+};
+
+/**
+ * What an element-shaped detection entry claims about a reading, or `null` when it claims
+ * nothing about one.
+ *
+ * `absence` is the only claim that wants the element gone; every other element-bound check
+ * asserts the element is there to be checked.
+ */
+export const elementClaim = (entry) => {
+  if (!entry || typeof entry !== 'object') return null;
+  if (entry.type === 'absence') {
+    const purpose = purposeOf(entry.element !== undefined ? entry.element : entry.target);
+    return purpose ? { purpose, want: 'absent' } : null;
+  }
+  if (entry.type === 'element_state' || entry.type === 'element_value') {
+    const purpose = purposeOf(entry.element !== undefined ? entry.element : entry.target);
+    return purpose ? { purpose, want: 'present' } : null;
+  }
+  return null;
+};
+
+/**
  * The recorder's own notes, as findings with a severity.
  *
  * The severity is what gives the commit deterministic rules, and it lives in `schema.js`
@@ -342,7 +418,7 @@ export function noteFindings(notes) {
  * `list_changed.target` is a semantic path, and resolving those against the element
  * registry would rewrite a key into an element id the moment the two names coincided.
  */
-const ELEMENT_TARGET_EFFECTS = new Set([
+export const ELEMENT_TARGET_EFFECTS = new Set([
   'value_changed',
   'visibility_changed',
   'element_created',
@@ -870,49 +946,6 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
           : ''),
     });
   }
-
-  /**
-   * Whether a reading contains an element.
-   *
-   * Matched on what the capture actually recorded — role and accessible name, or the testid /
-   * selector the locator names — because the capture has no `semantic_purpose`: the purpose is
-   * the model's word for the element, and the role+name is the page's. This is the only place
-   * where a claim in the graph can be checked against a raw reading instead of against another
-   * claim, so it is worth the care.
-   */
-  const elementPresentIn = (capture, declaration) => {
-    if (!capture) return null;
-    const entries = Array.isArray(capture.interactive) ? capture.interactive : [];
-    for (const entry of entries) {
-      if (!entry) continue;
-      if (declaration.role && declaration.name && entry.role === declaration.role && entry.name === declaration.name) return true;
-      const locator = declaration.locator;
-      if (!locator) continue;
-      if (locator.strategy === 'testid' && entry.testid === locator.value) return true;
-      if ((locator.strategy === 'id' || locator.strategy === 'css') && entry.selector === locator.value) return true;
-    }
-    return false;
-  };
-
-  /**
-   * What an element-shaped detection entry claims about a reading, or `null` when it claims
-   * nothing about one.
-   *
-   * `absence` is the only claim that wants the element gone; every other element-bound check
-   * asserts the element is there to be checked.
-   */
-  const elementClaim = (entry) => {
-    if (!entry || typeof entry !== 'object') return null;
-    if (entry.type === 'absence') {
-      const purpose = typeof entry.element === 'string' ? entry.element : entry.target;
-      return typeof purpose === 'string' ? { purpose, want: 'absent' } : null;
-    }
-    if (entry.type === 'element_state' || entry.type === 'element_value') {
-      const purpose = entry.element !== undefined ? entry.element : entry.target;
-      return typeof purpose === 'string' ? { purpose, want: 'present' } : null;
-    }
-    return null;
-  };
 
   const ctx = {
     stateIds,

@@ -1,6 +1,6 @@
 {
     "name": "@webtestagent/dsh-graph-explorer",
-    "version": "0.1.15",
+    "version": "0.1.17",
     "private": true,
     "description": "Turns a dsh-browser exploration into append-only observations and the beginnings of an application behaviour graph.",
     "license": "MIT",
