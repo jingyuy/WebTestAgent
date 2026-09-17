@@ -39,7 +39,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from './capture.js';
-import { assertionSurvival, commitRun, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, routeOf } from './commit.js';
+import { assertionSurvival, commitRun, CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, routeOf, surfaceIsDisjoint, surfaceOf } from './commit.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
 import {
     APPLICATION_ID_PATTERN,
@@ -56,7 +56,7 @@ import {
     purposeOf,
     vocabularyNotes,
 } from './schema.js';
-import { createRun, normalizeRunDirName, RUN_DIR_NAME, RUN_DIR_PATTERN } from './session.js';
+import { createRun, identityKey, normalizeRunDirName, RUN_DIR_NAME, RUN_DIR_PATTERN } from './session.js';
 
 export const name = 'graph-explorer';
 export const inject = ['tools', 'systemPrompt'];
@@ -305,18 +305,12 @@ const statusTexts = (capture) => (capture?.status ?? [])
     .filter((text) => typeof text === 'string' && text);
 
 /**
- * The roles that make an element something you can act on.
+ * The controls in a list of `role:name` appearances.
  *
- * A diff lists appearances by `role:name`, and a list that grew adds plain text nodes rather
- * than controls. Keeping only controls is what separates "the same screen with one more
- * item in it" — a legitimate effect on a stable state — from "a different screen", which is
- * a state identity that does not hold.
+ * A diff lists appearances by `role:name`, and a list that grew adds plain text nodes rather than
+ * controls. `CONTROL_ROLES` lives in `commit.js` with the rest of the vocabulary two sides share,
+ * because that is the same question `surfaceOf` asks of a whole capture.
  */
-const CONTROL_ROLES = new Set([
-    'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'listbox', 'slider', 'switch',
-    'menuitem', 'tab', 'searchbox',
-]);
-
 const controls = (entries) => (entries ?? [])
     .filter((entry) => CONTROL_ROLES.has(String(entry).split(':')[0]));
 
@@ -614,6 +608,39 @@ const refutedDetectionRefusal = (detection, registry, capture) => {
 };
 
 /**
+ * A reading whose controls have nothing in common with the readings already bound to the state it
+ * names.
+ *
+ * This is the hole `refutedDetectionRefusal` leaves, and it is the one a live sign-in run fell
+ * through. That check asks whether the claims in this reading hold for this page; this one asks
+ * whether the page is the state at all — and it is the only one of the two that can be asked when
+ * the detection names no element. A state whose detection is a bare route assertion is refuted by
+ * nothing on a single-page application, so an action that moves the screen without moving the URL
+ * can bind a reading to the state it had just left, and the binding cannot be withdrawn: evidence
+ * is append-only, and the commit reads every reading bound to a state as evidence for it.
+ *
+ * The tool can see this and the model cannot — the model is looking at one page at a time, and the
+ * tool is holding both readings. What the tool does *not* have is the answer: which of the two
+ * readings is the wrong one is a judgement about identity, and identity is the model's. So the
+ * refusal puts both surfaces side by side and stops there. The escape hatch is deliberate: an
+ * application really can show two different sets of controls under one identity, and the model's
+ * remedy for that is a `dimensions` entry, which changes the identity and mints a state of its own.
+ */
+const surfaceMismatchRefusal = ({ stateId, surface, others }) => {
+    if (!surfaceIsDisjoint(surface, others)) return null;
+    const theirs = [...new Set(others.flat())].sort();
+    return `this reading's controls have nothing in common with the readings already bound to state ${stateId}: this page `
+        + `offers ${listOf(surface, 6)}, and those readings offer ${listOf(theirs, 6)}. A state's readings are all readings of `
+        + 'one screen, so one of these bindings is wrong — most often a reading named with the state the action had just left, '
+        + 'which was accepted because an identity is your judgement and this is the first evidence against it. If the page '
+        + 'really is the screen you named, give it a `dimensions` entry that tells the two apart and it becomes a state of its '
+        + 'own; otherwise read it as the state it now is. '
+        + 'Nothing was recorded, so fix the entry and call again — the page has not moved, and no action has to be repeated. '
+        + 'A binding cannot be withdrawn once it is made: the commit reads every reading bound to a state as evidence for it, '
+        + 'and would carry on with a state that two different screens are readings of.';
+};
+
+/**
  * The claims in a reading that the reading itself does not bear out.
  *
  * Where a contradiction is a summary rather than a mistake (`filled` for a field the capture
@@ -839,6 +866,16 @@ export function apply(ctx, config) {
     const readingNotes = new Map();
 
     /**
+     * What each reading offered to act on, keyed by the reading.
+     *
+     * Kept for the same reason `readingNotes` is: the question it answers is asked at the *next*
+     * reading, about the state this one was bound to, and by then the capture is gone. Only the
+     * surface is kept — values, storage and network belong to no later question, and the whole
+     * capture lives in the run log for a reader who wants it.
+     */
+    const surfaceByObservation = new Map();
+
+    /**
      * The turn's instruction, captured from `agent/pre-step` before the step's
      * first tool call. The run store is created on first capture — after this —
      * so by then the instruction is known. It is held here rather than looked up
@@ -1022,6 +1059,10 @@ export function apply(ctx, config) {
                 previousCapture = latestObservation?.capture ?? null;
             }
             latestObservation = observation;
+            // The surface of this reading, for the next one to be compared against: the run has to
+            // be able to answer "is this page the state I already recorded?" about a capture it is
+            // no longer holding.
+            surfaceByObservation.set(observation.id, surfaceOf(captureValue));
         }
         return observation;
     };
@@ -1197,6 +1238,25 @@ export function apply(ctx, config) {
                 if (masked) {
                     throw new Error(`State "${args.page_type}" was rejected: ${masked} Nothing was recorded, so fix the `
                         + 'entry and call again.');
+                }
+                // Before asking whether the claims in this reading hold, ask whether the page is
+                // the state at all. They are different questions, and this is the one that can be
+                // asked when the other cannot: a detection that names no element is refuted by
+                // nothing, so a reading bound to the state it has just left is visible only in
+                // the surfaces — and only while the tool still has both of them.
+                const stateKey = identityKey({ page_type: args.page_type, variant: args.variant, dimensions: args.dimensions });
+                const alreadyRead = store.states().find((record) => record.identity_key === stateKey);
+                const surfaceClash = alreadyRead
+                    ? surfaceMismatchRefusal({
+                        stateId: alreadyRead.state_id,
+                        surface: surfaceOf(latest.capture),
+                        others: store.observationsForState(alreadyRead.state_id)
+                            .map((id) => surfaceByObservation.get(id))
+                            .filter(Boolean),
+                    })
+                    : null;
+                if (surfaceClash) {
+                    throw new Error(`State "${args.page_type}" was rejected: ${surfaceClash}`);
                 }
                 // The other half of asking early: not "could the graph carry this claim?" but "is
                 // it true of the page in hand?". A claim this reading's own capture refutes is

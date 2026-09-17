@@ -342,6 +342,64 @@ export function assertionSurvival(entry, ctx) {
 }
 
 /**
+ * The roles that make an element something a user can act on.
+ *
+ * A diff lists appearances by `role:name`, and a list that grew adds plain text nodes rather
+ * than controls. Keeping only controls is what separates "the same screen with one more item
+ * in it" — a legitimate effect on a stable state — from "a different screen", which is a
+ * state identity that does not hold. It lives here rather than in `index.js` because two
+ * things now read a capture this way — the cross-check that asks whether a step's two readings
+ * are one screen, and `surfaceOf` below — and two definitions of "something you can act on"
+ * would be two chances to disagree about what a screen is.
+ */
+export const CONTROL_ROLES = new Set([
+  'button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'listbox', 'slider', 'switch',
+  'menuitem', 'tab', 'searchbox',
+]);
+
+/**
+ * What a capture offers to act on, as `role:name`: the one property of a reading that says
+ * *which screen* it is rather than what the screen holds.
+ *
+ * Values, messages, counts and storage are all things a screen has, and every one of them
+ * changes within a single state — that is what makes them effects. The controls are what the
+ * state *is*: the login form and the project list share no button between them, and any two
+ * readings of one page share whatever navigation, form or list it has. So this is the property
+ * a reading can be compared on without being told anything about the application, which is what
+ * makes it usable as evidence about a state identity that only the model can name.
+ *
+ * Sorted and deduplicated, so two readings are compared by set membership rather than by the
+ * order the DOM happened to be walked in.
+ */
+export const surfaceOf = (capture) => [...new Set(
+  (Array.isArray(capture?.interactive) ? capture.interactive : [])
+    .map((entry) => (entry && typeof entry.role === 'string' && typeof entry.name === 'string' && entry.name
+      ? `${entry.role}:${entry.name}`
+      : null))
+    .filter((control) => control !== null && CONTROL_ROLES.has(control.split(':')[0])),
+)].sort();
+
+/**
+ * Whether a reading shares no control at all with readings already known to be of its state.
+ *
+ * The blunt end of a question that is otherwise a judgement. *How much* may two screens differ
+ * and still be one state? A ratio would be a threshold invented here and defended nowhere,
+ * because the answer is the application's and not the machinery's. "Nothing at all in common"
+ * needs neither: the login form and the project list are not one state, and any two readings of
+ * a page with navigation, a form or a list share more than nothing.
+ *
+ * `false` when either side has no control to compare. A capture that lists none refutes
+ * nothing: the honest answer to "is this a different screen?" is then "no evidence either
+ * way", and this declines rather than guessing.
+ */
+export const surfaceIsDisjoint = (surface, others) => {
+  if (!Array.isArray(surface) || surface.length === 0) return false;
+  const union = new Set((others ?? []).flat());
+  if (union.size === 0) return false;
+  return !surface.some((control) => union.has(control));
+};
+
+/**
  * Whether a reading contains an element.
  *
  * Matched on what the capture actually recorded — role and accessible name, or the testid /
@@ -1305,6 +1363,32 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         severity: 'info',
         basis: 'evidence_check',
         detail: `no reading bound to this state lists ${unsupportedElements.map((element) => element.id).join(', ')} in its interactive surface. Carried because an element list is an inventory rather than a claim about every moment, but the capture (or the element) is worth a second look.`,
+      });
+    }
+
+    // Every reading bound to a state is read as evidence for *that* state — that is what binding
+    // one means — so a reading whose controls have nothing in common with the others is evidence
+    // that at least one of them was named with a state it was not on. This is what the detection
+    // check above leaves behind: a misbinding is caught there only when the detection happens to
+    // mention the surface it contradicts, and a state whose detection is a bare route assertion
+    // is contradicted by nothing.
+    //
+    // Nothing is dropped, and this is not a gate. Which of two readings is the wrong one is
+    // exactly the judgement the commit does not make, and evidence cannot be withdrawn anyway —
+    // so the fact is carried in `graph.json`'s own warnings, which is the only place a reader who
+    // arrives after the browser is closed can learn that a state is two screens.
+    const surfaces = bound.map((observation) => ({ observation, surface: surfaceOf(observation.capture) }));
+    const strangers = surfaces.filter((reading) => surfaceIsDisjoint(
+      reading.surface,
+      surfaces.filter((other) => other !== reading).map((other) => other.surface),
+    ));
+    if (strangers.length) {
+      findings.push({
+        scope: record.state_id,
+        code: 'state_readings_share_no_surface',
+        severity: 'warning',
+        basis: 'evidence_check',
+        detail: `${strangers.map((reading) => `${reading.observation.id} shows ${reading.surface.slice(0, 4).join(', ')}${reading.surface.length > 4 ? ', …' : ''}`).join('; ')}, and shares no control with the other reading(s) of this state. A state's readings are all readings of one screen, so one of these bindings is wrong — most often a reading named with the state the action had just left, which nothing contradicted because an identity is the model's judgement. Carried rather than repaired: which reading is the wrong one is not for the evidence to settle. But the state's detection is only as strong as the readings it is checked against, and a detection that names no element (a bare route assertion, say) is refuted by neither of these screens.`,
       });
     }
 
