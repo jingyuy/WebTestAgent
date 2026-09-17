@@ -474,19 +474,28 @@ Every cut is recorded rather than hidden: `report.journeys.breaks` carries the r
 the two ends, and a step repeating an earlier id is marked `repeat_of_earlier_step` in
 `metadata.extra.steps[]`, because a walk that signs in twice is two steps and one edge.
 
-What a journey cannot carry is a goal. A browser session records what was done, never what
-was being attempted, so:
+What a journey cannot carry from its walk alone is a goal: a browser session records what was
+done, never what was being attempted. There is exactly one place in the run where intent was
+written down, and that is `run.json` — the instruction the host supplied, captured from the
+harness's `agent/pre-step` before the first action — so that is what the commit quotes:
 
-- `name` is derived from the endpoints of the walk and says so —
-  `Derived walk 1: state_login to state_dashboard (3 step(s))`;
+- `name` is the stated goal when the run walked **one** strand, and the derived walk name when it
+did not — `Derived walk 1: state_login to state_dashboard (3 step(s))`. The restriction is the
+  point: the instruction names the run, not each of its journeys, so a walk that broke into three
+  strands has three walks and one instruction, and giving all three the same name would attribute
+  a goal nobody stated to two of them. `goal_source` carries which of the two applied.
 - `criticality` is **omitted rather than guessed**. The schema's `criticality` is a closed
   enum (`smoke | critical | standard | extended`, default `standard`), so writing prose there
   would be a schema violation; the reason goes in `metadata.extra.criticality` and the
   default applies.
 - `metadata.status` is `inferred` and `producer` is `importer:dsh-graph-explorer` — not
   `llm:<model>`, because no model judged this, the importer read it off the log;
-- `metadata.extra.goal_stated` is `false`, and the graph carries a warning saying that a test
-  generator has to supply the goal before a derived journey becomes a test.
+- `metadata.extra.run_instruction` carries the instruction verbatim, `goal_stated` says whether
+  this journey's name is that instruction, and when there was no instruction to quote the graph
+  carries a warning saying that a test generator has to supply the goal before a derived journey
+  becomes a test. An empty instruction is not a goal, and neither is one the host never sent: the
+  field is omitted and the warning stands, because "the run was asked to do nothing" and "nobody
+  said what the run was for" are the same graph.
 
 Evidence is carried across from the steps and deduplicated by observation and role. It has
 to be: the schema's `evidenceRef` points at observations, never at transitions, so a
@@ -565,8 +574,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.19.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.19.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.20.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.20.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -995,6 +1004,55 @@ and since nothing was recorded the model simply reads again — no action has to
    does — but the seam that hid it is: `test/lossless.mjs` states the harness's rule as a list of
    offending paths, and the suites now walk a re-walked edge through the tool and assert the call
    still returns.
+12. **Closed in 0.1.20: six seams between what a walk recorded and what a graph can carry.** All
+   six were found by reading the two live runs above against the normative schemas, and they share
+   one shape: a fact the machinery already had was dropped at a boundary, so the loss surfaced in
+   `graph.json` as a graph that was *wrong* rather than as a refusal that was not. Each closure is
+   small. The list is here because the next reader will want to know which part of each is still a
+   judgement call rather than a check.
+   - **The run's instruction is captured.** `journeys[].goal` was always absent because nothing ever
+     read the intent off the harness. It arrives on `agent/pre-step` before the first action, it is
+     written to `run.json` once, and the commit quotes it (see
+     [Journeys are derived, not decided](#journeys-are-derived-not-decided)). What remains the
+     model's is which journeys the one instruction names — until a run is asked to do several
+     things, it is the run's name and not each strand's.
+   - **A state's fingerprint comes from its own readings, and the pair rule is asked of that.**
+     `identity` is the model's word for what a state is; the fingerprint is what the readings say it
+     *looks* like (`routes`, `surface_size`, `forms`, `storage_keys`, `session_storage_keys`,
+     `cookie_names`), carried as `metadata.extra.observable`. Two committed states with equal
+     fingerprints are reported by `state_indistinguishable_from_another` — a `warning`, never a gate,
+     because whether two screens *are* one state is the application's answer. The digest also offers
+     the key names a page carries without showing them, since those are part of what tells two
+     screens apart and no screenshot shows them.
+   - **A composite capability says what it is built from.** `capability_composed_of` takes the
+     *names* of the behaviours a composite is made of, resolves them against the vocabulary that
+     already exists, and lands as `composed_of` on the capability itself. A later call merges onto
+     the capability rather than writing a second one beside it, and the kind travels with it, which
+     is what tells a generator to expand a behaviour rather than treat it as a single action.
+   - **An element several states declared is reconciled by the evidence.** Element ids are unique
+     across all states (`§14.1`), and a purpose declared twice used to be settled by arrival order —
+     which is not evidence. It is now settled by which declaring state's own reading shows the
+     element, and the tri-state is what carries the meaning: a reading that *refutes* the declaration
+     ranks below one that is silent about it, and silence ranks below a reading that shows it. So a
+     state that saw the element keeps it over a state that merely did not look, and only a state the
+     evidence refutes is reported (`element_declaration_refuted_by_its_reading`). What is still the
+     model's: which reading is the wrong one when both are silent.
+   - **A variable a step moved is reported, and so is a dimension nothing can read.** The schema has
+     no `variables` and no `predicates`, so the only way to hold a value the application remembers —
+     a cart count, a filter, a draft — without exploding into one state per value is
+     `identity.dimensions` (the word) plus a `value` assertion in `detection` (what reads it). The
+     digest's `state_variables` names the variables the walk's own effects moved, which is the moment
+     the question can be answered, while the page that shows the change is still in hand. The commit
+     reports `state_variable_not_in_state_identity` for a variable neither endpoint records as a
+     dimension, and `state_dimension_not_asserted` for a dimension no detection entry can read. Both
+     are `info`, and both are that way round on purpose: a graph is allowed to be less discerning
+     than it could be, and only the model knows whether the difference deserves a word.
+   - **What a reading called is in the graph.** The endpoints of a step came from the model's `apis`
+     argument or from nothing at all, so a walk could claim no endpoints while its own request log
+     showed three. They are now derived from the capture at each end and recorded separately from
+     what was declared — `apis` on the edge is the union, `apis_declared` and `apis_observed` say who
+     claimed what — and the report counts the endpoints no step referenced, because an endpoint the
+     run called and the graph never mentions is a behaviour the graph cannot generate.
 
 ## Tests
 
@@ -1007,8 +1065,9 @@ objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, rec
 shapes), the diff and the cross-check (every warning kind, the one error, malformed
 effects, missing captures), the reconciler (a synthesized run committed end to end,
 then every rule one at a time — gates, refutation, supersession, ownership, dropped
-references, and the filesystem behaviour of a refused and a forced commit), and a
-fake-harness integration pass over all three tools' refusal paths.
+references, state variables and unasserted dimensions, and the filesystem behaviour of a
+refused and a forced commit), and a fake-harness integration pass over all three tools'
+refusal paths, including the digest's own account of what the walk moved.
 
 The journey rules get the same treatment, and they need it more than most: the assembler
 *cannot* produce a broken walk — it cuts one instead — so `journeys[]` reaching the graph

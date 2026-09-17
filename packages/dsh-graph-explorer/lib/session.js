@@ -442,10 +442,48 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
      * hundredth use of "log in" is recognisably one behaviour. `kind`, `input` and
      * `output` are only recorded when first seen — a later sighting does not get to
      * silently redefine what an established capability takes and returns.
+     *
+     * `composed_of` is the exception, and it is a deliberate one: which steps a
+     * behaviour was built from is usually only visible AFTER they have been walked, so
+     * the model often has the composition in hand on a later call than the one that
+     * named the behaviour. A later non-empty composition is therefore appended as its
+     * own record — `kind: 'capability_composition'`, naming the capability it belongs
+     * to — rather than written into the first one. The log is append-only for the same
+     * reason the rest of it is: a claim that arrived later is a second claim, not a
+     * revision of the first, and the commit is where they are reconciled.
      */
-    addCapability({ name, kind, description, input, output, aliases, notes }) {
+    addCapability({ name, kind, description, input, output, aliases, notes, composed_of }) {
+      const composition = Array.isArray(composed_of) ? composed_of.filter((id) => typeof id === 'string' && id) : [];
       const existing = capabilityByName.get(name);
-      if (existing) return { id: existing.id, record: existing, created: false };
+      if (existing) {
+        const known = new Set(Array.isArray(existing.composed_of) ? existing.composed_of : []);
+        const added = composition.filter((id) => !known.has(id));
+        // A later declaration that only says `composite` is still news: the kind is what
+        // makes the schema's prose true of the object, and a capability named before its
+        // structure was understood would otherwise never be able to become a composite.
+        const kindUpgrade = kind === 'composite' && existing.capability_kind !== 'composite' ? 'composite' : null;
+        if (!added.length && !kindUpgrade) return { id: existing.id, record: existing, created: false, composition_added: [] };
+        const record = {
+          ...existing,
+          composed_of: [...known, ...added],
+          ...(kindUpgrade ? { capability_kind: kindUpgrade } : {}),
+        };
+        const written = {
+          kind: 'capability_composition',
+          capability_id: existing.id,
+          name,
+          composed_of: record.composed_of,
+          added,
+          ...(kindUpgrade ? { capability_kind: kindUpgrade } : {}),
+          first_seen_at: new Date().toISOString(),
+        };
+        if (!append(capabilitiesPath, written)) return null;
+        // The index holds the merged view, so a second call with the same composition is a
+        // no-op and a call that adds a step appends only what is new.
+        capabilityByName.set(name, record);
+        capabilityById.set(existing.id, record);
+        return { id: existing.id, record, created: false, composition_added: added };
+      }
 
       const base = 'cap_' + slugify(name);
       let id = base;
@@ -460,6 +498,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
         description: description ?? null,
         input: input ?? null,
         output: output ?? null,
+        composed_of: composition,
         aliases: Array.isArray(aliases) ? aliases : [],
         notes: Array.isArray(notes) ? notes : [],
         first_seen_at: new Date().toISOString(),
@@ -471,7 +510,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
       if (!append(capabilitiesPath, { kind: 'capability', ...record })) return null;
       capabilityByName.set(name, record);
       capabilityById.set(id, record);
-      return { id, record, created: true };
+      return { id, record, created: true, composition_added: composition };
     },
 
     /**
@@ -615,7 +654,25 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
     capabilityCount: () => capabilityById.size,
     /** The vocabulary as it stands, which is what a new name is compared against. */
     capabilityNames: () => [...capabilityByName.keys()],
+    /**
+     * The id a capability name already has, or `null`.
+     *
+     * `composed_of` is written in names — the model thinks in behaviours, not in ids — and the
+     * schema requires the ids. Resolving here means a composite that names a behaviour nothing
+     * has recorded is refused while the model can still record the step, instead of being
+     * written as a reference the commit would have to drop.
+     */
+    capabilityIdFor: (name) => capabilityByName.get(name)?.id ?? null,
     transitionCount: () => transitionIds.size,
+    /**
+     * The steps this run has walked, in order, as they were recorded.
+     *
+     * `transitionCount` counts edges and `walkLength` counts steps, and neither answers the
+     * question the digest asks about a step: what did it *change*. The effects are the only place
+     * the run says that, and a variable moved three steps ago is still a variable the graph has to
+     * be able to hold — so the records are exposed rather than only the counters.
+     */
+    transitions: () => [...walk],
     /** Steps walked, which is not `transitionCount` once an edge is walked twice. */
     walkLength: () => walk.length,
     lastTransition: () => (walk.length ? walk[walk.length - 1] : null),

@@ -68,6 +68,13 @@ For every step:
      effect on a self-loop rather than a transition into a state of its own. Ask what
      the app would say at that moment: \`{"form_error":"duplicate_name"}\` is the app
      answering; \`{"email":"filled"}\` is you having typed.
+
+     A dimension has two halves and a state needs both: the word, here, and a \`value\`
+     assertion in \`detection\` that reads it. The digest's \`state_variables\` names the
+     variables your own steps moved that no state records this way — a step that changes
+     only what the app remembers (a cart count, a filter, a draft) is a real difference,
+     and this is where it goes, so the graph can hold it without giving the screen a
+     state of its own.
    - \`elements\` — only the elements a test would act on, each with a
      \`semantic_purpose\` (the identity — never a CSS path), \`role\`, \`name\`,
      \`locator\` (evidence, not identity).
@@ -77,6 +84,9 @@ For every step:
      \`value\`/\`expected\` — never in a key of your own: for a state word write
      \`{"type":"element_state","target":"sign_in_button","operator":"visible"}\`, and for
      a value \`{"type":"element_value","target":"email_input","value":"test@example.com"}\`.
+     A dimension is asserted the same way, with the name you gave the dimension:
+     \`{"type":"value","target":"projects","operator":"equals","expected":"empty"}\` — one
+     name, so the graph's word for the difference and the test's check for it are one thing.
      An element in a detection resolves against the \`semantic_purpose\` a state has
      declared, so declare the element in the reading that first sees it. A detection is
      checked against the capture of the very reading that carries it: a claim the page
