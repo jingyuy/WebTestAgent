@@ -64,7 +64,20 @@ await refuses('observe with no evidence', () => observe({}), 'nothing to interpr
 await refuses('transition with no evidence', () => transition({ capability: 'login' }), 'no transition to record');
 
 // --- step 1: home ---------------------------------------------------------
-queue = [capture({ url: 'http://x/', title: 'Home' }), capture({ url: 'http://x/login', title: 'Sign in' })];
+// The opening capture carries the request the document loaded with, because the
+// hooks are in place before the document runs. There is no earlier capture to diff
+// it against, so this is the one step where the digest reports it as the entry
+// document — the requests that got the run started are evidence in their own right,
+// not a difference from something.
+queue = [
+  capture({
+    url: 'http://x/',
+    title: 'Home',
+    hooks_installed_at: 'document_start',
+    network: [{ method: 'GET', url: '/api/session', status: 200 }],
+  }),
+  capture({ url: 'http://x/login', title: 'Sign in' }),
+];
 await act('browser_open');
 await refuses('transition before any state was read', () => transition({ capability: 'go_to_login' }), 'the first browser action establishes the entry state');
 await refuses('observe rejects a state with no detection', () => observe({ page_type: 'home' }), 'no detection');
@@ -73,11 +86,21 @@ await refuses('observe rejects an element with no semantic_purpose', () => obser
 const s1 = await observe({ page_type: 'home', variant: 'anonymous', detection: [{ type: 'url' }], elements: [{ semantic_purpose: 'login_link', role: 'link' }] });
 check('state recorded', [s1.graph.state.state_id, s1.graph.states_recorded], ['state_home_anonymous', 1]);
 
+// --- how the run began ----------------------------------------------------
+check('the first observation reports the entry document', [s1.entry_document.url, s1.entry_document.title], ['http://x/', 'Home']);
+check('with the requests it loaded with', s1.entry_document.requests, [{ method: 'GET', url: '/api/session', status: 200 }]);
+check('and whether the collector was there in time', [s1.hooks_installed_at, s1.entry_document.hooks_installed_at], ['document_start', 'document_start']);
+check('there was no earlier capture, so there is no diff to confuse it with', s1.changed_since_previous_observation, null);
+check('the marker is in the evidence, not only in the digest', JSON.parse(
+  readFileSync(join(cwd, 'graph-run', 'observations.jsonl'), 'utf8').trim().split('\n')[0],
+).capture.hooks_installed_at, 'document_start');
+
 // --- step 2: navigate to login --------------------------------------------
 await act('browser_click', { selector: '#login' });
 await refuses('transition with no destination state read yet', () => transition({ capability: 'go_to_login' }), 'has no destination');
 const s2 = await observe({ page_type: 'login', detection: [{ type: 'url' }] });
 check('second state is a distinct state', [s2.graph.state.state_id, s2.graph.state.new], ['state_login', true]);
+check('a later observation carries its own change, not the entry document again', [s2.entry_document, s2.changed_since_previous_observation.url], [null, ['http://x/', 'http://x/login']]);
 
 // --- the transition itself ------------------------------------------------
 const t1 = await transition({

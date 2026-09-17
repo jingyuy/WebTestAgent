@@ -7,91 +7,42 @@
  * a string we control, so the tsx/esbuild `__name` trap (which corrupts
  * `page.evaluate(fn)` bodies) cannot apply here.
  *
- * Deliberately free of `${...}`: this is a template literal, and every value is
- * built with concatenation so the emitted source survives intact.
+ * The hook half is not written here. It is read from `page-hooks.js` and embedded
+ * verbatim, because the same bytes are installed at document start by the local
+ * dsh-browser patch (`scripts/patch-dsh-browser.mjs`). The hooks written twice
+ * would be two collectors that agree until the day they do not, and the
+ * disagreement would show up as evidence nobody could reproduce.
  *
- * Two jobs, one round trip:
+ * Two jobs, one round trip, in this order:
  *   1. install the network/console hooks if this document does not have them yet
  *   2. drain them and snapshot the semantic surface of the page
  *
- * The hooks are document-scoped, so a full navigation discards them and they are
- * re-installed by the next capture. That means the initial document loads of a
- * navigation are NOT observed. Action-triggered XHR/fetch on the same document
- * are, which is the case `transition.effects[].request` needs. Closing the gap
- * requires Playwright's `addInitScript`, i.e. a `dsh-browser` source patch.
+ * Which of the two installers got there first — and whether it was in time — is
+ * reported as `hooks_installed_at`. A document whose hooks arrived at document
+ * start has been watched from its first byte; one that only gets them from this
+ * eval had already run its own scripts, so an empty `network` there means "we
+ * looked too late", not "nothing happened".
+ *
+ * Deliberately free of `${...}` of its own: this is a template literal, and every
+ * value is built with concatenation so the emitted source survives intact. The
+ * embedded file is the one thing spliced into it, so page-hooks.js is checked for
+ * the characters that would end the literal early.
  */
+import { readFileSync } from 'node:fs';
+
+/**
+ * The page hooks, verbatim — the same bytes the patched browser installs at page
+ * creation. Exported so the tests and the patch script can compare against what
+ * the browser actually gets, instead of against a retyped copy of it.
+ */
+export const PAGE_HOOKS_SOURCE = readFileSync(new URL('./page-hooks.js', import.meta.url), 'utf8');
+
 export const CAPTURE_EXPRESSION = `(() => {
   var MAX_ITEMS = 60;
-  var gx = window.__gx || (window.__gx = { network: [], console: [], errors: [], hooked: false });
 
-  if (!gx.hooked) {
-    gx.hooked = true;
-    gx.network = gx.network || [];
-    gx.console = gx.console || [];
-    gx.errors = gx.errors || [];
+  ${PAGE_HOOKS_SOURCE}
 
-    var record = function (entry) {
-      gx.network.push(entry);
-      if (gx.network.length > 200) gx.network.shift();
-    };
-
-    var originalFetch = window.fetch;
-    if (typeof originalFetch === 'function') {
-      window.fetch = function () {
-        var args = arguments;
-        var input = args[0];
-        var init = args[1] || {};
-        var url = typeof input === 'string' ? input : (input && input.url) || '';
-        var method = String(init.method || (input && input.method) || 'GET').toUpperCase();
-        var started = Date.now();
-        return originalFetch.apply(this, args).then(function (response) {
-          record({ method: method, url: url, status: response.status, duration_ms: Date.now() - started });
-          return response;
-        }, function (error) {
-          record({ method: method, url: url, failed: true, failure_reason: String(error), duration_ms: Date.now() - started });
-          throw error;
-        });
-      };
-    }
-
-    var originalOpen = XMLHttpRequest.prototype.open;
-    var originalSend = XMLHttpRequest.prototype.send;
-    XMLHttpRequest.prototype.open = function (method, url) {
-      this.__gx = { method: String(method || 'GET').toUpperCase(), url: String(url || '') };
-      return originalOpen.apply(this, arguments);
-    };
-    XMLHttpRequest.prototype.send = function () {
-      var self = this;
-      var meta = self.__gx || (self.__gx = { method: 'GET', url: '' });
-      var started = Date.now();
-      self.addEventListener('loadend', function () {
-        record({ method: meta.method, url: meta.url, status: self.status, duration_ms: Date.now() - started });
-      });
-      return originalSend.apply(this, arguments);
-    };
-
-    var stringify = function (value) {
-      if (typeof value === 'string') return value;
-      try { return JSON.stringify(value); } catch (error) { return String(value); }
-    };
-    ['warn', 'error'].forEach(function (level) {
-      var original = console[level];
-      console[level] = function () {
-        gx.console.push({
-          level: level,
-          text: Array.prototype.map.call(arguments, stringify).join(' '),
-        });
-        if (gx.console.length > 100) gx.console.shift();
-        return original.apply(console, arguments);
-      };
-    });
-    window.addEventListener('error', function (event) {
-      gx.errors.push(String((event && event.message) || (event && event.error) || event));
-    });
-    window.addEventListener('unhandledrejection', function (event) {
-      gx.errors.push(String((event && event.reason) || event));
-    });
-  }
+  var gx = window.__gx || (window.__gx = { network: [], console: [], errors: [] });
 
   var clean = function (value) {
     return String(value == null ? '' : value).replace(/\\s+/g, ' ').trim();
@@ -246,6 +197,7 @@ export const CAPTURE_EXPRESSION = `(() => {
     status: status,
     storage: storage,
     scroll: { y: Math.round(window.scrollY), height: document.documentElement.scrollHeight },
+    hooks_installed_at: gx.hooks_installed_at || null,
     network: drain(gx.network),
     console: drain(gx.console),
     page_errors: drain(gx.errors),

@@ -711,6 +711,25 @@ export function apply(ctx, config) {
                     }
                     : null,
                 capture_error: latest.capture_error ?? null,
+                // Whether the collector was watching before this document ran its own
+                // scripts. It qualifies the lists below: an empty `network` is a fact —
+                // "this document made no requests" — only when this says `document_start`.
+                // Otherwise we arrived after the document had already started, so the
+                // empty list means "we looked too late", which is not the same claim.
+                hooks_installed_at: latest.capture?.hooks_installed_at ?? null,
+                // The run's first observation has no previous capture to diff against, and
+                // that is the one step where "what this capture saw" and "what changed"
+                // are the same question: how the run began. The requests the entry
+                // document loaded with are reported here rather than left in the evidence
+                // log, because the entry state is read at this step.
+                entry_document: previousCapture || !latest.capture ? null : {
+                    url: latest.capture.url,
+                    title: latest.capture.title,
+                    hooks_installed_at: latest.capture.hooks_installed_at ?? null,
+                    requests: latest.capture.network ?? [],
+                    note: 'First observation of the run: the requests this document loaded with, '
+                        + 'before any action was taken.',
+                },
                 changed_since_previous_observation: diffCaptures(previousCapture, latest.capture),
                 status: latest.capture?.status ?? [],
                 interactive: latest.capture?.interactive ?? [],

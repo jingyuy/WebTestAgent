@@ -34,7 +34,7 @@ flowchart LR
 | Path | What it is |
 | --- | --- |
 | `dsh/web-browse-picker.patch.yml` | Overlay that makes the DSH web UI's workspace picker automatable. Without it, the picker is a **native OS dialog** — outside the page, so no browser automation can see or dismiss it, which makes the whole web UI untestable end to end. |
-| `scripts/patch-dsh-browser.mjs` | Two source edits `dsh-browser` cannot be configured into: stop it advertising `navigator.webdriver`, and let it open a **visible** window. Per profile, idempotent, with `--verify` and `--revert`. |
+| `scripts/patch-dsh-browser.mjs` | Three source edits `dsh-browser` cannot be configured into: stop it advertising `navigator.webdriver`, let it open a **visible** window, and install the graph explorer's page hooks on every new page as an **init script** — so a document is watched from its first byte and the requests that loaded it are evidence. Per profile, idempotent, with `--verify` and `--revert`. |
 | `demo-app/index.html` | A small Acme app with deliberately realistic failure modes, so a run can be tested against *rejections* and not only happy paths. |
 | `packages/dsh-graph-explorer/` | The behaviour-graph spike: a DSH bundle that records evidence around every `browser_*` call and gives the model `graph_observe` to say what a page *means*. See its [README](packages/dsh-graph-explorer/README.md). |
 
@@ -179,11 +179,11 @@ Three sharp edges worth knowing before you debug a confusing run:
 
 ---
 
-## Two things dsh-browser can't be configured to do
+## Three things dsh-browser can't be configured to do
 
-Both live in `scripts/patch-dsh-browser.mjs`, for the same reason: the package hardcodes the
-value and its config schema has no key for it, so neither its own `cordis.patch.yml` nor a
-`--patch` overlay can reach either one. Editing the installed file is the only route short of
+All three live in `scripts/patch-dsh-browser.mjs`, for the same reason: the package hardcodes
+the value and its config schema has no key for it, so neither its own `cordis.patch.yml` nor a
+`--patch` overlay can reach any of them. Editing the installed file is the only route short of
 forking.
 
 ### 1. Stop advertising `navigator.webdriver` (both profiles)
@@ -215,18 +215,64 @@ DSH_BROWSER_HEADED=0 dsh --profile web "…"           # or just headless for on
 The `headless` profile is deliberately patched **without** `--headed`, so it genuinely is
 headless rather than merely pretending to be.
 
+### 3. Watch a document from its first byte (the profiles that run the plugin)
+
+`dsh-browser`'s `Config` has **no key for an init script**, so the only way to run code before a
+document does is to patch one in. The edit appends a block to `newPage()` that scans the
+profile's `init.d/` for `.js` files, sorts them, and passes each to
+`this.currentPage.addInitScript({ path })` — Playwright's document-start hook.
+
+What lands in `init.d/` is `packages/dsh-graph-explorer/lib/page-hooks.js`, the graph explorer's
+network/console/error collector, copied there by the same patcher run (`lib/capture.js` embeds
+those bytes, so the eval fallback and the init script are always the same collector). The scanner
+re-reads the directory on every page creation, so dropping in another init script needs no
+second edit — and `init.d/` lives inside the profile's own `node_modules`, so each profile keeps
+its own copy of the list.
+
+Why it has to happen before the document runs: hooks installed by `browser_eval` arrive *after*
+the document has started, and a full navigation discards them outright. Either way the requests
+that loaded the new document are gone — and for the first navigation of a run that is the entry
+point itself. With the init script in place the collector is already there when the parser
+reaches the first `<script>`, which is what makes the entry document observable at all (gap 1 in
+the [graph explorer's README](packages/dsh-graph-explorer/README.md)). The capture says which
+case it was in (`hooks_installed_at: document_start` or `after_load`), so an empty network list
+is never mistaken for a quiet document.
+
+```bash
+npm run patch:browser -- --profile graph             # all three edits; hooks → graph/init.d/
+npm run patch:browser -- --profile graph --verify    # the A/B check below
+npm run patch:browser -- --profile graph --revert    # also removes init.d/
+```
+
+The `graph` profile is headless and needs no headed edit, but it still needs this one: it is the
+profile that records evidence, and the fix is about *when* evidence starts. Run it for the
+profiles that carry the graph explorer (`graph`, `web`) — a profile with no plugin would install
+a collector nothing reads.
+
 ### On `--verify`
 
-One launch, two assertions, and a non-zero exit if either fails. It reads
-`navigator.webdriver` from the page, then diffs `ps` before/after to inspect **only the processes
-it caused to appear** — a machine with Chrome already open would otherwise make the check pass
-or fail for reasons having nothing to do with the patch. Only the main process carries
-`--headless`, so it asserts "none of ours", never "all of ours".
+One launch, and a non-zero exit if any of four conditions fails.
 
-> **Any `pnpm install` in a profile silently reverts both edits**, including `dsh plugin
+The first two read the browser: `navigator.webdriver` must be `false`, and `ps` is diffed
+before/after to inspect **only the processes it caused to appear** — a machine with Chrome
+already open would otherwise make the check pass or fail for reasons having nothing to do with
+the patch. Only the main process carries `--headless`, so it asserts "none of ours", never "all
+of ours".
+
+The other two are the init script, and they are an A/B rather than a claim. The patcher serves a
+throwaway page whose inline script calls `fetch('/api/session')` while it is still parsing, then
+opens it **twice**: once through the manager's own `newPage()` — the page the patch touches — and
+once with a plain `browser.newPage()` as a control. It asserts that the patched page reports
+`document_start` *with* the request recorded, and that the control reports `after_load` with
+none. If the same collector came back empty for both, the run is a bug in the check, not a
+silent pass.
+
+> **Any `pnpm install` in a profile silently reverts all three edits**, including `dsh plugin
 > add/remove`, because it restores the pristine registry copy. Re-run the patcher afterwards —
 > it is idempotent, and it fails loudly if upstream's code changed shape rather than patching
-> blindly.
+> blindly. Re-running is also what re-copies `init.d/page-hooks.js`: a `dsh plugin add` that
+> overwrites the graph explorer's `lib/` does not restore it, and the browser will happily start
+> without it — patched, and quietly blind to entry documents again.
 
 ---
 
@@ -314,4 +360,8 @@ native agent tree that preceded it.
 DSH `0.1.5-rc.2`, `dsh-browser` `0.1.0`, Node 24, macOS. The `headless` profile was checked end
 to end rather than by config dump: twelve `browser_*` tools present, and `browser_open` against
 the demo app returning its real title. The headed patch was verified by the `ps` diff described
-above: 9 processes spawned, 0 carrying `--headless`.
+above: 9 processes spawned, 0 carrying `--headless`. The init-script edit was verified by the A/B
+described above — the page the patch created reported `document_start` with its own
+`GET /api/session` recorded, the unpatched control reported `after_load` with none — and then in
+a real agent run, where the step that opened the entry document recorded the two requests that
+document loaded with.

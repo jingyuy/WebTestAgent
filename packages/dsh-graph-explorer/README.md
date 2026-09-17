@@ -422,8 +422,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.11.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.11.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.13.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.13.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -437,7 +437,21 @@ the exit code:
 ```sh
 cd ~/.dsh/profiles/graph/node_modules/@webtestagent/dsh-graph-explorer
 diff -r <repo>/packages/dsh-graph-explorer/lib ./lib && echo IDENTICAL
+diff -r <repo>/packages/dsh-graph-explorer/test ./test && echo IDENTICAL
 ```
+
+Then **re-run the browser patcher** for that profile:
+
+```sh
+node <repo>/scripts/patch-dsh-browser.mjs --profile graph --verify
+```
+
+`dsh plugin add` runs a `pnpm install` in the profile, which restores pristine copies of every
+other dependency — `dsh-browser` included — so it undoes all three edits and deletes
+`init.d/page-hooks.js` with the rest of the package directory. The plugin keeps working after
+that, because `browser_eval` still installs the hooks; what is lost silently is document-start
+timing, and with it the requests an entry document loaded with (gap 1). Re-running the patcher is
+what puts it back, and `--verify` is what tells you it is back.
 
 `dsh plugin` shells out to a bare `dsh` and a bare `pnpm`, so both must be on
 `PATH`.
@@ -566,8 +580,11 @@ assumes are therefore absent, and here is what stands in for each:
   `aria-labelledby`, `labels`, `placeholder`, `alt`, `title`. That is enough for elements
   to be addressed as `role:name`, the way an accessibility tree addresses them, and it is
   an approximation of one rather than the same thing.
-- **No network getter.** Requests come from hooks the capture installs, which is exactly
-  why the initial document load of a navigation is not observed.
+- **No network getter.** Requests come from hooks this plugin installs into the page. There is
+  no API to ask the browser what it fetched and no way to attach to a request that has already
+  been made, and installing the hooks *before* a document runs needs an init script that
+  `dsh-browser` cannot be configured with — so a local source patch supplies one, and the
+  capture reports which way it got them (see gap 1 below).
 - **No general key press.** `browser_type` presses Enter when `submit` is set, and that is
   the only key reachable. Escape, Tab and the arrow keys are not, so a flow that needs to
   dismiss a dialog or drive a keyboard-only widget cannot be walked at all. That bounds
@@ -633,14 +650,38 @@ repaired: the harness captured the hidden login form as `visible: true` twice, s
 `detection_refuted_by_evidence`, and one edge was refused outright. None of that stopped the
 graph committing, and all of it is in the graph's own `warnings[]`.
 
+**Proven by a live agent run, 0.1.13.** Two documents, each fetching while it is still parsing,
+served from a scratch app. The step that opened the first page recorded **both of that
+document's own requests** — `GET /api/session` and `GET /api/projects`, each `200` — in
+`obs_0001`, and the step that followed the Settings link recorded that second document's own
+`GET /api/session`. Neither is a same-document SPA call and neither is an effect of the action
+the step took: they are what the document loaded *with*, which is what gap 1 was about. That run
+also demonstrates the next gap, from the other side: the graph it committed is schema-**INVALID**,
+because the model wrote `"output": {"page": "settings"}` — a value where the schema requires an
+`argumentValueSpec` — and neither the tool's own hint (see gap 8) nor the commit caught it.
+
 **Known gaps, in the order they will bite:**
 
-1. **Initial document loads are not observed.** The network/console hooks are
-   installed by `browser_eval`, which is document-scoped, so a full navigation
-   discards them and the requests that loaded the new document are lost. Same-document
-   (SPA) traffic *is* captured, which is the case `transition.effects[].request`
-   needs. Closing the gap requires Playwright's `addInitScript`, i.e. a source patch
-   to `dsh-browser`.
+1. **Closed in 0.1.13: a document is observed from its first byte.** The hooks used to be
+   installed by `browser_eval`, which is document-scoped, so a full navigation discarded them and
+   the requests that loaded the new document were lost — for the first navigation of a run, that
+   meant the entry point itself. They are now installed before the document runs. One file,
+   `lib/page-hooks.js`, is the collector either way: the local `dsh-browser` patch
+   (`scripts/patch-dsh-browser.mjs` in the repo root) copies it into the profile's `init.d/`,
+   and the patched browser installs it on every new page with `addInitScript`; `browser_eval`
+   still embeds the same bytes, as the fallback for a document the patch did not reach and as
+   the re-installer after a navigation. Two consequences worth knowing:
+   - **A request is recorded when it starts, not when it completes.** The request that loads a
+     document is usually still in flight when that document settles, so waiting for completion
+     would file it under the *next* step, where it reads as an effect of whatever action came
+     next — a worse falsehood than not recording it.
+   - **The capture reports `hooks_installed_at`** (`document_start` or `after_load`), and the
+     first observation of a run reports the `entry_document` — its URL, its title, its timing,
+     and the requests it loaded with. Without the marker, "this document made no requests" and
+     "we started watching after it had already run" are the same empty list.
+   The patch is what makes this real, and it is required rather than optional: `dsh-browser`'s
+   `Config` has no key for an init script. Unpatched, the hooks still arrive by eval, and both
+   the marker and the empty list say so honestly instead of claiming the document was quiet.
 2. **Some rules are judgement, not proof.** `feature_closure` is reported rather than
    enforced (`features` has no source at all, see gap 6), and `reachability` is a warning
    as well — but for a different and narrower reason now. Since 0.1.12 it floods from the
@@ -685,11 +726,21 @@ graph committing, and all of it is in the graph's own `warnings[]`.
    `reachability` are both real checks against a real entry state. What remains is only the
    limitation in gap 2 — an entry state derived from a sample answers *what this walk
    reached*, not *what the application can reach*.
+8. **`capability_output` is unconstrained, and its hint is wrong.** Found by the 0.1.13 live run
+   above, which committed an invalid graph and reported `ok: true`. The tool's parameter is
+   `{type:'object', additionalProperties:true}` and its description reads *"What the capability
+   yields, e.g. `{"discount":"number"}`"* — but `capability.schema.json#/properties/output`
+   is an `argumentValueSpec` map, so the correct form is `{"discount":{"type":"number"}}`. A model
+   following the hint writes a value where a spec belongs, and nothing between the tool call and
+   `graph.json` checks it: the commit's rules are about identity, evidence and dangling
+   references, not about the shape of a model-authored field. Two fixes, both small and both
+   owed: correct the hint, and validate the assembled document against the normative schemas
+   before calling the result `ok`.
 
 ## Tests
 
 ```sh
-npm test        # 4 suites, no browser and no harness
+npm test        # 5 suites, no browser and no harness
 ```
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
@@ -712,9 +763,26 @@ separate step, and a step whose edge was never committed cuts the walk into a re
 break.
 
 What they cannot check is that a real page looks like the capture claims. That is what
-a live run against `demo-app` is for, and both are needed: the diff logic is the piece
+a live run against a browser is for, and both are needed: the diff logic is the piece
 whose entire job is being right about a disagreement, so it is exercised directly
 rather than only through a browser.
+
+The page hooks get the same treatment for the same reason — they decide whether a request
+is seen at all, and the ways to get that wrong are silent. `test/page-hooks.test.mjs` runs
+the real hook file and the real capture expression in a faked page, and asserts that a
+request is recorded when it *starts* (so a document's own boot request is in the evidence of
+the step that loaded it), that a response arriving later fills in the status, that a failed
+request carries its reason, that an XHR is recorded on `send` and completed on `loadend`,
+that `console.warn` still reaches the real console, that installing twice wraps nothing
+twice, and that `hooks_installed_at` distinguishes the two arrivals. It also asserts the two
+characters that would break the embedding — a backtick or a `${` anywhere in `page-hooks.js`,
+comments included, since the file is spliced into a template literal.
+
+The browser half of the same question is the patcher's `--verify`, which is the only place the
+`document_start` claim can be checked against a real browser: it serves a page that fetches
+while parsing, opens it **twice** — once through the patched manager and once through a page
+the patch never touched — and fails unless the patched page reports `document_start` with that
+request recorded and the control reports `after_load` with none.
 
 `lib/index.js` imports its dependencies as peers, the way the harness supplies them, so
 the suites need them resolvable. `test/run.mjs` searches the usual places (the profile,
