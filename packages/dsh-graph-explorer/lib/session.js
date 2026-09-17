@@ -591,6 +591,15 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
     },
 
     stateCount: () => stateRecordById.size,
+    /**
+     * Every state record this run has written, in the order they were first seen.
+     *
+     * A state record is not only an identity: it is also the run's element declarations, and
+     * the declaration is the only thing a reference can be resolved against. A tool that has
+     * to answer "does this name exist yet?" — a detection naming an element, an effect whose
+     * target must become an element id — needs the records, not the count.
+     */
+    states: () => [...stateRecordById.values()],
     capabilityCount: () => capabilityById.size,
     /** The vocabulary as it stands, which is what a new name is compared against. */
     capabilityNames: () => [...capabilityByName.keys()],

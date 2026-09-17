@@ -39,7 +39,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from './capture.js';
-import { commitRun } from './commit.js';
+import { assertionSurvival, commitRun, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, routeOf } from './commit.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
 import {
     APPLICATION_ID_PATTERN,
@@ -48,9 +48,12 @@ import {
     DETECTION_TYPES,
     EFFECT_REQUIRED,
     EFFECT_TYPES,
+    ELEMENT_PURPOSE_PATTERN,
     LIST_OPERATIONS,
     SEVERITIES,
+    argumentMapProblem,
     normalizeApplication,
+    purposeOf,
     vocabularyNotes,
 } from './schema.js';
 import { createRun, normalizeRunDirName, RUN_DIR_NAME, RUN_DIR_PATTERN } from './session.js';
@@ -362,6 +365,316 @@ const unmovedNote = (settle) => {
 };
 
 /**
+ * The names the graph can already resolve: the purposes it has declared, the states it can
+ * name, and what it knows about each element.
+ *
+ * `graph_observe` and `graph_transition` both have to answer "does this name exist yet?" — a
+ * detection that names an element, an effect whose target has to become an element id — and
+ * the answer has to be the one the *commit* will reach, because a name the commit cannot
+ * resolve is content the graph silently loses. The commit builds its registry from the
+ * readings that survived to be written; a tool can only build its from what the store holds
+ * plus whatever the call in hand declares, which is the honest limit of asking early. So this
+ * is deliberately weaker than the commit's registry: a refusal made here is a claim the commit
+ * would also have refused to carry, and the commit still reports drops it can see and the tool
+ * could not.
+ *
+ * `elements` (the call in hand) takes precedence over the recorded declarations, because the
+ * model restating an element is its latest word about it.
+ */
+const registryFrom = (states, elements) => {
+    const declarations = new Map();
+    for (const element of [...(states ?? []).flatMap((record) => record?.elements ?? []), ...(elements ?? [])]) {
+        const purpose = element?.semantic_purpose;
+        // Only purposes the commit would accept as an element id. One that is not snake_case is
+        // dropped at commit (`element_dropped`), so a reference to it is dropped too — refused
+        // here instead, where the name is still the model's to fix.
+        if (typeof purpose !== 'string' || !ELEMENT_PURPOSE_PATTERN.test(purpose)) continue;
+        // In the shape the commit gives a declaration — role, name, and a *normalized* locator —
+        // because `elementPresentIn` reads those three fields, and a check that asked them of the
+        // raw record would answer a different question than the commit does.
+        declarations.set(purpose, {
+            ...element,
+            role: typeof element.role === 'string' ? element.role : null,
+            name: typeof element.name === 'string' ? element.name : null,
+            locator: normalizeLocator(element.locator),
+        });
+    }
+    const stateIds = new Map();
+    for (const record of states ?? []) {
+        if (record?.state_id) stateIds.set(record.state_id, record.state_id);
+        if (record?.id && record.id !== record.state_id) stateIds.set(record.id, record.state_id);
+    }
+    return {
+        declarations,
+        stateIds,
+        elementIdByPurpose: new Map([...declarations.keys()].map((purpose) => [purpose, 'element_' + purpose])),
+    };
+};
+
+/** The registry in the shape `normalizeAssertion` expects, plus the route this reading was taken at. */
+const referenceContext = (registry, url) => ({
+    stateIds: registry.stateIds,
+    elementIdByPurpose: registry.elementIdByPurpose,
+    route: routeOf(url ?? ''),
+});
+
+/**
+ * The element a claim is about: the purpose it resolves to, and what to quote back.
+ *
+ * A model writes the target as a bare purpose (`"email_input"`) or as the object form the tool's
+ * own "a state with no detection cannot be asserted" refusal invites
+ * (`{semantic_purpose: "email_input"}`), and both resolve — `purposeOf` is the one resolver the
+ * tool and the commit share, which is the point of it. `label` is the resolved purpose when
+ * there is one and the value as written when there is not, so a message about a target that
+ * resolves to nothing echoes what the model actually wrote rather than `null`.
+ */
+const claimTarget = (entry) => {
+    const raw = entry && typeof entry === 'object' ? (entry.element !== undefined ? entry.element : entry.target) : undefined;
+    const purpose = purposeOf(raw);
+    return { purpose, label: purpose ?? raw ?? null };
+};
+
+const listOf = (values, limit = 15) => (values.length
+    ? `${values.slice(0, limit).join(', ')}${values.length > limit ? ', …' : ''}`
+    : null);
+
+/**
+ * The capture's own entry for an element the model declared, matched the way the commit matches
+ * it — role and accessible name. Returns `null` when the claim cannot be checked against this
+ * reading, which is the honest answer rather than a pass.
+ */
+const readingOf = (registry, purpose, capture) => {
+    const declaration = registry.declarations.get(purpose);
+    if (!declaration?.role || !declaration?.name) return null;
+    return (capture?.interactive ?? []).find((item) => item && item.role === declaration.role && item.name === declaration.name) ?? null;
+};
+
+/** A detection entry, described without echoing the values in it (which may be a credential). */
+const describeDetection = (entry) => {
+    if (!entry || typeof entry !== 'object') return JSON.stringify(entry ?? null);
+    const { label } = claimTarget(entry);
+    const field = entry.element !== undefined ? 'element' : 'target';
+    return `{type: ${JSON.stringify(entry.type ?? null)}${label === null || label === undefined ? '' : `, ${field}: ${JSON.stringify(label)}`}}`;
+};
+
+/**
+ * What to say about a detection entry the commit would have dropped, and what to write instead.
+ *
+ * Every one of these is a message the model could not have received before: the entry is
+ * accepted by the tool, and the commit — which is where the rule lives — only sees it once the
+ * page it describes is closed. So the wording is not an apology but the missing half of the
+ * instruction: what the tool took, and what it should have been given.
+ */
+const detectionRemedy = (entry, reason, registry) => {
+    const { label } = claimTarget(entry);
+    const declared = listOf([...registry.declarations.keys()]);
+    const list = declared
+        ? `The elements declared so far are: ${declared}.`
+        : 'No element has been declared yet, so nothing can be checked about one: declare the elements you act on in '
+            + 'this reading\'s `elements`, each with a `semantic_purpose`.';
+    switch (reason) {
+        case 'element_reference_does_not_resolve':
+            return `it names ${JSON.stringify(label ?? null)}, which is not the semantic_purpose of any element this run has `
+                + `declared, so the entry would be dropped and the state would carry no check on that element at all. ${list}`;
+        case 'element_assertion_has_nothing_to_check':
+            return `it resolves ${JSON.stringify(label ?? null)}, but says nothing to check about it. The expected condition `
+                + 'goes in `operator`, or in `value`/`expected` — for a state word write '
+                + `{"type":${JSON.stringify(entry.type)},"target":${JSON.stringify(label ?? 'purpose')},"operator":"visible"} `
+                + '(visible, hidden, enabled, disabled), and for a value '
+                + `{"type":${JSON.stringify(entry.type)},"target":${JSON.stringify(label ?? 'purpose')},"value":"…"}. `
+                + 'A key the tool does not recognise is not a condition, so the entry would be dropped and the graph '
+                + 'would claim less about this state than you recorded.';
+        case 'state_assertion_names_no_state': {
+            const named = entry.state !== undefined ? entry.state
+                : (entry.value !== undefined ? entry.value : entry.target);
+            const ids = listOf([...registry.stateIds.values()]);
+            return `it names the state ${JSON.stringify(named ?? null)}, which is not a state id this run has recorded. `
+                + (ids ? `The states it has are: ${ids}.` : 'It has recorded none yet.');
+        }
+        case 'url_assertion_without_a_url':
+            return 'it is a url detection with no address, and this reading has no URL to pin it to. Give it the '
+                + 'address you are looking at.';
+        case 'empty_assertion':
+            return 'it is an empty string, which asserts nothing.';
+        case 'unknown_assertion_type':
+            return `its type is not one of: ${[...DETECTION_TYPES].join(', ')}.`;
+        default:
+            return 'it is neither a string description nor an object with a `type`, which is all a detection entry can be.';
+    }
+};
+
+/**
+ * Refuse a detection entry the commit would drop, while the page that would prove it is still on
+ * screen.
+ *
+ * This is the asymmetry the tool had: `graph_transition` checked its effects against the schema
+ * before recording them, and `graph_observe` checked only that each entry had a `type`. So
+ * `{"type":"element_state","target":"sign_in_button","state":"visible"}` — an entry whose
+ * condition is in a key nothing reads — was accepted, written to the log, and dropped by the
+ * commit minutes later, with the correction arriving when there was nothing left to correct.
+ * The rule was never missing; only the moment to state it was.
+ */
+const refuseDroppedDetections = (detection, registry, url) => {
+    const context = referenceContext(registry, url);
+    for (const entry of detection ?? []) {
+        const problem = assertionSurvival(entry, context);
+        if (!problem) continue;
+        // A bare `{type: "url"}` is pinned to the route its readings were taken at, which the
+        // commit derives from the captures. With no route in hand there is nothing to pin it to
+        // and nothing to judge, so this one is left to the commit rather than refused over a gap
+        // in the machinery.
+        if (problem.reason === 'url_assertion_without_a_url' && !context.route) continue;
+        throw new Error(
+            `detection ${describeDetection(entry)} would not survive the commit: ${detectionRemedy(entry, problem.reason, registry)} `
+            + 'Nothing was recorded, so fix the entry and call again — the page has not moved, and no action has to be repeated.',
+        );
+    }
+};
+
+/**
+ * A detection that asserts a value the reading cannot show, where the value is one no reading
+ * ever could.
+ *
+ * A masked value is the one case that is refused rather than reported: a password field is
+ * captured as `[set]` (`capture.js`), deliberately — the graph is a durable artefact and a
+ * credential in it outlives the run — so a literal written against one can never hold, in this
+ * reading or any other. Left to the commit it becomes an `info` finding and the graph keeps an
+ * assertion that fails on arrival, which is the worst kind: it looks like a passing graph.
+ */
+const maskedValueRefusal = (detection, registry, capture) => {
+    for (const entry of detection ?? []) {
+        if (!entry || typeof entry !== 'object' || entry.type !== 'element_value') continue;
+        const expected = entry.value !== undefined ? entry.value : entry.expected;
+        if (typeof expected !== 'string' || !expected) continue;
+        const { purpose } = claimTarget(entry);
+        const seen = readingOf(registry, purpose, capture);
+        if (seen?.value !== '[set]') continue;
+        return `detection expects ${JSON.stringify(purpose)} to hold a value, but the reading records "[set]": that is the `
+            + 'collector\'s mask on a password field, not the page\'s content, so no literal can match it — and a literal '
+            + 'here would write the credential into the graph. Assert what a reading can show: '
+            + `{"type":"element_value","target":${JSON.stringify(purpose ?? 'purpose')},"operator":"exists"} for "the field holds `
+            + 'something", or an `element_state` check that the field or the form is there.';
+    }
+    return null;
+};
+
+/**
+ * A detection this reading's own capture refutes, refused before the reading is written.
+ *
+ * `graph_observe` binds a reading to the capture in hand, and the commit checks every detection
+ * against every reading bound to that state — so a claim this capture contradicts can never
+ * become true: the evidence that refutes it is already on disk and immutable. Left to the commit
+ * it is `detection_refuted_by_evidence` (an error), the entry is dropped, and a state whose only
+ * detection was that entry is refused outright with `state_without_detection` — a whole walk lost
+ * to one reading, at a point where the correction has nothing left to act on.
+ *
+ * The common cause is not a typo. A click authenticated the session, the model read the page it
+ * landed on, and then named the state it had been on before: the reading is bound to a capture of
+ * a different screen, its detection is refuted by its own evidence, and the state it was meant to
+ * describe is left with nothing. The tool cannot tell that from an element that is genuinely not
+ * on this page, so the refusal names both readings of the situation — and says what the capture
+ * *does* show, which is the one thing that lets the model recognise the page it is actually on.
+ */
+const refutedDetectionRefusal = (detection, registry, capture) => {
+    if (!capture) return null;
+    for (const entry of detection ?? []) {
+        const claim = elementClaim(entry);
+        if (!claim) continue;
+        const declaration = registry.declarations.get(claim.purpose);
+        if (!declaration) continue;
+        const present = elementPresentIn(capture, declaration);
+        if (present === null) continue;
+        const refuted = claim.want === 'present' ? present === false : present === true;
+        if (!refuted) continue;
+        const tail = 'Nothing was recorded, so fix the entry and call again — the page has not moved, and no action has to be '
+            + 'repeated. A claim a reading refutes can never be true later: the commit checks every detection against every '
+            + 'reading bound to the state, so this one would arrive as `detection_refuted_by_evidence` (an error), the entry '
+            + 'would be dropped, and a state left with no detection is refused outright (`state_without_detection`).';
+        if (claim.want === 'present' && !(declaration.role && declaration.name) && !declaration.locator) {
+            return `detection ${describeDetection(entry)} cannot be checked against any reading: it claims `
+                + `${JSON.stringify(claim.purpose)} is there, and what this run has recorded for that element says nothing about `
+                + 'how to find it on a page — no `role` together with `name`, and no `locator`. Give the element both in this '
+                + `reading's \`elements\`, the way the capture describes it. ${tail}`;
+        }
+        const shown = listOf((capture.interactive ?? []).slice(0, 8).map((item) => `${item.role}:${item.name}`), 8);
+        const advice = claim.want === 'present'
+            ? 'If the page has moved past the state you named, read it as the state it now is — two states have to be told apart '
+                + 'by their identity, not by one of them carrying the other\'s proof; if the element is simply not on this page, '
+                + 'this reading cannot be a reading of that state. '
+            : 'An `absence` claim says the element is gone, and this capture has it: either this is not the state you named, or the '
+                + 'element is not absent here yet. ';
+        return `detection ${describeDetection(entry)} is refuted by the reading it is written on: it claims `
+            + `${JSON.stringify(claim.purpose)} ${claim.want === 'present' ? 'is there' : 'is gone'}, and the capture of this step `
+            + `(${routeOf(capture.url ?? '')}) shows the opposite. `
+            + (shown ? `That capture's interactive surface is: ${shown}. ` : 'That capture has no interactive elements at all. ')
+            + advice
+            + tail;
+    }
+    return null;
+};
+
+/**
+ * The claims in a reading that the reading itself does not bear out.
+ *
+ * Where a contradiction is a summary rather than a mistake (`filled` for a field the capture
+ * records as `test@example.com`), it is reported and not refused: deciding which was meant is
+ * judgement, and judgement is the model's — the same conclusion the commit reaches, where this
+ * is an `info` finding and the entry is carried as written. The kinds here are the commit's own
+ * finding codes, so a model that ignores one meets the same name in the report.
+ */
+const valueMismatchNotes = (detection, registry, capture) => {
+    const notes = [];
+    for (const entry of detection ?? []) {
+        if (!entry || typeof entry !== 'object' || entry.type !== 'element_value') continue;
+        const expected = entry.value !== undefined ? entry.value : entry.expected;
+        if (typeof expected !== 'string' || !expected) continue;
+        const { purpose } = claimTarget(entry);
+        const seen = readingOf(registry, purpose, capture);
+        if (!seen || typeof seen.value !== 'string' || seen.value === expected) continue;
+        notes.push({
+            kind: 'detection_value_not_in_evidence',
+            detail: `detection expects ${JSON.stringify(purpose)} to hold ${JSON.stringify(expected)}, while this reading `
+                + `recorded ${JSON.stringify(seen.value)}. Carried as written — it may be a summary rather than a literal, `
+                + 'in which case say so in the entry\'s `description` and put the literal in `evidence` — but a generator '
+                + 'would turn it into an assertion that fails.',
+        });
+    }
+    return notes;
+};
+
+/**
+ * A caution for a state identity minted out of element state.
+ *
+ * Whether two readings are two states is the model's judgement — the schema says so, and this
+ * checks the schema's vocabulary rather than its judgement — so this is a report and not a
+ * refusal. What the machinery knows that the model does not is *what the step changed*: the
+ * model is looking at one page at a time, and the diff is the one place the run can see that the
+ * only difference between this reading and the previous one is what the fields hold.
+ *
+ * That matters because a value the user typed is element state, not a fact about the
+ * application, and because a state identity cannot be withdrawn: once minted it is a state the
+ * graph carries, so an identity invented from a form's progress reports a two-screen app as
+ * however many keystrokes it took to fill in.
+ */
+const elementStateIdentityNote = ({ minted, previousState, change }) => {
+    if (!minted || !previousState || !change) return null;
+    const keys = Object.keys(change);
+    const moved = Array.isArray(change.changed) ? change.changed : [];
+    if (keys.length !== 1 || keys[0] !== 'changed' || !moved.length) return null;
+    if (!moved.every((entry) => String(entry).includes('value='))) return null;
+    return {
+        kind: 'identity_read_from_element_state',
+        detail: `A new identity was minted, and the only thing that changed between this reading and the previous one is `
+            + `what the fields hold (${moved.slice(0, 2).join('; ')}). A value the user has typed is element state, not a fact `
+            + `about the application: if the two readings are the same page with different input, they are one state, and this `
+            + `step is a self-loop on ${previousState} with a \`value_changed\` effect rather than a transition into a state of `
+            + 'its own. An identity cannot be withdrawn once recorded, so the graph now has both — read the page as the state '
+            + 'you already recorded for the steps that remain, and keep the rest of the walk to states the app is in rather '
+            + 'than states the user is passing through.',
+    };
+};
+
+/**
  * Put the model's account of a step next to the machinery's account of it.
  *
  * This is the whole reason a transition is recorded by a tool rather than written
@@ -512,6 +825,18 @@ export function apply(ctx, config) {
      * that the run has only just begun.
      */
     let walkHole = null;
+
+    /**
+     * What `graph_observe` could see about the claims in a reading, kept until the step that
+     * produced it is recorded.
+     *
+     * The reading is where the claim is made, and the step is where it is *used* — so the note
+     * belongs in both places. In the digest it is the correction the model can still act on; on
+     * the edge it is a finding the commit carries into the report, where a reader who arrives
+     * after the browser is closed can see why the graph has a state the application is never in.
+     * Keyed by the reading, so a note cannot land on a step it is not about.
+     */
+    const readingNotes = new Map();
 
     /**
      * The turn's instruction, captured from `agent/pre-step` before the step's
@@ -785,7 +1110,10 @@ export function apply(ctx, config) {
             dimensions: {
                 type: 'object',
                 additionalProperties: true,
-                description: 'Discriminating facts that separate states sharing a route, e.g. {"projects":"empty"}',
+                description: 'Discriminating facts that separate states sharing a route, e.g. {"projects":"empty"}. '
+                    + 'A dimension is a fact about the application. A form with a value in it is the same state as the '
+                    + 'form without it: element state is not identity, and filling a field is a value_changed effect on '
+                    + 'a self-loop.',
             },
             summary: { type: 'string', description: 'One sentence describing this state from the user\'s point of view' },
             elements: {
@@ -796,7 +1124,9 @@ export function apply(ctx, config) {
             detection: {
                 type: 'array',
                 items: { type: 'object', additionalProperties: true },
-                description: 'How a test proves it is in this state: {type: url|element_state|element_value|message|absence|..., ...}',
+                description: 'How a test proves it is in this state: {type: url|element_state|element_value|message|absence|..., ...}. '
+                    + 'The condition goes in `operator` or `value`/`expected`; an element must resolve to a semantic_purpose a '
+                    + 'state has declared. Refused rather than recorded if it would be dropped at commit.',
             },
             confidence: { type: 'number', description: '0..1 confidence in this reading' },
         },
@@ -823,6 +1153,14 @@ export function apply(ctx, config) {
                 );
             }
 
+            // The step's own diff, computed once. The digest reports it, and the notes below
+            // are what the machinery can see about the claims this reading was given *in the
+            // light of it* — computing it twice would be the place a claim and its evidence
+            // drifted apart.
+            const change = diffCaptures(previousCapture, latest.capture);
+            const previousState = previousObservation ? store.stateForObservation(previousObservation.id) : null;
+            const notes = [];
+
             let state = null;
             if (args.page_type) {
                 if (!Array.isArray(args.detection) || args.detection.length === 0) {
@@ -846,6 +1184,26 @@ export function apply(ctx, config) {
                         'Every element needs a semantic_purpose: it is the identity a generated test will use, '
                         + 'and a CSS locator is evidence, not identity. Add semantic_purpose and call again.',
                     );
+                }
+                // What the graph can resolve a name against, as it stands: the purposes the
+                // recorded states declared, plus the ones this reading declares. Built before
+                // anything is written, so a refused reading leaves no trace.
+                const registry = registryFrom(store.states(), args.elements);
+                // A detection is a claim, and a claim the commit cannot resolve or cannot
+                // evaluate is a claim the graph loses. Refused here, while the page that would
+                // give the model a better one is still on screen.
+                refuseDroppedDetections(args.detection, registry, latest.capture?.url);
+                const masked = maskedValueRefusal(args.detection, registry, latest.capture);
+                if (masked) {
+                    throw new Error(`State "${args.page_type}" was rejected: ${masked} Nothing was recorded, so fix the `
+                        + 'entry and call again.');
+                }
+                // The other half of asking early: not "could the graph carry this claim?" but "is
+                // it true of the page in hand?". A claim this reading's own capture refutes is
+                // refuted forever, because the reading it would be bound to is immutable.
+                const refuted = refutedDetectionRefusal(args.detection, registry, latest.capture);
+                if (refuted) {
+                    throw new Error(`State "${args.page_type}" was rejected: ${refuted}`);
                 }
                 const recorded = store.addState({
                     observationId: latest.id,
@@ -877,6 +1235,15 @@ export function apply(ctx, config) {
                         ? 'Minted a new state for this identity.'
                         : 'This identity was already recorded — reused the existing state id instead of minting a duplicate.',
                 };
+                // What the reading itself says about the claims it was given. Both of these were
+                // previously invisible until the commit, by which time the page was gone: a
+                // value the capture contradicts, and an identity minted out of a form's progress.
+                notes.push(...valueMismatchNotes(args.detection, registry, latest.capture));
+                const identity = elementStateIdentityNote({ minted: recorded.minted, previousState, change });
+                if (identity) notes.push(identity);
+                // Held for the transition that records this step, so the same note reaches the
+                // commit report and not only the model's next digest.
+                if (notes.length) readingNotes.set(latest.id, notes);
             }
 
             const digest = {
@@ -920,7 +1287,13 @@ export function apply(ctx, config) {
                     note: 'First observation of the run: the requests this document loaded with, '
                         + 'before any action was taken.',
                 },
-                changed_since_previous_observation: diffCaptures(previousCapture, latest.capture),
+                changed_since_previous_observation: change,
+                // What the machinery can see about the claims in this reading, said while the
+                // page that would bear them out is still on screen. Reported here rather than
+                // left to the commit because a claim that does not hold is only *known* to not
+                // hold while the evidence that refutes it is the current page: the correction
+                // costs one call now, and nothing at all later.
+                reading_notes: notes,
                 status: latest.capture?.status ?? [],
                 interactive: latest.capture?.interactive ?? [],
                 storage: latest.capture?.storage ?? {},
@@ -982,12 +1355,15 @@ export function apply(ctx, config) {
                 type: 'object',
                 additionalProperties: true,
                 description: 'Parameter type map, recorded on first use: {"coupon_code":{"type":"string","required":true}}. '
-                    + 'This is the capability\'s parameters, NOT the concrete values used this time.',
+                    + 'Each value is a primitive type name (string|number|integer|boolean|object|array|any) or an object whose '
+                    + '`type` is one of those — the schema allows no other key. This is the capability\'s parameters, NOT the '
+                    + 'concrete values used this time.',
             },
             capability_output: {
                 type: 'object',
                 additionalProperties: true,
-                description: 'What the capability yields, e.g. {"discount":"number"}. Recorded on first use.',
+                description: 'What the capability yields, e.g. {"discount":"number"} or {"discount":{"type":"number"}}. Same '
+                    + 'value-spec shape as capability_input. Recorded on first use.',
             },
             arguments: {
                 type: 'object',
@@ -1008,6 +1384,10 @@ export function apply(ctx, config) {
                 description: 'What changed. Each entry is {type, ...}: navigation/url_changed/state_entered need `to`; '
                     + 'value_changed/visibility_changed need `target` and `to`; message needs `message`; request needs '
                     + '`api`; storage_changed/validation_error/list_changed/element_created/element_destroyed need `target`. '
+                    + 'An element-shaped target (value_changed, visibility_changed, element_created, element_destroyed, '
+                    + 'validation_error) is the element\'s semantic_purpose — `email_input`, not `login.email` and not a '
+                    + 'selector: an effect that does not resolve to a declared element is dropped at commit, so it is '
+                    + 'refused here. A non-element target (storage_changed, list_changed) is a semantic path or key. '
                     + 'Set "observed": true only for what the evidence actually shows.',
             },
             apis: {
@@ -1162,6 +1542,17 @@ export function apply(ctx, config) {
             }
 
             const notes = vocabularyNotes(capabilityName, store.capabilityNames());
+            // The capability's signature is free-form JSON the schema closes: its values are
+            // `argumentValueSpec`s, not JSON Schema, and both maps set `additionalProperties:
+            // false`. Nothing between this call and the committed document looks at it again —
+            // the commit's rules are identity, evidence and dangling references — so an
+            // unrecognized key here produces an INVALID graph that is still reported as
+            // committed. Refused before the capability is written, so a corrected call writes it
+            // once, as the first sighting.
+            for (const [label, value] of [['capability_input', args.capability_input], ['capability_output', args.capability_output]]) {
+                const problem = argumentMapProblem(label, value);
+                if (problem) throw new Error(`${problem} Nothing was recorded, so fix it and call again.`);
+            }
             const capability = store.addCapability({
                 name: capabilityName,
                 kind: args.capability_kind,
@@ -1199,6 +1590,13 @@ export function apply(ctx, config) {
             }
 
             // --- effects ----------------------------------------------------
+            // The element registry, for the one effect check that is not about the schema: an
+            // element-shaped effect names an element, and a name no state declares is dropped at
+            // commit (`element_target_does_not_resolve`). The model writes semantic paths here
+            // because that is what a path-like target usually is — `login.email` reads like a
+            // field of the login capability — and losing the effect means losing the whole
+            // content of a form-fill step from the graph.
+            const known = registryFrom(store.states(), []);
             const effects = Array.isArray(args.effects) ? args.effects : [];
             for (const effect of effects) {
                 const type = effect?.type;
@@ -1213,6 +1611,19 @@ export function apply(ctx, config) {
                     throw new Error(
                         `effect ${JSON.stringify(type)} is missing ${missing.join(', ')}. `
                         + 'The schema requires it, and an effect without it cannot be asserted in a generated test.',
+                    );
+                }
+                if (ELEMENT_TARGET_EFFECTS.has(type) && !known.declarations.has(String(effect.target))) {
+                    const declared = listOf([...known.declarations.keys()]);
+                    throw new Error(
+                        `effect ${JSON.stringify(type)} target ${JSON.stringify(effect.target)} is not the `
+                        + `semantic_purpose of any element this run has declared, so the effect would be dropped when the `
+                        + `graph is committed and this step would read as having changed nothing. ${declared
+                            ? `The elements declared so far are: ${declared}.`
+                            : 'No element has been declared yet: the state you read after the action is where its elements belong.'} `
+                        + 'An element-shaped effect names the element itself, not a path within it — a `value_changed` on '
+                        + 'the email field names that field\'s `semantic_purpose`, exactly as you wrote it when you observed '
+                        + 'the state. Nothing was recorded, and the page has not moved, so fix the target and call again.',
                     );
                 }
                 if (effect.severity !== undefined && !SEVERITIES.has(effect.severity)) {
@@ -1277,7 +1688,11 @@ export function apply(ctx, config) {
                 before_observation: before.id,
                 after_observation: after.id,
                 observed_change: observedChange,
-                notes: warnings,
+                // The step's own disagreements with the evidence, plus whatever the reading at
+                // the end of it said about its claims. Both are the machinery's account of the
+                // step, so they travel together — and the commit turns the kinds into findings
+                // with the same severities either way (`NOTE_SEVERITY`).
+                notes: [...warnings, ...(readingNotes.get(after.id) ?? [])],
             });
             if (!recorded) {
                 // Refused rather than half-kept: the capability above is already in the

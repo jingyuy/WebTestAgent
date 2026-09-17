@@ -150,6 +150,26 @@ export const CAPABILITY_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
 export const ELEMENT_PURPOSE_PATTERN = /^[a-z][a-z0-9_]*$/;
 
 /**
+ * The purpose a claim names, under either of the two forms a model writes it in.
+ *
+ * A bare string (`"email_input"`) and an object (`{semantic_purpose: "email_input"}`) mean the
+ * same thing, and both are real: the tool's own refusal message for a state with no detection
+ * invites the object form, while `normalizeAssertion` resolved only the string — so an entry
+ * the model was *told* to write was dropped at commit with nothing to say it had been. One
+ * resolver, used by every reader of a claim, is the fix for that class of thing.
+ *
+ * Returns `null` when the value names nothing, which is a different answer from a name that
+ * does not resolve: only the caller knows which one it is holding, and what to say about it.
+ */
+export function purposeOf(value) {
+  if (typeof value === 'string' && value) return value;
+  if (value && typeof value === 'object' && typeof value.semantic_purpose === 'string' && value.semantic_purpose) {
+    return value.semantic_purpose;
+  }
+  return null;
+}
+
+/**
  * `state.identity.page_type` — the coarse semantic page kind, same alphabet again.
  * From `state.schema.json`. Enforced at commit because the page type is required, so a
  * page type the pattern rejects makes the whole state invalid rather than merely odd.
@@ -195,11 +215,82 @@ export const EFFECT_KEYS = new Set([
 export const ASSERTION_SEVERITIES = new Set(['assert', 'warn', 'info']);
 
 /**
- * What the machinery's own notes on a transition mean for the commit.
+ * The value-spec vocabulary of a capability's `input` and `output` maps.
  *
- * The notes are written by `crossCheckEffects` while the run is live, where the cost of a
- * false positive is a sentence of the model's attention. At commit time the same note is a
- * verdict, so the severity has to be decided once, here, beside the note kinds themselves.
+ * From `common.schema.json#/$defs/argumentValueSpec`, which is a `oneOf` of two forms: a bare
+ * primitive type name (`"number"`), or an object whose only keys are the ones below and whose
+ * `type` is required. Both forms are closed, and `argumentMap` says the important part in its
+ * own description — *"Values are argumentValueSpec, not JSON Schema"*.
+ *
+ * Enforced while the run is live because this is the one part of the graph the model writes
+ * as free-form JSON and nothing downstream looks at it: `graph_commit`'s rules are identity,
+ * evidence and dangling references, so it reports `ok: true` for a document an `input` of
+ * `{"email":{"type":"string","sensitive":true}}` makes INVALID. A shape error there costs the
+ * whole run, and the model can always fix the spec on the call that wrote it.
+ */
+export const ARGUMENT_VALUE_TYPES = new Set(['string', 'number', 'integer', 'boolean', 'object', 'array', 'any']);
+
+const ARGUMENT_SPEC_KEYS = new Set([
+  'type', 'description', 'required', 'format', 'enum', 'minimum', 'maximum', 'pattern', 'default', 'example',
+]);
+
+/**
+ * Why one entry of a capability's `input`/`output` map is not a usable value spec, or `null`
+ * when it is. `label` names the argument the model passed, so the message can quote the path
+ * it actually wrote (`capability_input.email`).
+ */
+export function argumentSpecProblem(label, spec) {
+  if (typeof spec === 'string') {
+    if (ARGUMENT_VALUE_TYPES.has(spec)) return null;
+    return `${label} is ${JSON.stringify(spec)}, which is not a type name. A value spec is either a primitive `
+      + `type name (${[...ARGUMENT_VALUE_TYPES].join(', ')}) or an object with a \`type\`. If ${JSON.stringify(spec)} `
+      + 'is a value you actually used, it belongs in `arguments` — this parameter describes the capability\'s '
+      + 'parameters, not the values of this one call.';
+  }
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) {
+    return `${label} is ${JSON.stringify(spec ?? null)}, which is not a value spec. Use a type name `
+      + `(${[...ARGUMENT_VALUE_TYPES].join(', ')}) or {"type":"string","required":true}.`;
+  }
+  const unknown = Object.keys(spec).filter((key) => !ARGUMENT_SPEC_KEYS.has(key));
+  if (unknown.length) {
+    return `${label} carries ${JSON.stringify(unknown[0])}, which is not a key a value spec can have. The schema `
+      + `lists exactly ${[...ARGUMENT_SPEC_KEYS].join(', ')} (additionalProperties: false), so the committed graph `
+      + 'would be an invalid document — and nothing between this call and the document would have said so. Keep '
+      + 'the keys the schema has; say the rest in `description`.';
+  }
+  if (!ARGUMENT_VALUE_TYPES.has(spec.type)) {
+    return `${label} has type ${JSON.stringify(spec.type ?? null)}, which is not one of: `
+      + `${[...ARGUMENT_VALUE_TYPES].join(', ')}. The schema's value specs are stricter than a JSON Schema type `
+      + 'and `any` is the escape hatch.';
+  }
+  return null;
+}
+
+/**
+ * The same question for a whole `input`/`output` map: the first entry that would make the
+ * graph invalid, or `null`. One entry at a time is enough — the message names the path, and a
+ * second bad entry is found on the corrected call.
+ */
+export function argumentMapProblem(label, value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    return `${label} is ${JSON.stringify(value)}, which is not a map of argument names to value specs. Use `
+      + '{"email":{"type":"string","required":true}} — an empty object is fine when there is nothing to say.';
+  }
+  for (const [name, spec] of Object.entries(value)) {
+    const problem = argumentSpecProblem(`${label}.${name}`, spec);
+    if (problem) return problem;
+  }
+  return null;
+}
+
+/**
+ * What the machinery's own notes mean for the commit.
+ *
+ * The notes are written while the run is live — `crossCheckEffects` on a transition, and
+ * `graph_observe` on the claims a reading was given — where the cost of a false positive is a
+ * sentence of the model's attention. At commit time the same note is a verdict, so the severity
+ * has to be decided once, here, beside the note kinds themselves.
  *
  * Only `self_loop_but_controls_changed` is an error, because it is the only note that says
  * the record's *identity* is wrong rather than its *detail*: the step claims to start and end
@@ -216,6 +307,19 @@ export const NOTE_SEVERITY = new Map([
   ['unclaimed_url_change', 'warning'],
   ['no_observed_change', 'warning'],
   ['previous_step_not_read', 'warning'],
+  // A detection whose value the capture contradicts, noted by `graph_observe`. The commit
+  // reaches the same conclusion about the same entry under the same code — `info`, carried as
+  // written — and the two are the same claim, so they are the same severity. Deciding it here
+  // and not by the fallback below is the point of the map: the fallback exists for kinds a
+  // newer recorder writes and this version has never heard of.
+  ['detection_value_not_in_evidence', 'info'],
+  // A state identity minted out of element state — a form's progress read as a state of the
+  // application. A warning rather than an error because the endpoints the edge names are still
+  // the readings they were: what is doubtful is the extra identity, and refusing the edge would
+  // throw away a real step to punish a state that is merely unnecessary. (`self_loop_but_
+  // controls_changed` is the error in this family, and for the opposite reason: there the
+  // identity the edge *names* does not hold for both of its endpoints.)
+  ['identity_read_from_element_state', 'warning'],
 ]);
 
 /**
