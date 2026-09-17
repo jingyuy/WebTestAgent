@@ -331,7 +331,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
     recreations: () => recreations,
 
     /** Allocate the next machine-evidence record. Immutable once written. */
-    addObservation({ tool, toolArgs, phase, capture, error, screenshot }) {
+    addObservation({ tool, toolArgs, phase, capture, error, screenshot, settle }) {
       const seq = observationCount + 1;
       const id = 'obs_' + String(seq).padStart(4, '0');
       const record = {
@@ -345,6 +345,13 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
         title: capture ? capture.title : null,
         capture: capture ?? null,
         capture_error: error ?? null,
+        // How the reading was taken, from the page's own account of itself: whether it
+        // ever stopped moving, how long it was watched, and what it was still waiting
+        // for. This is what makes a raced step distinguishable from a self-loop when
+        // the two captures look identical — without it, "nothing changed" is a claim
+        // the record cannot support, and the cross-check has to hedge about which of
+        // the two it is looking at.
+        settle: settle ?? null,
         screenshot: screenshot ?? null,
       };
       // The count moves only when the record does, so a step that could not be

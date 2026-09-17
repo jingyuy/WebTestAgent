@@ -13,9 +13,15 @@
  * would be two collectors that agree until the day they do not, and the
  * disagreement would show up as evidence nobody could reproduce.
  *
- * Two jobs, one round trip, in this order:
+ * Three jobs, two round trips, in this order:
+ *   0. `SETTLE_EXPRESSION` — wait for the page to stop moving (its own round trip)
  *   1. install the network/console hooks if this document does not have them yet
  *   2. drain them and snapshot the semantic surface of the page
+ *
+ * Job 0 is the answer to a race that the snapshot alone cannot fix: a reading taken
+ * immediately after an action describes the page the action started FROM on any app
+ * that renders a frame (or 150ms) later. See `SETTLE_EXPRESSION` for why it is a
+ * separate round trip and why it is a quiet window rather than a fixed sleep.
  *
  * Which of the two installers got there first — and whether it was in time — is
  * reported as `hooks_installed_at`. A document whose hooks arrived at document
@@ -201,5 +207,138 @@ export const CAPTURE_EXPRESSION = `(() => {
     network: drain(gx.network),
     console: drain(gx.console),
     page_errors: drain(gx.errors),
+  };
+})()`;
+
+/**
+ * How long the page has to hold still before the reading is taken, and how long we
+ * are willing to hold the reading back waiting for that.
+ *
+ * `QUIET` is the number the frame after an action usually arrives inside: a state
+ * update renders within a frame, a debounce or a `setTimeout` render lands inside a
+ * couple of hundred ms. Once the page has been seen to move, waiting this long after
+ * the last twitch is enough, and the reading costs the render plus this.
+ *
+ * `IDLE` covers the case the quiet window alone cannot: the page has not moved at
+ * all yet. That is exactly the answer a race produces falsely — "nothing changed" —
+ * so it is the claim worth being slow about, and an apparent no-op is watched for a
+ * full second before it is called one. A step that does move never pays this.
+ *
+ * `BUDGET` is where a reading stops being worth the wait. The only way to reach it is
+ * a page that keeps moving (or keeps a request open): continuous activity resets the
+ * quiet clock, so the loop gives up at the budget and says so with `timed_out`.
+ *
+ * All three are reported with every capture, so a reading never has to be trusted on
+ * the strength of a hidden constant.
+ */
+export const SETTLE_QUIET_MS = 250;
+export const SETTLE_IDLE_MS = 1000;
+export const SETTLE_BUDGET_MS = 3000;
+/** How often the page re-checks whether it has gone quiet. Not a fixed sleep: see below. */
+export const SETTLE_POLL_MS = 25;
+
+/**
+ * Wait for the page to stop moving. Returns a promise, because the page must be the
+ * one holding the clock — a wait driven from outside would be a second thing to keep
+ * in sync with the page, and would cost a round trip per poll.
+ *
+ * Why this exists, in one line: `capture(before) → action → capture(after)` is only
+ * an account of the action if the page is still when the second capture runs. A
+ * click that renders 150ms later is read as "nothing changed", the step is recorded
+ * as a self-loop, and the reading that describes the destination belongs to an
+ * action that has not happened yet — every endpoint after it is shifted by one. The
+ * failure is invisible in the evidence: the capture is a faithful photograph of a
+ * page that was about to change.
+ *
+ * Work the page has announced is waited for as well: an open `fetch`/XHR is a change
+ * that has not arrived yet, and the hooks see it start.
+ *
+ * What it cannot do is see the future. A `setTimeout(render, 5000)` announces itself
+ * to nothing and no wait can cover it — `changes`, `in_flight` and `timed_out` in the
+ * answer are what tell a caller which of these it got, and the collector records them
+ * next to the capture rather than deciding for the model that the reading was fine.
+ * Measured against a real browser: a render 150ms after the click is read correctly
+ * (≈400ms), one at 900ms is read correctly (≈1150ms), one at 2000ms is not — that
+ * reading is taken at the idle window and reports `changes: 0`, which is the honest
+ * account of a page that had announced nothing.
+ *
+ * Never throws on its own account: if the document has no `MutationObserver` the
+ * wait degrades to the quiet period alone and says so in `watched`.
+ */
+export const SETTLE_EXPRESSION = `(async () => {
+  var QUIET_MS = ${SETTLE_QUIET_MS};
+  var IDLE_MS = ${SETTLE_IDLE_MS};
+  var BUDGET_MS = ${SETTLE_BUDGET_MS};
+  var POLL_MS = ${SETTLE_POLL_MS};
+  var startedAt = Date.now();
+  var lastChangeAt = startedAt;
+  var changes = 0;
+  var watched = false;
+  var inFlight = 0;
+  var busy = false;
+  var observer = null;
+
+  var gx = window.__gx || {};
+
+  // A request that has started and not finished is a change that has not arrived
+  // yet, so it holds the reading back exactly like an observed mutation would. The
+  // hooks record on START for this reason; a capture taken now would report an app
+  // mid-update as an app that did nothing.
+  var openRequests = function () {
+    var list = gx.network || [];
+    var open = 0;
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i];
+      if (entry && entry.status == null && entry.failed !== true) open++;
+    }
+    return open;
+  };
+
+  // Everything the capture below reads: child nodes, text and attributes. A page
+  // that re-renders identical values still counts as moving — telling a no-op
+  // re-render from a real one means diffing the surface, which is the capture's job
+  // and not something to do twice per step.
+  if (typeof MutationObserver === 'function' && document.documentElement) {
+    try {
+      observer = new MutationObserver(function (records) {
+        changes += records.length;
+        busy = true;
+        lastChangeAt = Date.now();
+      });
+      observer.observe(document.documentElement, {
+        subtree: true, childList: true, characterData: true, attributes: true,
+      });
+      watched = true;
+    } catch (error) {
+      observer = null;
+    }
+  }
+
+  var timedOut = false;
+  while (true) {
+    inFlight = openRequests();
+    if (inFlight > 0) {
+      busy = true;
+      lastChangeAt = Date.now();
+    }
+    if (Date.now() - startedAt >= BUDGET_MS) { timedOut = true; break; }
+    // An action that appears to have changed nothing is the answer under suspicion,
+    // so it gets the long window; one that moved gets the short one after it stops.
+    if (Date.now() - lastChangeAt >= (busy ? QUIET_MS : IDLE_MS)) break;
+    await new Promise(function (resolve) { setTimeout(resolve, POLL_MS); });
+  }
+
+  if (observer) observer.disconnect();
+
+  var waited = Date.now() - startedAt;
+  return {
+    waited_ms: waited,
+    quiet_ms: QUIET_MS,
+    idle_ms: IDLE_MS,
+    budget_ms: BUDGET_MS,
+    changes: changes,
+    in_flight: inFlight,
+    timed_out: timedOut,
+    watched: watched,
   };
 })()`;

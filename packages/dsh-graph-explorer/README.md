@@ -115,6 +115,43 @@ So the operational rule stands: clear or rename `graph-run/` **before** a run, n
 one — and in a long-lived profile, not between two tasks either, since the `web` profile is a
 server whose plugin instance (and its store) outlive any single task.
 
+### The reading waits for the page
+
+Evidence for a step is collected *after* the action, and an action having resolved is not the
+same thing as a page having finished. A client-rendered app paints its dashboard 150ms after
+the click that caused it; a collector that reads 3ms later records the screen the action was
+taken **on**, not the screen it produced. The step then reads as a self-loop, the state the
+model classifies belongs to the wrong action, and every reading after it belongs to the step
+before its own — the whole walk is shifted by one, from a single missed render.
+
+So the collector asks the page to stop moving first, inside the document, where the only
+honest rule is available: *nothing has changed for N ms*. A fixed sleep is a guess that is at
+once too slow for a static page and too fast for a slow one.
+
+| The page, after the action | What the reading waits for |
+| --- | --- |
+| moved while it was watched | 250ms of quiet |
+| has not moved at all | 1000ms of idle — the apparent no-op is exactly what a raced capture produces, so that is the claim worth being slow about |
+| has a request of its own still open | until the request lands and the page renders its result (the page hooks are what make this visible) |
+| never goes quiet | 3s, then the reading is taken anyway and reported as `settle.timed_out` |
+
+`settle` travels with the reading rather than staying in the collector: it is a field on the
+evidence record (`observations.jsonl`), a field in the digest, and the thing that resolves the
+transition's `no_observed_change` warning. That warning used to hedge — *either this really is
+a self-loop, or the capture raced the page's own update* — because from outside the page the
+two are indistinguishable, and they call for opposite responses: a self-loop is a finding to
+record, a raced capture is a reading to throw away. With the page's own account of its timing
+in hand, the warning says which one it is looking at, and keeps the hedge only for records
+written before it could tell.
+
+The cost is latency on every observed action: ≥250ms when the page moved, ≥1000ms when it did
+not. The limit is honest rather than hidden — a render scheduled for 2000ms announces nothing,
+so the idle window closes first and the reading is taken — but the reading then carries
+`changes: 0, timed_out: false`, and the transition says the page never moved while it was
+watched. Nothing is claimed that was not seen; what the quiet window cannot see is a page
+whose next update was never announced, which is why the note names that case and says to wait
+for the change explicitly if one was expected.
+
 ### Provenance
 
 `run.json` answers *could someone reproduce this run?* — what code, what
@@ -796,7 +833,7 @@ because the model wrote `"output": {"page": "settings"}` — a value where the s
 ## Tests
 
 ```sh
-npm test        # 6 suites, no browser and no harness
+npm test        # 7 suites, no browser and no harness
 ```
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
@@ -828,6 +865,20 @@ directory was — and asserts the other half: every record returns `null`, nothi
 remembered (no state, no vocabulary, no advanced walk), the sequence is not burned, the
 failure is counted, and a later success clears the *current* problem while leaving the count
 of unwritten records alone, because a gap is a gap.
+
+The race between an action and the reading taken after it gets a suite that reproduces it,
+`test/settle.test.mjs`, because it is the one failure the recorder was built to catch and
+did not. A fake page is driven by real timers and a real `MutationObserver` class: the
+Login click schedules its dashboard 150ms later, exactly as the demo app does, and the
+collector is walked through a sign-in. The assertions are about the seam rather than the
+message — the page is asked to settle **before** it is read, once per action; the reading
+bound to the `browser_click` is the dashboard (`Projects` / `Settings` / `Log out`), not the
+sign-in form it was taken on; the observation carries `settle` and the digest reports it;
+the transition is `sign_in → dashboard` over the right pair of observations with no
+disagreements; and a page that never moves is waited for rather than read through, while a
+page whose *own* request is still open is held until that request lands and renders. Written
+before the code that satisfies it, it failed first with `["capture", "capture"]` and a
+reading of `["button:Login"]` — the recorded defect, reproduced on demand.
 
 What they cannot check is that a real page looks like the capture claims. That is what
 a live run against a browser is for, and both are needed: the diff logic is the piece

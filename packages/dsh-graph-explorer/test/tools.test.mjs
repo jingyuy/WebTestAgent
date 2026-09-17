@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
 import { apply, Config } from '../lib/index.js';
 
 let fails = 0;
@@ -36,6 +37,17 @@ const ctx = {
     register: (tool) => tools.set(tool.name, tool),
     execute: async (call) => {
       if (call.name === 'browser_eval') {
+        // The recorder dispatches two evaluations around every action: the settle that
+        // waits for the page to stop moving, and the reading itself. Only the reading is
+        // served a queued capture — the queue is this test's script of what the page
+        // looks like, and the settle is not asking about the page, only about its clock.
+        const expression = call.arguments?.expression;
+        if (expression === SETTLE_EXPRESSION) {
+          return { isError: false, value: { waited_ms: 0, quiet_ms: 250, idle_ms: 1000, budget_ms: 3000, changes: 0, in_flight: 0, timed_out: false, watched: true } };
+        }
+        if (expression !== CAPTURE_EXPRESSION) {
+          throw new Error('tools.test: an unexpected browser_eval was dispatched by the collector');
+        }
         const value = queue.length > 1 ? queue.shift() : queue[0];
         return { isError: false, value };
       }

@@ -139,6 +139,15 @@ Three harness seams, all verified against the installed 0.1.5-rc.2 types:
 | Semantic tool | `ctx.tools.register(defineTool({…}))` | `graph_observe` — the only path by which a state reaches the graph |
 | Protocol | `ctx.systemPrompt.section({…})` | The act → observe loop the model follows |
 
+The recorder is the seam that needed the most work, because capturing *around* an action is only
+half of it: a client-rendered page can paint its result 250ms after the click that caused it, and a
+reading taken 3ms later records the screen the action was taken **on**. The step then reads as a
+self-loop and every reading after it belongs to the step before its own. So the reading is taken
+after the page has been asked to stop moving — a quiet window inside the document, held open by the
+page's own in-flight requests, capped at 3s — and what the page said about its own timing is
+recorded beside the reading rather than thrown away. See
+[the reading waits for the page](packages/dsh-graph-explorer/README.md#the-reading-waits-for-the-page).
+
 `dsh plugin --profile graph add <tarball>` installs it. Two traps, both hit during the spike:
 
 - **Install a tarball, never a `link:` directory.** A directory install resolves the real path, so

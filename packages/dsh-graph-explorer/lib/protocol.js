@@ -32,6 +32,12 @@ storage, console messages, failed requests and a screenshot. It writes them to:
 - \`${config.runDirName}/capabilities.jsonl\` — the vocabulary your transitions are phrased in
 - \`${config.runDirName}/transitions.jsonl\` — the edges, in the order they were walked
 
+The recording is taken after the page has been given a chance to stop moving: it waits
+for the document to go quiet, and for the requests the page itself started, before it
+reads. The digest reports how that wait went under \`settle\`, and the wait is bounded
+(3s). If \`settle.timed_out\` is true the page was still busy when it was read — wait for
+it and read again rather than treating that reading as final.
+
 You never need to collect that, and you must never invent it. Read
 \`${config.runDirName}/states.jsonl\` when you need to check what you already recorded.
 

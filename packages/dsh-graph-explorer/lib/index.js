@@ -38,7 +38,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CAPTURE_EXPRESSION } from './capture.js';
+import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from './capture.js';
 import { commitRun } from './commit.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
 import {
@@ -318,6 +318,50 @@ const controls = (entries) => (entries ?? [])
     .filter((entry) => CONTROL_ROLES.has(String(entry).split(':')[0]));
 
 /**
+ * What to say when the two captures of a step are identical.
+ *
+ * This used to have to hedge — "either this really is a self-loop, or the capture raced
+ * the page's own update" — because the machinery had no way to tell the two apart, and
+ * they call for opposite responses: a self-loop is a finding to record, while a raced
+ * capture is a reading to throw away and take again.
+ *
+ * The after-action capture now waits for the page to stop moving and reports what it
+ * saw while it waited, so the note can say which one it is holding. The hedge survives
+ * only for records written before that, where it remains the truth about them.
+ */
+const unmovedNote = (settle) => {
+    const common = 'Nothing in the captured surface changed between the two steps — no URL, title, element, value, '
+        + 'checked state, message, storage or request difference.';
+    if (!settle) {
+        return `${common} Either this really is a self-loop, or the capture raced the page's own update (a late `
+            + 'render, an animation, a debounced request).';
+    }
+    if (settle.error) {
+        return `${common} The page was also asked whether it had stopped moving, and did not answer: ${settle.error}. `
+            + 'This reading is therefore not known to be a settled one — read the page again before deriving anything '
+            + 'from this step.';
+    }
+    if (settle.timed_out) {
+        return `${common} The page was still moving when it was read: it was watched for ${settle.waited_ms}ms after `
+            + `the action, never went ${settle.quiet_ms}ms without a change (cap ${settle.budget_ms}ms), and `
+            + `${settle.in_flight ?? 0} request(s) were still open. The reading describes a page mid-update, so this `
+            + 'step is not yet a finding — wait for it to finish and record the transition again.';
+    }
+    if (settle.watched === false) {
+        return `${common} The page could not be watched for changes (this document has no MutationObserver), so the `
+            + `wait says only that ${settle.waited_ms}ms passed rather than that the page was done. Treat this reading `
+            + 'as unconfirmed.';
+    }
+    return `${common} This is not a race: the page was watched for ${settle.waited_ms}ms after the action, and `
+        + ((settle.changes ?? 0) > 0
+            ? `it had moved and then held still for ${settle.quiet_ms}ms. The step left the surface as it was: `
+            : 'nothing moved in it at all. A page whose next update is scheduled beyond that window announces '
+                + 'nothing and cannot be waited for, so if you expected this step to change the page, wait for the '
+                + 'change explicitly and read again; on this evidence the step left the surface as it was: ')
+        + 'record it as a self-loop, or as an action with no visible effect on this page.';
+};
+
+/**
  * Put the model's account of a step next to the machinery's account of it.
  *
  * This is the whole reason a transition is recorded by a tool rather than written
@@ -340,7 +384,7 @@ const controls = (entries) => (entries ?? [])
  * whose whole job is being right about a disagreement, so it should not be the one
  * piece that is only exercised by a live run.
  */
-export function crossCheckEffects({ effects, before, after, fromState, toState, observedChange }) {
+export function crossCheckEffects({ effects, before, after, fromState, toState, observedChange, settle }) {
     const errors = [];
     const warnings = [];
     const seenMessages = new Set([...statusTexts(before), ...statusTexts(after)]);
@@ -393,7 +437,7 @@ export function crossCheckEffects({ effects, before, after, fromState, toState, 
     if (observedChange === null) {
         warnings.push({
             kind: 'no_observed_change',
-            detail: 'Nothing in the captured surface changed between the two steps — no URL, title, element, value, checked state, message, storage or request difference. Either this really is a self-loop, or the capture raced the page\'s own update (a late render, an animation, a debounced request).',
+            detail: unmovedNote(settle),
         });
     }
 
@@ -535,6 +579,38 @@ export function apply(ctx, config) {
     };
 
     /**
+     * Ask the page to stop moving, and hand back what it said about its own timing.
+     *
+     * This exists because of a failure the recorder was built to catch and did not:
+     * the action resolves, the collector reads the page a few milliseconds later, and
+     * a client-rendered page that paints its result any time after that is read as the
+     * page the action was taken *on* rather than the page it produced. The step then
+     * reads as a self-loop, and every reading after it belongs to the step before its
+     * own — the walk is shifted by one from there on.
+     *
+     * The wait happens inside the document, because only the page knows whether it has
+     * stopped: "nothing has changed for N ms" is the honest rule, where a fixed sleep is
+     * a guess that is too slow for a static page and too fast for a slow one. The page
+     * watches its own mutations and its own in-flight requests (the network hooks are
+     * what make the second half possible), and the timing it reports is recorded beside
+     * the reading it was taken for.
+     *
+     * Never throws, for the same reason `capture` does not: a page that cannot answer
+     * must still produce a reading, and a failed settle is recorded as a failed settle
+     * rather than passed off as a quiet page.
+     */
+    const settlePage = async (exec) => {
+        try {
+            const result = await dispatch(exec, 'browser_eval', { expression: SETTLE_EXPRESSION });
+            if (result.isError) return { error: result.error?.message ?? 'browser_eval failed' };
+            const value = result.value;
+            return value && typeof value === 'object' ? value : { error: 'the page did not report its timing' };
+        } catch (error) {
+            return { error: error instanceof Error ? error.message : String(error) };
+        }
+    };
+
+    /**
      * Read the page. Never throws: a broken observation must degrade into a
      * recorded failure, never into a broken browser action. The failure IS
      * recorded, because a silently missing observation is exactly the false-pass
@@ -547,12 +623,23 @@ export function apply(ctx, config) {
      * must not do is escape here, because a browser action that worked would then be
      * reported to the model as a failure, and the model would retry it against a page
      * that had already moved on.
+     *
+     * The reading is taken after the page has been given the chance to stop moving
+     * (`settlePage`), and what the page said about its own timing travels with the
+     * record it was taken for.
      */
     const capture = async (exec, { tool, toolArgs, screenshotPath }) => {
         const store = ensureRun(exec);
+        let settle = null;
         let captureValue = null;
         let captureError = null;
         try {
+            // The wait comes first, so the reading that follows describes a page that
+            // has stopped. Both are wrapped together, but a settle failure is not a
+            // capture failure: it is recorded as its own fact and the reading is taken
+            // anyway.
+            settle = await settlePage(exec);
+            if (settle.error) warn(`the page did not report its timing after ${tool}`, settle.error);
             const result = await dispatch(exec, 'browser_eval', { expression: CAPTURE_EXPRESSION });
             if (result.isError) {
                 captureError = result.error?.message ?? 'browser_eval failed';
@@ -581,6 +668,7 @@ export function apply(ctx, config) {
                 toolArgs,
                 phase: 'after',
                 capture: captureValue,
+                settle,
                 error: captureError,
                 screenshot,
             });
@@ -806,6 +894,13 @@ export function apply(ctx, config) {
                     }
                     : null,
                 capture_error: latest.capture_error ?? null,
+                // What the page said about its own timing when this reading was taken:
+                // how long it was watched after the action, whether it was still moving
+                // at the end, and how many of its own requests were still open. Reported
+                // here as well as in the evidence record, because a reading taken on a
+                // page that never went quiet is a different claim from one taken on a
+                // page that had, and the model is the one that has to know which it got.
+                settle: latest.settle ?? null,
                 // Whether the collector was watching before this document ran its own
                 // scripts. It qualifies the lists below: an empty `network` is a fact —
                 // "this document made no requests" — only when this says `document_start`.
@@ -1151,6 +1246,10 @@ export function apply(ctx, config) {
                 fromState,
                 toState,
                 observedChange,
+                // How the reading at the end of this step was taken. A capture that
+                // waited for the page to stop moving is what tells the no-change warning
+                // below the difference between a self-loop and a missed render.
+                settle: after.settle ?? null,
             });
             if (!beforeCapture) {
                 warnings.push({

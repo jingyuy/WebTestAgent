@@ -82,5 +82,28 @@ check('controls on one side only is left alone', loop({ appeared: ['button:Proje
 check('the same diff between two different states is left alone', loop({ appeared: ['button:Save'], disappeared: ['button:Add project'] }, 'state_a', 'state_b'), []);
 check('a self-loop with no diff reports only the missing change', loop(null), ['no_observed_change']);
 
+// --- what the nothing-changed note is allowed to claim ----------------------
+// The note is read by the model at the moment it decides whether its step was real, so
+// it is the one piece of prose here worth pinning down. A hedge where a finding is
+// available costs a re-read; a finding where the evidence only supports a hedge invents
+// one, and a self-loop and a missed render call for opposite responses.
+const note = (settle) => crossCheckEffects({
+  effects: [], before: cap(), after: cap(), toState: 'state_y', observedChange: null, settle,
+}).warnings.find((warning) => warning.kind === 'no_observed_change').detail;
+const settled = { waited_ms: 400, quiet_ms: 250, idle_ms: 1000, budget_ms: 3000, changes: 1, in_flight: 0, timed_out: false, watched: true };
+
+check('an unsettled reading keeps the hedge, because for it the hedge is true',
+  note(undefined).includes("raced the page's own update"), true);
+check('a settled reading reports the finding instead', note(settled).includes('not a race'), true);
+check('and stops offering the race as an option', note(settled).includes('raced the page'), false);
+check('a page that never stopped moving is not handed over as a finding',
+  note({ ...settled, changes: 12, timed_out: true }).includes('still moving'), true);
+check('a page that never moved says how long it was watched',
+  note({ ...settled, changes: 0 }).includes('nothing moved in it at all'), true);
+check('a page that could not be watched does not claim to have been',
+  note({ ...settled, watched: false }).includes('MutationObserver'), true);
+check('a settle that failed is named in the note',
+  note({ error: 'Execution context was destroyed' }).includes('Execution context was destroyed'), true);
+
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);
