@@ -89,7 +89,7 @@ instruction, what model, what starting point:
   "model": "deepseek-flash",
   "session_id": "session-dc4d1554-...",
   "agent_preset": null,
-  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.11" }
+  "plugin": { "name": "@webtestagent/dsh-graph-explorer", "version": "0.1.12" }
 }
 ```
 
@@ -307,6 +307,48 @@ Per candidate, and recorded in `report.decisions[]`:
   endpoint evidence and no self-contradiction; `superseded` is not the same verdict as
   `rejected`, and the report keeps them apart.
 
+### Journeys are derived, not decided
+
+`graph.schema.json` has a `journeys[]` array and `journey.schema.json` holds `start_state`,
+so a graph has always been able to say where a walk begins and which steps it is made of.
+Until 0.1.12 nothing assembled one, which is why `reachability` had no entry state to flood
+from.
+
+The assembly is mechanical and stays mechanical. `transitions.jsonl` is already an ordered
+list of walks — one record per step, in the order the steps were taken — so the commit reads
+it back and starts a journey at the first step, appending ids while each step starts where
+the one before it ended. Three things cut a run in two:
+
+- **the walk jumped** — a step that starts at state C while the previous step ended at state
+  B. Both states exist and both edges are committed; what is missing is the link between
+  them, and calling the two steps one walk would invent the move that connects them.
+- **the edge was not committed** — the candidate was refused (or superseded), so there is no
+  edge to walk.
+- **the edge does not join two committed states** — an endpoint state was gated out (no
+  detection, a colliding identity), so the step has nowhere to land in *this* graph.
+
+Every cut is recorded rather than hidden: `report.journeys.breaks` carries the reason and
+the two ends, and a step repeating an earlier id is marked `repeat_of_earlier_step` in
+`metadata.extra.steps[]`, because a walk that signs in twice is two steps and one edge.
+
+What a journey cannot carry is a goal. A browser session records what was done, never what
+was being attempted, so:
+
+- `name` is derived from the endpoints of the walk and says so —
+  `Derived walk 1: state_login to state_dashboard (3 step(s))`;
+- `criticality` is **omitted rather than guessed**. The schema's `criticality` is a closed
+  enum (`smoke | critical | standard | extended`, default `standard`), so writing prose there
+  would be a schema violation; the reason goes in `metadata.extra.criticality` and the
+  default applies.
+- `metadata.status` is `inferred` and `producer` is `importer:dsh-graph-explorer` — not
+  `llm:<model>`, because no model judged this, the importer read it off the log;
+- `metadata.extra.goal_stated` is `false`, and the graph carries a warning saying that a test
+  generator has to supply the goal before a derived journey becomes a test.
+
+Evidence is carried across from the steps and deduplicated by observation and role. It has
+to be: the schema's `evidenceRef` points at observations, never at transitions, so a
+journey's evidence is the readings its steps rested on.
+
 ### The report
 
 `commit_report.json` is the run's own account of the commit, written even when the commit
@@ -317,6 +359,7 @@ generated_at  command  run_dir  application  start_url  instruction  version
 ok  blocking[]  gates[]
 states{committed, candidates, deduplicated, readings}
 capabilities{committed, candidates}   transitions{candidates, distinct, committed, rejected, superseded}
+journeys{assembled, walked, unusable_steps, breaks, entry_states}
 observations{records, carried}        elements{declared, conflicts, shared}
 decisions[]   findings[]   invariants[]   notes[]   warnings[]
 ```
@@ -325,8 +368,9 @@ decisions[]   findings[]   invariants[]   notes[]   warnings[]
 `findings[]` is flat and carries its `scope`, so a dropped assertion on a *committed* edge
 is as visible as one on a refused edge — the earlier shape hid them inside
 `decisions[].warnings`, which is exactly where nobody looks; `invariants[]` is §14
-(`identity_unique`, `reference_integrity`, `reachability`, `feature_closure`,
-`version_coherence`, …), each with a severity and only some of them blocking;
+(`identity_unique`, `reference_integrity`, `journey_is_a_walk`, `reachability`,
+`feature_closure`, `version_coherence`, …), each with a severity and only some of them
+blocking;
 `observations{records, carried}` says how many raw records travelled into the graph as
 evidence refs; `notes[]` carries the recorder's own warnings, graded by
 `NOTE_SEVERITY`, so `self_loop_but_controls_changed` — read at the wrong moment, the
@@ -546,13 +590,18 @@ the assembled prompt; and a live run against `demo-app` produced 5 states, 6
 capabilities and 6 transitions, reusing one transition id for a re-walked edge and
 reporting a misplaced reading as a `chain_break` instead of letting it pass.
 
-**Proven on the recorded run.** A real run's eleven state records (four readings, seven
+**Proven on the recorded run, 0.1.10.** A real run's eleven state records (four readings, seven
 sightings) commit to four states and two edges, and the resulting `graph.json` validates
-against the normative schemas with no errors — with one candidate refused, one edge superseded, an element that belongs to two states attributed to one,
-a self-loop read at the wrong moment arriving as an error, and a URL assertion with no
-value pinned to the route its own captures came from.
+against the normative schemas with no errors — with one candidate refused (a self-loop whose
+two readings share no interactive surface, arriving as an error rather than a warning), three
+elements attributed to the single state that saw them first, two detections dropped because
+one of the state's own raced readings refutes them, and two assertions dropped for naming
+something the graph does not declare. Re-committed under 0.1.12 it also yields a journey:
+`transition_logout` then `transition_login`, a sign-out and sign-in round trip walked from
+`state_dashboard_authenticated_auth_signed_in` — the first time a recorded walk became a
+`journey` rather than only a transition log.
 
-**Proven by a live agent run.** A sign-in walk against `demo-app` called `graph_commit`
+**Proven by a live agent run, 0.1.11.** A sign-in walk against `demo-app` called `graph_commit`
 as its own last step and committed 6 states, 4 capabilities and 7 edges from 9 readings;
 the graph validates. The run's defects landed in the report rather than in the graph, which
 is the point: a dashboard state whose `current_user` / `project_list` detection was refuted
@@ -565,6 +614,25 @@ committed graph carries every one of those findings in its own `warnings[]`, so 
 suffix, and `element_declared_in_several_states` repeats itself once per element per state
 family, which a shared form turns into a wall of near-identical warnings.
 
+**Proven by a live agent run, 0.1.12.** A 9-action sign-in / sign-out / sign-in walk
+committed `ok: true` with no blocking gates, and the graph validates — 4 states, 3
+capabilities (`enter_credentials`, `login`, `logout`) and 4 edges from 5 distinct transition
+ids (1 refused as `self_loop_but_controls_changed`, 2 superseded), plus **one 6-step journey
+and one honest break**: the second sign-in's `login` edge was refused because its capture
+raced the page's own update, so the walk was cut there and reported as
+`unusable_steps: 1` rather than being stitched together. `journey_is_a_walk` passed at error
+severity (`1 journey(s) walk 6 step(s), and every step starts where the one before it
+ended.`) and `reachability` passed from a *real derived entry state* — which is the check
+this file used to list as impossible. The journey is an honest round trip: the fifth and
+sixth steps are marked `repeat_of_earlier_step`, because a walk that signs in twice is six
+steps and four edges.
+
+The same run is also the clearest demonstration of why a bad reading is reported rather than
+repaired: the harness captured the hidden login form as `visible: true` twice, so
+`transition_login` carried `no_observed_change`, a `detection` on the dashboard state was
+`detection_refuted_by_evidence`, and one edge was refused outright. None of that stopped the
+graph committing, and all of it is in the graph's own `warnings[]`.
+
 **Known gaps, in the order they will bite:**
 
 1. **Initial document loads are not observed.** The network/console hooks are
@@ -573,20 +641,30 @@ family, which a shared form turns into a wall of near-identical warnings.
    (SPA) traffic *is* captured, which is the case `transition.effects[].request`
    needs. Closing the gap requires Playwright's `addInitScript`, i.e. a source patch
    to `dsh-browser`.
-2. **The commit cannot yet judge everything the schema can express.** It enforces
-   identity uniqueness, reference integrity and declaration ownership, and the output
-   is schema-valid; but `reachability` and `feature_closure` are reported as warnings
-   because a walk that did not reach a state is not evidence that the state is
-   unreachable — the run is a sample, and the commit says so rather than turning an
-   incomplete walk into a failed graph.
-3. **No journey assembly.** The walk is reconstructible from the observation chain
-   but is not yet assembled mechanically. It should be, since it is mechanical:
-   `journey.transitions[]` is an ordered list of ids and the walk already is one.
+2. **Some rules are judgement, not proof.** `feature_closure` is reported rather than
+   enforced (`features` has no source at all, see gap 6), and `reachability` is a warning
+   as well — but for a different and narrower reason now. Since 0.1.12 it floods from the
+   derived journey start states, so it is a real check that *passes* on a real walk (the
+   0.1.12 live run above); it stays a warning because a walk that avoided a state is not
+   evidence that the state is unreachable. It reports three things separately: states not
+   reachable from an entry, states with no outgoing edge and no walk ending there
+   (stranded), and where the walks stop — the last being where a sample ends, not where the
+   application does.
+3. **A journey is a walk, not a goal.** Assembly is mechanical and now done (see
+   [Journeys are derived, not decided](#journeys-are-derived-not-decided)), so this gap is
+   only half closed: `journeys[]` carries the order the steps were taken and a `name`
+   derived from the endpoints, but nothing in a browser session says *what was being
+   attempted*, so `metadata.extra.goal_stated` is `false` and `criticality` is left to the
+   schema default. Closing the other half needs a model that says what it was trying to do,
+   i.e. a `goal` on the journey rather than a derived name.
 4. **State ids grow without bound.** Every dimension the model chooses is concatenated
-   into the id, so a field value can end up in one:
-   `state_project_list_authenticated_form_error_duplicate_name_panel_none_projects_seeded`.
-   The dimensions are the model's to choose and they are all real, so the fix is a
-   budget (a limit on dimensions, or a hash past N) rather than a check.
+   into the id, so a field value can end up in one, and a derived journey id inherits the
+   whole thing:
+   `journey_login_anonymous_auth_signed_out_to_login_anonymous_auth_signed_out_form_cre`
+   is one real 0.1.12 id (the slug is cut off at a length budget). The dimensions are the
+   model's to choose and they are all real, so the fix is a budget (a limit on dimensions,
+   or a hash past N) rather than a check — and the same budget wants to apply to derived
+   journey ids, which are built from two of them.
 5. **Element state can outrank state identity.** The model may treat a filled-in field
    as a new state, which mints a state per value. The schema's `identity` is about the
    page, not the widget, but the tool cannot tell the two apart — it only knows the
@@ -596,12 +674,17 @@ family, which a shared form turns into a wall of near-identical warnings.
    structure rather than something the machinery can observe, so it needs a model-facing
    tool. Optional in the schema, so its absence costs a valid graph rather than a
    committable one — but `graph_commit` has to be able to emit it.
-7. **There is no entry state, so `reachability` cannot be a real check.**
-   `graph.schema.json` has no field designating where a journey starts, so the invariant
-   reports every state in a committed graph as unreachable from an entry that does not
-   exist. It is a warning, and it is reported rather than silently passed, but the fix
-   belongs in the schema — a graph that cannot say where it starts cannot answer whether
-   anything is reachable.
+7. **Closed in 0.1.12: there *is* an entry state.** This file used to claim that
+   `graph.schema.json` has no field saying where a journey starts, and that the fix belonged
+   in the schema. That was wrong, and the check it excused was worse than useless: it
+   reported *every* state in a committed graph as unreachable. `graph.schema.json` has a
+   `journeys[]` array, and `journey.schema.json#start_state` is the entry state —
+   *"State the journey assumes as a starting point. Derived from the first transition when
+   omitted."* The missing piece was never the schema, it was the plugin: nothing assembled a
+   journey from the walk it had already recorded. It does now, so `journey_is_a_walk` and
+   `reachability` are both real checks against a real entry state. What remains is only the
+   limitation in gap 2 — an entry state derived from a sample answers *what this walk
+   reached*, not *what the application can reach*.
 
 ## Tests
 
@@ -616,6 +699,17 @@ effects, missing captures), the reconciler (a synthesized run committed end to e
 then every rule one at a time — gates, refutation, supersession, ownership, dropped
 references, and the filesystem behaviour of a refused and a forced commit), and a
 fake-harness integration pass over all three tools' refusal paths.
+
+The journey rules get the same treatment, and they need it more than most: the assembler
+*cannot* produce a broken walk — it cuts one instead — so `journeys[]` reaching the graph
+malformed means the logs were edited, which is exactly what `invariantsOf` is fed
+directly to check. The suite builds walk-shaped graphs by hand and asserts that a jump is an
+error naming both ends, that a step the graph does not have is a dangling reference, that a
+`start_state` disagreeing with the first step is refused, and that a graph whose states are
+reachable only from a walk that does not exist is warned about rather than passed. Then the
+assembler itself: two steps that do not join become two journeys, a repeated edge stays a
+separate step, and a step whose edge was never committed cuts the walk into a recorded
+break.
 
 What they cannot check is that a real page looks like the capture claims. That is what
 a live run against `demo-app` is for, and both are needed: the diff logic is the piece

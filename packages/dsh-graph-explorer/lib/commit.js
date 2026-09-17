@@ -535,6 +535,141 @@ const commitMetadata = ({ status, confidence, producer, createdAt, extra }) => {
 };
 
 /**
+ * The walks in the run, reassembled from the transitions log.
+ *
+ * `transitions.jsonl` is written in the order the steps were taken, and the store's own header
+ * says that is the only thing which makes a journey reconstructible afterwards. So a journey here
+ * is *derived* rather than invented: the log is read in that order and cut into the longest runs
+ * of live steps where each step starts in the state the previous one ended in. That is invariant
+ * 5 (a journey is a walk) applied to the evidence instead of to a claim, which is why the check
+ * at the other end of a commit has something real to check.
+ *
+ * Three things cut a run, and all three are facts about the walk rather than opinions about it:
+ *
+ *   - a step whose edge was refused. A refused edge is not an edge, so a journey through it would
+ *     name a transition this graph does not have (invariant 2).
+ *   - a step whose edge is in the graph but does not join two committed states. Same reason: a
+ *     journey walks states that exist.
+ *   - a step that starts somewhere other than where the previous step ended. The model may have
+ *     re-opened a page, or the recorder may have missed a navigation; either way the walk jumped,
+ *     and a journey that bridged the jump would be the graph inventing an edge.
+ *
+ * What a journey does *not* get is a goal. Nothing in a browser session says what a user was
+ * trying to achieve, so the name is derived from the endpoints and `metadata.extra.goal_stated` is
+ * false. A generated test needs a goal, and that is the one part of this a model has to supply.
+ *
+ * Pure and exported for the same reason `reconcile` is: this is the rule that decides what the
+ * finished graph claims was walked, so it is worth testing without a filesystem or a browser.
+ */
+export function assembleJourneys({ transitions = [], edges = [], stateIds = new Set(), generatedAt = null }) {
+  const byId = new Map(edges.map((edge) => [edge.id, edge]));
+  const strands = [];
+  const breaks = [];
+  const unusableSteps = [];
+  let current = null;
+
+  for (const record of transitions) {
+    const id = record.transition_id ?? record.id;
+    if (!id) continue;
+    const edge = byId.get(id);
+    const previous = current?.steps.length ? current.steps[current.steps.length - 1] : null;
+    const joinable = edge && stateIds.has(edge.from_state) && stateIds.has(edge.to_state);
+    if (!joinable) {
+      if (previous) {
+        breaks.push({
+          after: previous.to_state,
+          before: record.from_state ?? null,
+          transition: id,
+          reason: edge ? 'edge_does_not_join_committed_states' : 'edge_not_committed',
+        });
+      }
+      unusableSteps.push(id);
+      current = null;
+      continue;
+    }
+    const from = edge.from_state;
+    const to = edge.to_state;
+    if (!previous || previous.to_state !== from) {
+      if (previous) {
+        breaks.push({ after: previous.to_state, before: from, transition: id, reason: 'walk_jumped' });
+      }
+      current = { steps: [] };
+      strands.push(current);
+    }
+    current.steps.push({
+      id,
+      from_state: from,
+      to_state: to,
+      // A step that re-walks an edge already in this journey. Computed from the strand rather than
+      // read off the log's `repeated` flag, because "repeated" is a fact about the walk so far and
+      // the flag is a fact about the store's index.
+      repeated: current.steps.some((step) => step.id === id),
+    });
+  }
+
+  const journeys = [];
+  const used = new Set();
+  strands.forEach((strand, index) => {
+    const [first] = strand.steps;
+    const last = strand.steps[strand.steps.length - 1];
+    const stem = slugify(String(first.from_state).replace(/^state_/, ''))
+      + '_to_' + slugify(String(last.to_state).replace(/^state_/, ''));
+    let id = 'journey_' + stem;
+    let suffix = 2;
+    while (used.has(id)) id = 'journey_' + stem + '_' + suffix++;
+    used.add(id);
+
+    // Evidence is observations and only observations: `common.schema.json#/$defs/evidenceRef`
+    // points at a raw reading and at nothing else. So a journey's evidence is the readings its
+    // steps were made from, deduplicated by reading and role.
+    const evidence = new Map();
+    for (const step of strand.steps) {
+      for (const ref of byId.get(step.id)?.evidence ?? []) {
+        const key = `${ref.observation}:${ref.role}`;
+        if (!evidence.has(key)) evidence.set(key, ref);
+      }
+    }
+
+    journeys.push({
+      id,
+      name: `Derived walk ${index + 1}: ${first.from_state} to ${last.to_state} (${strand.steps.length} step(s))`,
+      start_state: first.from_state,
+      transitions: strand.steps.map((step) => step.id),
+      ...(evidence.size ? { evidence: [...evidence.values()] } : {}),
+      tags: ['derived'],
+      metadata: commitMetadata({
+        status: 'inferred',
+        producer: 'importer:dsh-graph-explorer',
+        createdAt: generatedAt ?? undefined,
+        extra: {
+          derivation: 'transitions.jsonl in walk order, cut where a step does not start where the previous one ended, or where its edge is not a committed edge between two committed states',
+          steps: strand.steps.map((step) => ({
+            transition: step.id,
+            from_state: step.from_state,
+            to_state: step.to_state,
+            ...(step.repeated ? { repeat_of_earlier_step: true } : {}),
+          })),
+          // A walk that repeats an edge carries the same transition id more than once, because a
+          // journey is a sequence of steps and two adds to one cart are two steps. The count of
+          // distinct transitions is here so that difference is readable without re-deriving it.
+          distinct_transitions: new Set(strand.steps.map((step) => step.id)).size,
+          goal_stated: false,
+          criticality: 'not set: the walk was recorded, the priority was not judged, so the schema default (standard) applies',
+          name_derived_from: `${first.from_state} to ${last.to_state}, the endpoints of the walk rather than a stated goal`,
+        },
+      }),
+    });
+  });
+
+  return {
+    journeys,
+    steps: strands.reduce((total, strand) => total + strand.steps.length, 0),
+    unusableSteps,
+    breaks,
+  };
+}
+
+/**
  * Reconcile a run's logs into a graph.
  *
  * Pure: it reads nothing from disk and writes nothing. `commitRun` does the I/O, so the
@@ -983,6 +1118,18 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     });
   }
 
+  // --- journeys: the walk, reassembled ------------------------------------
+  // Now that the edges are decided, the walk can be read back as journeys. `canonicalStates` is
+  // the set of state ids the graph is about to carry, which is what a journey's steps have to
+  // join: every one of them becomes a `stateRecords[]` entry below, gated or not.
+  const assembled = assembleJourneys({
+    transitions,
+    edges: committedEdges,
+    stateIds: new Set(canonicalStates.map((record) => record.state_id)),
+    generatedAt,
+  });
+  const journeys = assembled.journeys;
+
   // --- states, now that the committed edges are known --------------------
   const stateRecords = [];
   for (const record of canonicalStates) {
@@ -1357,6 +1504,11 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   if (!run.application?.version) {
     graphWarnings.push('application: no application version was recorded, so this graph cannot be tied to a build — invariant 9 (version coherence) is vacuous here, and evidence from a different build cannot be told apart from this one.');
   }
+  if (journeys.length) {
+    graphWarnings.push(
+      `journeys: ${journeys.length} walk(s) were reassembled from the order the steps were taken, and none of them carries a stated goal — nothing in a browser session says what a user was trying to achieve. Each \`name\` is derived from the endpoints of its walk and each \`criticality\` is the schema default, so a test generator must supply the goal before these become tests.`,
+    );
+  }
 
   // `coverage` is where the graph admits what it does not cover. Optional in the schema and the
   // honest place to say it: a route the walk visited but never turned into a state is a hole, and
@@ -1368,7 +1520,8 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     unmodelled_routes: visitedRoutes.filter((route) => !modelledRoutes.includes(route)),
     notes: `${stateRecords.length} state(s) reconciled from ${observations.length} reading(s); `
       + `${committedEdges.length} committed edge(s) from ${transitions.length} candidate(s); `
-      + `${sightings.length} repeat reading(s) collapsed.`,
+      + `${sightings.length} repeat reading(s) collapsed; `
+      + `${journeys.length} walk(s) reassembled from ${assembled.steps} step(s), with ${assembled.unusableSteps.length} step(s) that could not be walked through.`,
   };
 
   const graph = {
@@ -1406,7 +1559,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     states: stateRecords,
     transitions: committedEdges,
     apis: [],
-    journeys: [],
+    journeys,
     observations: observationRecords,
     coverage,
     warnings: graphWarnings,
@@ -1460,6 +1613,16 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     rejected: decisions.filter((item) => item.decision === 'rejected').length,
     superseded: decisions.filter((item) => item.decision === 'superseded').length,
   };
+  // Journeys are not decided, they are read back: `walked` is the number of steps in the log that
+  // are part of a journey, `unusable_steps` the number that are not (a refused edge, or an edge
+  // that does not join committed states), and `breaks` the places the walk was cut.
+  report.journeys = {
+    assembled: journeys.length,
+    walked: assembled.steps,
+    unusable_steps: assembled.unusableSteps.length,
+    breaks: assembled.breaks.length,
+    entry_states: distinct(journeys.map((journey) => journey.start_state)),
+  };
   report.observations = { records: observations.length, carried: observationRecords.length };
   report.elements = {
     declared: declarations.size,
@@ -1471,6 +1634,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     '`findings[].severity` describes the candidate record, not the document: `error` means a claim was refused (and the refusal is the repair), `warning` means something was dropped or weakened, `info` means it was noted and carried through.',
     'The raw logs are not touched by a commit. Every record this report judged is still in the run directory exactly as the walk wrote it, which is why a rejected candidate can be re-judged later without re-walking anything.',
     'One candidate does not become one edge: candidates sharing a `transition_id` are the same edge walked more than once, and only the best of them is committed. `decisions[]` records what happened to the rest.',
+    '`journeys[]` is derived, not decided: it is the transitions log read back in walk order and cut where a step does not start where the previous one ended, or where its edge is not a committed edge between two committed states. The walk is evidence; a goal is not, so `name` is built from the endpoints of the walk and `metadata.extra.goal_stated` is false.',
   ];
 
   report.decisions = decisions;
@@ -1499,13 +1663,15 @@ export function invariantsOf(graph) {
   const states = graph.states ?? [];
   const transitions = graph.transitions ?? [];
   const capabilities = graph.capabilities ?? [];
+  const journeys = graph.journeys ?? [];
   const stateIds = new Set(states.map((state) => state.id));
+  const transitionById = new Map(transitions.map((transition) => [transition.id, transition]));
 
   // 1. uniqueness, including element ids across every state.
   const seenIds = new Map();
   const elementIds = new Map();
   const duplicates = [];
-  for (const [scope, list] of [['states', states], ['transitions', transitions], ['capabilities', capabilities], ['observations', graph.observations ?? []]]) {
+  for (const [scope, list] of [['states', states], ['transitions', transitions], ['capabilities', capabilities], ['journeys', journeys], ['observations', graph.observations ?? []]]) {
     for (const item of list) {
       if (!item?.id) continue;
       const known = seenIds.get(item.id);
@@ -1562,6 +1728,21 @@ export function invariantsOf(graph) {
     for (const evidence of capability.evidence ?? []) {
       const id = typeof evidence === 'string' ? evidence : evidence?.transition;
       if (id && !transitions.some((transition) => transition.id === id)) dangling.push(`${capability.id}.evidence → ${id}`);
+    }
+  }
+  // A journey is a new set of references and gets checked like every other one: a journey naming an
+  // edge the graph does not have, or starting somewhere that is not a state, is exactly the kind of
+  // dangling pointer an ungenerated test is made of.
+  const actors = (graph.application?.actors ?? []).map((actor) => actor?.id).filter(Boolean);
+  for (const journey of journeys) {
+    if (journey.start_state && !stateIds.has(journey.start_state)) dangling.push(`${journey.id}.start_state → ${journey.start_state}`);
+    for (const transitionId of journey.transitions ?? []) {
+      if (!transitionById.has(transitionId)) dangling.push(`${journey.id}.transitions → ${transitionId}`);
+    }
+    if (journey.actor && actors.length && !actors.includes(journey.actor)) dangling.push(`${journey.id}.actor → ${journey.actor}`);
+    for (const evidence of journey.evidence ?? []) {
+      const id = typeof evidence === 'string' ? evidence : evidence?.observation;
+      if (id && !observationIds.has(id)) dangling.push(`${journey.id}.evidence → ${id}`);
     }
   }
   results.push({
@@ -1621,45 +1802,99 @@ export function invariantsOf(graph) {
     detail: collisions.length ? collisions.join('; ') : `no two of ${states.length} states share (page_type, variant, dimensions).`,
   });
 
-  // 5. journeys — none are produced yet, so this is vacuous rather than passing.
-  results.push({
-    code: 'journey_is_a_walk',
-    name: '§14.5 journey is a walk',
-    severity: 'info',
-    ok: true,
-    detail: 'no journeys are committed yet, so there is no walk to check.',
-  });
-
-  // 6. reachability. A partial walk is expected, so this never gates the commit.
-  const incoming = new Map();
-  for (const transition of transitions) {
-    incoming.set(transition.to_state, (incoming.get(transition.to_state) ?? 0) + 1);
-  }
-  const entryCandidates = states.filter((state) => !incoming.has(state.id) && !transitions.some((transition) => transition.from_state === state.id));
-  const reachable = new Set();
-  const queue = states.filter((state) => !incoming.has(state.id)).map((state) => state.id);
-  for (const id of queue) reachable.add(id);
-  while (queue.length) {
-    const current = queue.shift();
-    for (const transition of transitions.filter((item) => item.from_state === current)) {
-      if (!reachable.has(transition.to_state)) {
-        reachable.add(transition.to_state);
-        queue.push(transition.to_state);
+  // 5. journeys. A journey is a walk: it starts where its first transition starts, and every later
+  // transition starts where the previous one ended. `journey.start_state` is omitted when it is the
+  // first transition's `from_state` (the schema derives it), so both spellings are checked. The one
+  // thing that matches any state is the wildcard `from_state: "*"`, which nothing in this commit
+  // emits but which the schema's own open questions allow a hand-written graph to use.
+  const journeyProblems = [];
+  for (const journey of journeys) {
+    const ids = Array.isArray(journey.transitions) ? journey.transitions : [];
+    if (!ids.length) {
+      journeyProblems.push(`${journey.id} walks no transitions`);
+      continue;
+    }
+    const edges = ids.map((id) => transitionById.get(id) ?? null);
+    const missing = ids.filter((id, index) => edges[index] === null);
+    if (missing.length) {
+      // Invariant 2 says the same thing; saying it here too is what makes this rule readable on
+      // its own, and a walk whose steps are not edges cannot be judged as a walk at all.
+      journeyProblems.push(`${journey.id} walks ${missing.join(', ')}, which are not edges in this graph`);
+      continue;
+    }
+    const start = journey.start_state ?? edges[0].from_state;
+    if (start !== edges[0].from_state && edges[0].from_state !== '*') {
+      journeyProblems.push(`${journey.id} starts at ${start} but its first step ${edges[0].id} starts at ${edges[0].from_state}`);
+    }
+    for (let index = 1; index < edges.length; index++) {
+      const previous = edges[index - 1];
+      const current = edges[index];
+      if (previous.to_state === '*' || current.from_state === '*') continue;
+      if (previous.to_state !== current.from_state) {
+        journeyProblems.push(`${journey.id} jumps: ${previous.id} ends at ${previous.to_state} and ${current.id} starts at ${current.from_state}`);
       }
     }
   }
+  const walkedSteps = journeys.reduce((total, journey) => total + (journey.transitions ?? []).length, 0);
+  results.push({
+    code: 'journey_is_a_walk',
+    name: '§14.5 journey is a walk',
+    severity: journeys.length ? 'error' : 'info',
+    ok: journeyProblems.length === 0,
+    detail: journeyProblems.length
+      ? journeyProblems.slice(0, 12).join('; ')
+      : journeys.length
+        ? `${journeys.length} journey(s) walk ${walkedSteps} step(s), and every step starts where the one before it ended.`
+        : 'no journeys are committed, so there is no walk to check.',
+  });
+
+  // 6. reachability. A journey's start is an entry state — that is what §14.6 needs and all it
+  // needs, since the walk is where the graph says it began. It stays a warning: a state that no
+  // committed walk reaches is a fact about the run (an edge was refused, or a state was read
+  // without being walked to), not a contradiction in the document.
+  const entryStates = distinct(journeys.map((journey) => {
+    const first = transitionById.get((journey.transitions ?? [])[0]);
+    return journey.start_state ?? first?.from_state ?? null;
+  })).filter((id) => stateIds.has(id));
+  const reachable = new Set();
+  const queue = [...entryStates];
+  for (const id of queue) reachable.add(id);
+  while (queue.length) {
+    const current = queue.shift();
+    for (const transition of transitions) {
+      if (transition.from_state !== current && transition.from_state !== '*') continue;
+      if (reachable.has(transition.to_state)) continue;
+      reachable.add(transition.to_state);
+      queue.push(transition.to_state);
+    }
+  }
   const unreachableStates = states.filter((state) => !reachable.has(state.id)).map((state) => state.id);
-  const terminals = states.filter((state) => !transitions.some((transition) => transition.from_state === state.id)).map((state) => state.id);
+  // The end of a walk is a state the graph genuinely has nothing more to say about — the sample
+  // stopped there, which is not the same as the application being finished — so it is reported as
+  // what it is and does not count against the graph. A state with no outgoing edge that no walk
+  // ended at is the one worth looking at.
+  const walkEnds = distinct(journeys.map((journey) => transitionById.get((journey.transitions ?? [])[(journey.transitions ?? []).length - 1])?.to_state));
+  const stranded = states
+    .filter((state) => !transitions.some((transition) => transition.from_state === state.id) && !walkEnds.includes(state.id))
+    .map((state) => state.id);
   results.push({
     code: 'reachability',
     name: '§14.6 reachability',
-    severity: 'warning',
-    ok: unreachableStates.length === 0 && terminals.length === 0,
-    detail: [
-      unreachableStates.length ? `not reachable from any entry state: ${unreachableStates.join(', ')}` : null,
-      terminals.length ? `no outgoing transition: ${terminals.join(', ')}` : null,
-      entryCandidates.length ? `entry candidates with neither side: ${entryCandidates.map((state) => state.id).join(', ')}` : null,
-    ].filter(Boolean).join('; ') || 'every state is reachable and every state has an outgoing transition.',
+    // With no walk assembled and no states either there is nothing to ask reachability of, which is
+    // the one vacuous case. States and no walk is not vacuous: every one of those states is
+    // unreachable from an entry state, because the graph has not got one.
+    severity: states.length ? 'warning' : 'info',
+    ok: unreachableStates.length === 0 && stranded.length === 0,
+    detail: entryStates.length
+      ? [
+        `entry state(s), from where the walks began: ${entryStates.join(', ')}`,
+        unreachableStates.length ? `not reachable from one of them: ${unreachableStates.join(', ')}` : null,
+        stranded.length ? `no outgoing transition and no walk ends there: ${stranded.join(', ')}` : null,
+        walkEnds.length ? `a walk stops at ${walkEnds.join(', ')}, which is where a sample ends rather than where the application does` : null,
+      ].filter(Boolean).join('; ')
+      : states.length
+        ? `no walk was assembled, so this graph declares no entry state and none of its ${states.length} state(s) is reachable from one: ${unreachableStates.join(', ')}`
+        : 'no walk was assembled and there are no states, so there is nothing to ask reachability of.',
   });
 
   // 7. detection completeness.

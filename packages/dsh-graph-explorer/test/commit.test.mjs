@@ -16,7 +16,7 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { commitRun, reconcile, readRun } from '../lib/commit.js';
+import { commitRun, assembleJourneys, invariantsOf, reconcile, readRun } from '../lib/commit.js';
 import { createRun } from '../lib/session.js';
 
 let fails = 0;
@@ -220,7 +220,8 @@ check('the refused edge is kept in the report', report.decisions
   .filter((item) => item.decision === 'rejected').map((item) => item.transition_id), ['transition_logout']);
 check('nothing is dropped from the log', readFileSync(join(FIXTURE, 'transitions.jsonl'), 'utf8').trim().split('\n').length, 4);
 check('the graph says an edge was refused', graph.warnings.some((line) => line.includes('transition_logout was refused')), true);
-check('the report explains its own two verdicts', report.notes.length, 4);
+check('the report explains its own verdicts', report.notes.length, 5);
+check('including how a journey came to exist', report.notes.some((note) => note.includes('`journeys[]` is derived, not decided')), true);
 
 // --- references: the model's shorthand arrives as ids or not at all ---------
 const loginEdge = graph.transitions.find((edge) => edge.id === 'transition_login');
@@ -261,6 +262,28 @@ check('a state carries its detection', graph.states.find((state) => state.id ===
 ]);
 check('a bare url detection is pinned to the route it was read at, and said so', finding(report, 'detection_url_pinned_to_route', 'state_login')?.detail.includes('/login'), true);
 
+// --- journeys: the walk, read back -----------------------------------------
+// The fixture's walk is one edge, then the same self-loop twice, then a refusal. So the walk in
+// the graph is the first three steps and the refusal is where it stops.
+check('one walk, three steps, cut where the refused edge is', report.journeys,
+  { assembled: 1, walked: 3, unusable_steps: 1, breaks: 1, entry_states: ['state_login'] });
+const [journey] = graph.journeys;
+check('the journey is named after the walk it is', journey.id, 'journey_login_to_dashboard_authenticated');
+check('and its name says the name was derived', journey.name, 'Derived walk 1: state_login to state_dashboard_authenticated (3 step(s))');
+check('it starts where the walk started', journey.start_state, 'state_login');
+check('a repeated edge is two steps in the walk', journey.transitions,
+  ['transition_login', 'transition_login_dashboard_authenticated', 'transition_login_dashboard_authenticated']);
+check('the repeat is marked as one', journey.metadata.extra.steps[2].repeat_of_earlier_step, true);
+check('distinct edges are counted beside steps', journey.metadata.extra.distinct_transitions, 2);
+check('no goal was invented', journey.metadata.extra.goal_stated, false);
+check('the journey is inferred, not verified', [journey.metadata.status, journey.metadata.producer], ['inferred', 'importer:dsh-graph-explorer']);
+check('it is tagged so a reader can find the derived ones', journey.tags, ['derived']);
+check('the refused step is not walked into the journey', journey.transitions.includes('transition_logout'), false);
+check('a journey carries the readings it was walked from',
+  [...new Set(journey.evidence.map((ref) => ref.observation))], ['obs_0001', 'obs_0002', 'obs_0004', 'obs_0005']);
+check('the graph warns that a walk is not a goal', graph.warnings.some((line) => line.includes('none of them carries a stated goal')), true);
+check('and the coverage note counts the walks', graph.coverage.notes.includes('1 walk(s) reassembled from 3 step(s)'), true);
+
 // --- invariants -------------------------------------------------------------
 const invariants = Object.fromEntries(report.invariants.map((result) => [result.code, result]));
 check('ids are unique across states', [invariants.unique_ids.ok, invariants.unique_ids.detail.includes('element ids')], [true, true]);
@@ -270,6 +293,11 @@ check('detection survives reconciliation', invariants.detection_complete.ok, tru
 check('evidence integrity holds', invariants.evidence_integrity.ok, true);
 check('a version was recorded, so the check is real', [invariants.version_coherence.severity, invariants.version_coherence.ok], ['error', true]);
 check('a partial walk is a warning, not a failure', [invariants.reachability.ok, invariants.reachability.severity], [false, 'warning']);
+check('the walk itself is checked now, and it holds', [invariants.journey_is_a_walk.ok, invariants.journey_is_a_walk.severity], [true, 'error']);
+check('and the check says what it checked', invariants.journey_is_a_walk.detail.includes('every step starts where the one before it ended'), true);
+check('reachability asks from where the walk began', invariants.reachability.detail.includes('entry state(s), from where the walks began: state_login'), true);
+check('and names the state no walk reached', invariants.reachability.detail.includes('not reachable from one of them: state_login_remember_me_yes'), true);
+check('a walk stopping somewhere is reported as a sample ending, not as a defect', invariants.reachability.detail.includes('a walk stops at state_dashboard_authenticated'), true);
 check('the rule set is the documented one', Object.keys(invariants).sort(), [
   'confidence_floor', 'detection_complete', 'elements_reachable', 'evidence_integrity', 'feature_closure',
   'journey_is_a_walk', 'no_dangling_references', 'reachability', 'short_form_hygiene', 'state_identity_unique',
@@ -378,6 +406,76 @@ check('an effect that contradicts the destination refuses the edge', rule({
 const empty = rule({ states: [], observations: [] });
 check('a run with no states is refused', empty.report.gates.map((gate) => gate.code), ['nothing_to_commit']);
 check('and no document is produced', empty.graph, null);
+
+// --- journeys are a checked claim, not just an emitted array ----------------
+// `invariantsOf` is fed a graph directly here, because the point is what the rules do with a walk
+// that does not hold together — and the assembler cannot produce one, which is exactly why the
+// rules are worth having.
+const walkGraph = (journeys, edges) => ({
+  schema_version: '0.1',
+  application: { id: 'app_x', name: 'X' },
+  capabilities: [CAP],
+  states: [STATE(), STATE({ id: 'state_b', state_id: 'state_b', identity: { page_type: 'other' } })],
+  transitions: edges,
+  journeys,
+});
+const GO = EDGE({ id: 'transition_go', transition_id: 'transition_go', from_state: 'state_a', to_state: 'state_b' });
+const BACK = EDGE({ id: 'transition_return', transition_id: 'transition_return', from_state: 'state_a', to_state: 'state_a' });
+const WALK = { id: 'journey_a_to_b', name: 'w', start_state: 'state_a', transitions: ['transition_go'] };
+const asInvariants = (graph) => Object.fromEntries(invariantsOf(graph).map((result) => [result.code, result]));
+
+const goodWalk = asInvariants(walkGraph([WALK], [GO]));
+check('a walk that holds together passes — and is an error-severity rule now',
+  [goodWalk.journey_is_a_walk.ok, goodWalk.journey_is_a_walk.severity], [true, 'error']);
+check('reachability is asked from the walk start, and this graph passes it',
+  [goodWalk.reachability.ok, goodWalk.reachability.severity, goodWalk.reachability.detail.includes('from where the walks began: state_a')], [true, 'warning', true]);
+check('a state the walk stopped at is not held against the graph', goodWalk.reachability.detail.includes('a walk stops at state_b'), true);
+
+const jumped = asInvariants(walkGraph([{ ...WALK, transitions: ['transition_go', 'transition_return'] }], [GO, BACK]));
+check('a journey that jumps is an error, not a warning', [jumped.journey_is_a_walk.ok, jumped.journey_is_a_walk.severity], [false, 'error']);
+check('and the jump names both ends', jumped.journey_is_a_walk.detail.includes('transition_go ends at state_b and transition_return starts at state_a'), true);
+
+const unknownStep = asInvariants(walkGraph([{ ...WALK, transitions: ['transition_go', 'transition_missing'] }], [GO]));
+check('a journey naming an edge the graph lacks is a dangling reference', unknownStep.no_dangling_references.detail.includes('journey_a_to_b.transitions → transition_missing'), true);
+check('and the walk rule says so too', unknownStep.journey_is_a_walk.detail.includes('which are not edges in this graph'), true);
+
+const wrongStart = asInvariants(walkGraph([{ ...WALK, start_state: 'state_b' }], [GO]));
+check('a journey whose start disagrees with its first step is refused', wrongStart.journey_is_a_walk.detail.includes('starts at state_b but its first step transition_go starts at state_a'), true);
+
+const noStart = asInvariants({ schema_version: '0.1', application: { id: 'app_x', name: 'X' }, capabilities: [CAP], states: [STATE()], transitions: [], journeys: [] });
+check('states and no walk is not vacuous: nothing is reachable', [noStart.reachability.ok, noStart.reachability.severity, noStart.reachability.detail.includes('none of its 1 state(s) is reachable from one')], [false, 'warning', true]);
+const nothingAtAll = asInvariants({ schema_version: '0.1', application: { id: 'app_x', name: 'X' }, capabilities: [], states: [], transitions: [], journeys: [] });
+check('with neither walk nor states there is nothing to ask, and the rule says so', [nothingAtAll.reachability.ok, nothingAtAll.reachability.severity, nothingAtAll.reachability.detail.includes('nothing to ask reachability of')], [true, 'info', true]);
+
+// --- what cuts a walk -------------------------------------------------------
+const step = (id, from, to) => ({ kind: 'transition', transition_id: id, id, from_state: from, to_state: to, recorded_at: '2026-01-01T00:00:00.000Z' });
+const edge = (id, from, to) => EDGE({ id, transition_id: id, from_state: from, to_state: to });
+const assembled = (transitions, edges, stateIds = new Set(['state_a', 'state_b', 'state_c', 'state_d'])) => assembleJourneys({ transitions, edges, stateIds, generatedAt: '2026-01-01T00:00:00.000Z' });
+
+const cut = assembled(
+  [step('transition_go', 'state_a', 'state_b'), step('transition_away', 'state_c', 'state_d')],
+  [edge('transition_go', 'state_a', 'state_b'), edge('transition_away', 'state_c', 'state_d')],
+);
+check('a jump cuts the walk into two journeys', cut.journeys.map((journey) => journey.transitions), [['transition_go'], ['transition_away']]);
+check('and the cut records what it joined', cut.breaks, [{ after: 'state_b', before: 'state_c', transition: 'transition_away', reason: 'walk_jumped' }]);
+
+const restart = assembled(
+  [step('transition_go', 'state_a', 'state_b'), step('transition_go', 'state_a', 'state_b')],
+  [edge('transition_go', 'state_a', 'state_b')],
+);
+check('two walks between the same states are two journeys', restart.journeys.map((journey) => journey.id), ['journey_a_to_b', 'journey_a_to_b_2']);
+check('and a second one is still a walk of one distinct edge', restart.journeys.map((journey) => journey.metadata.extra.distinct_transitions), [1, 1]);
+
+const orphan = assembled(
+  [step('transition_go', 'state_a', 'state_b'), step('transition_away', 'state_b', 'state_c')],
+  [edge('transition_go', 'state_a', 'state_b')],
+);
+check('a step whose edge is not in the graph cannot be walked through', [orphan.steps, orphan.unusableSteps], [1, ['transition_away']]);
+check('and it cuts the walk rather than being skipped over', orphan.breaks.map((entry) => entry.reason), ['edge_not_committed']);
+check('an edge to a state that is not in the graph is not walked either', assembled(
+  [step('transition_go', 'state_a', 'state_b')],
+  [edge('transition_go', 'state_a', 'state_missing')],
+).journeys, []);
 
 // ---------------------------------------------------------------------------
 // `commitRun` and the filesystem: the report is always written, the graph is not
