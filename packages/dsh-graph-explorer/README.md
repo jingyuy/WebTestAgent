@@ -72,6 +72,49 @@ cannot silently alter the evidence it was derived from. A reading appends a new
 state or a sighting of an existing one; a step appends a transition, and walking
 the same edge twice appends twice while reusing one transition id.
 
+A run directory is **reused, not claimed**. Starting a second run in a directory that
+already has a log appends to it, and `run.json` is rewritten for the newer run, so the
+two runs share one evidence log and their ids collide — which the commit catches at the
+expiry, as `unique_ids`. Clear or rename the directory *before* a run; see
+[When the directory goes away](#when-the-directory-goes-away) for the one case where
+touching it is survivable, and why doing so is still a loss.
+
+### When the directory goes away
+
+`graph-run/` is an ordinary directory in someone's workspace, and a run can outlive its
+own output: it is deleted or moved aside mid-run, or the workspace is simply not
+writable. The store's job is to survive that without ever becoming the reason a browser
+action is reported as failed. Three rules:
+
+- **A write never throws.** A record that cannot be written is a fact about the run, not an
+  error in the page. The action it describes has already happened; failing it would send the
+  model back to a page that has moved on.
+- **A missing directory is repaired, not fatal.** The next write recreates `graph-run/` (and
+  `evidence/`), then retries. `run.json` is written back *verbatim* — `started_at` and all —
+  because this is the same run and not a new one, and that is also what is restored when only
+  `run.json` was lost.
+- **Nothing is remembered that is not in the log.** Every record is written before the index
+  is updated, and a refused record returns `null` instead of an id: a state that failed to
+  write is minted on the next attempt rather than mistaken for a re-sighting of a state the
+  log has never seen. When the log itself was lost, the index is emptied with it — states,
+  vocabulary and walk all start again — while the sequence keeps counting up, so `obs_0007`
+  never comes back attached to a different step.
+
+The two losses are reported separately in the digest, because they are different facts and
+neither is inferable from the other: `graph.unwritten_records` counts records a write
+refused, `graph.directory_recreations` counts times the log had to be rebuilt. Non-zero
+`unwritten_records` means the walk is short by steps that were never logged;
+`directory_recreations` means the log *begins* part-way through the run. What the store does
+not do is pretend either hole is closed: a transition whose `before` step is no longer in
+the log is refused with that reason rather than recorded with a reference the commit cannot
+resolve, and while a write is still failing the recording tools refuse and name the path
+rather than hand out ids nothing will read.
+
+What it cannot do is make a repaired log whole (see [gap 9](#known-gaps-in-the-order-they-will-bite)).
+So the operational rule stands: clear or rename `graph-run/` **before** a run, not during
+one — and in a long-lived profile, not between two tasks either, since the `web` profile is a
+server whose plugin instance (and its store) outlive any single task.
+
 ### Provenance
 
 `run.json` answers *could someone reproduce this run?* — what code, what
@@ -422,8 +465,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.13.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.13.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.14.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.14.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -736,11 +779,24 @@ because the model wrote `"output": {"page": "settings"}` — a value where the s
    references, not about the shape of a model-authored field. Two fixes, both small and both
    owed: correct the hint, and validate the assembled document against the normative schemas
    before calling the result `ok`.
+9. **A repaired log is the tail of the run, and nothing says so on disk.** Found while
+   closing the store's write path (0.1.14): when `graph-run/` is deleted mid-run, the store
+   recreates it and carries on, which is right — but the new log holds only what came after
+   the repair, while the restored `run.json` still describes the whole run. `graph_commit`
+   reads that tail and has no way to know it is a tail, so the graph it commits can be the
+   second half of a walk looking exactly like a complete one. The digest reports
+   `directory_recreations` and a model following the protocol can say so, but nothing in the
+   files carries it and no gate blocks it. Two candidate fixes, and the choice is a policy
+   call rather than a coding one: refuse to continue after a recreation (the option the store
+   deliberately did **not** take, because it turns a recoverable interruption into a dead
+   run), or record a log epoch the commit can see — which needs a decision about whether a
+   multi-epoch run is refused or committed with the break in its warnings, and would put a
+   fact in `run.json` that its "written once, never rewritten" rule currently forbids.
 
 ## Tests
 
 ```sh
-npm test        # 5 suites, no browser and no harness
+npm test        # 6 suites, no browser and no harness
 ```
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
@@ -761,6 +817,17 @@ reachable only from a walk that does not exist is warned about rather than passe
 assembler itself: two steps that do not join become two journeys, a repeated edge stays a
 separate step, and a step whose edge was never committed cuts the walk into a recorded
 break.
+
+The store's behaviour when the workspace stops cooperating is a suite of its own,
+`test/store-writes.test.mjs`, because it is the one place the tooling can turn into the
+problem it exists to remove. It deletes the run directory mid-run and asserts both halves of
+the rule: the write does not throw, the directory and `run.json` come back (byte-for-byte,
+`started_at` included), the record lands, the sequence is not recycled, and the index is
+emptied of what the log lost. Then it makes the repair itself impossible — a file where the
+directory was — and asserts the other half: every record returns `null`, nothing refused is
+remembered (no state, no vocabulary, no advanced walk), the sequence is not burned, the
+failure is counted, and a later success clears the *current* problem while leaving the count
+of unwritten records alone, because a gap is a gap.
 
 What they cannot check is that a real page looks like the capture claims. That is what
 a live run against a browser is for, and both are needed: the diff logic is the piece

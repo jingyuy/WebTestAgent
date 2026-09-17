@@ -93,12 +93,18 @@ where an app is *served*, not what it *is*.
 The shared id is the point: a run through either profile lands in one application rather than
 two. `headless` keeps `[]` — it loads no graph explorer, so a run there records nothing.
 
-Two traps. A non-insert patch replaces the targeted row's whole `config`
+Three traps. A non-insert patch replaces the targeted row's whole `config`
 (`dsh-app-boot`'s `applyEntryPatches` does `target[key] = value`), so every `graph-explorer`
 setting has to live in that single block — setting `runDirName` in one file and `application` in
-another silently loses the first. And the run directory is relative to the **session's** cwd: in
+another silently loses the first. The run directory is relative to the **session's** cwd: in
 the web UI that is the workspace you picked in the tree picker, not the directory you launched
-dsh from.
+dsh from. And the run directory is **reused, not claimed**: a second run in a directory that
+already has a log appends to it and rewrites `run.json`, so the two runs share one evidence log
+with colliding ids, which the commit refuses at the end as `unique_ids` — a whole run spent to
+find out. Clear or rename `graph-run/` *before* a run. Doing it mid-run is survivable since
+0.1.14 (a failed write is repaired and reported instead of failing the browser action it was
+observing) but still a loss, and a long-lived server like `web` keeps its store across tasks,
+so there "between two runs" is mid-run too.
 
 Confirm what composed before you run, which is cheaper than finding out at commit time:
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, Config } from '../lib/index.js';
@@ -185,6 +185,47 @@ const forced = await commit({ force: true });
 check('forcing writes the assembled document', existsSync(join(cwd, 'graph-run', 'graph.json')), true);
 check('forcing does not make the verdict a pass', forced.committed, false);
 await refuses('a directory that is not a run is refused', () => commit({ run_dir: 'nope' }), 'not an exploration run');
+
+// --- the run directory is deleted mid-run ---------------------------------
+// The worst case for a store, and the one a long-lived server invites: the directory
+// the agent is still writing into is removed between two of its steps. What must not
+// happen is the store failing the browser action it was recording — that action has
+// already happened, and reporting it as a failure makes the model retry it against a
+// page that has moved on. What must happen is a repaired directory, a log that admits
+// what it lost, and a walk that never references evidence nobody can read.
+const runDir = join(cwd, 'graph-run');
+const manifest = readFileSync(join(runDir, 'run.json'), 'utf8');
+queue = [capture({ url: 'http://x/cart', title: 'Cart' })];
+const beforeDeletion = await act('browser_click', { selector: '#buy' });
+check('the step before the deletion is recorded', beforeDeletion.isError, false);
+rmSync(runDir, { recursive: true, force: true });
+
+const across = await act('browser_click', { selector: '#buy' });
+check('a browser action is not failed by the store that was recording it', across.isError, false);
+check('the run directory is back, with run.json restored verbatim', readFileSync(join(runDir, 'run.json'), 'utf8'), manifest);
+check('the id is not recycled: the log starts where the run is, not at obs_0001',
+  readFileSync(join(runDir, 'observations.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).id), ['obs_0006']);
+
+const repaired = await observe({ page_type: 'cart', detection: [{ type: 'url' }] });
+check('a reading after the repair is recorded and minted fresh', [repaired.graph.state.state_id, repaired.graph.state.new], ['state_cart', true]);
+check('the digest says the log lost ground', [repaired.graph.directory_recreations, repaired.graph.unwritten_records], [1, 0]);
+
+// The step before the deletion is in the store's memory but not in the log, so a
+// transition across that hole would carry a reference the commit cannot resolve — and
+// the commit blocks the whole graph for one dangling reference. Refused here instead,
+// where the model can do something about it.
+await refuses('a transition across the hole is refused, naming the hole',
+  () => transition({ capability: 'buy_item' }), 'the run directory had to be recreated');
+
+queue = [capture({ url: 'http://x/thanks', title: 'Thanks' })];
+await act('browser_click', { selector: '#buy' });
+const resumed = await observe({ page_type: 'order_confirmation', detection: [{ type: 'url' }] });
+const after = await transition({ capability: 'buy_item', effects: [{ type: 'navigation', to: 'state_order_confirmation' }] });
+check('and the walk picks up again from the last step the log still has',
+  [after.transition.from_state, after.transition.to_state, after.chain_break], ['state_cart', 'state_order_confirmation', null]);
+check('the recreation is counted once, not once per step after it', [resumed.graph.directory_recreations, after.graph.directory_recreations], [1, 1]);
+check('the capability minted after the repair is in the log the commit reads',
+  readFileSync(join(runDir, 'capabilities.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).name), ['buy_item']);
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

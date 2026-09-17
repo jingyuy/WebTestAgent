@@ -24,8 +24,22 @@
  * a *semantic* tuple, so the same identity always resolves to the same id, which makes
  * invariant 4 (state identity uniqueness) structural rather than a check, and keeps a
  * repeated walk from minting a second id for an edge it already recorded.
+ *
+ * Two rules keep the log and the in-memory indexes from ever disagreeing:
+ *
+ * 1. **The memory never runs ahead of the log.** Every mutating method writes its
+ *    record first and only then updates the maps, and returns `null` when the write
+ *    did not happen. A state whose `kind: "state"` line never landed but which the
+ *    index remembers would be read by the commit as a *sighting* of a state with no
+ *    canonical record — a state that silently disappears from the finished graph.
+ * 2. **A store failure is never allowed to break the browser action it is
+ *    recording.** Writing can fail for reasons that have nothing to do with the run:
+ *    the directory can be deleted or moved while the agent is still working in it,
+ *    and `appendFileSync` cannot recreate a parent that is gone. So a missing
+ *    directory is repaired and the write retried, and a failure that cannot be
+ *    repaired is reported — never thrown.
  */
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export const RUN_DIR_NAME = 'graph-run';
@@ -93,10 +107,17 @@ export const identityKey = ({ page_type, variant, dimensions }) => {
   return JSON.stringify([String(page_type ?? ''), variant ? String(variant) : '', dims]);
 };
 
-export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
+export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onStoreError = null }) {
   const dir = join(cwd, runDirName);
   const evidenceDir = join(dir, 'evidence');
-  mkdirSync(evidenceDir, { recursive: true });
+  // Creating the run's own directory is not a repair, so it is done here rather
+  // than left to the first write: writing at run start is what *starts* the run,
+  // and reporting "the directory was missing" about a directory that was never
+  // there yet would be a false alarm on every healthy run. A failure is swallowed
+  // because the write below reports it properly, with the reason.
+  try {
+    mkdirSync(evidenceDir, { recursive: true });
+  } catch { /* reported by the run.json write, which heals first */ }
 
   const observationsPath = join(dir, 'observations.jsonl');
   const statesPath = join(dir, 'states.jsonl');
@@ -121,10 +142,140 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
   /** Every recorded transition, in walk order. Duplicates kept: a walk may repeat an edge. */
   const walk = [];
 
-  const append = (path, record) => {
-    appendFileSync(path, JSON.stringify(record) + '\n', 'utf8');
-    return record;
+  /**
+   * What went wrong with the store, and whether it is still going wrong.
+   *
+   * `lastWriteProblem` is cleared by a write that succeeds, because the question the
+   * caller asks is "is the log keeping up right now?", not "has this run ever
+   * stumbled" — a store that has recovered should not refuse the next reading. The
+   * running total is kept separately and never cleared, because a successful write
+   * cannot un-lose an earlier record: the digest reports the count so a graph with a
+   * gap in it says so instead of looking merely short.
+   */
+  let lastWriteProblem = null;
+  let totalWriteFailures = 0;
+  let recreations = 0;
+  let repairing = false;
+
+  const describe = (error) => (error instanceof Error ? error.message : String(error));
+
+  const report = (problem) => {
+    try {
+      onStoreError?.(problem);
+    } catch {
+      // Reporting a store problem must not become a store problem.
+    }
   };
+
+  /**
+   * Put back what a vanished run directory took with it.
+   *
+   * Deleting or moving the directory mid-run is the realistic case: the agent is
+   * still working and `appendFileSync` has no parent to write into. Recreating it is
+   * the whole remedy, plus `run.json`, which is the one record nothing else can
+   * reconstruct — written back verbatim, `started_at` included, because this is the
+   * same run and not a new one. Records made before this point are gone from the new
+   * directory (they are in the old one, if it was moved rather than deleted), so what
+   * the store remembered about them is dropped too and the repair is announced rather
+   * than performed silently.
+   */
+  const heal = (trigger) => {
+    if (repairing) return { ok: false, reason: 'a repair is already in progress' };
+    repairing = true;
+    try {
+      const gone = !existsSync(dir);
+      mkdirSync(evidenceDir, { recursive: true });
+      // `run.json` is the one record nothing else can reconstruct, so a directory
+      // without it is not a run directory and the file is written back from this
+      // run's own provenance either way. It is announced even when the directory
+      // itself survived, because a file appearing that the run did not just write is
+      // exactly the kind of thing that should not happen quietly.
+      const manifestMissing = !existsSync(join(dir, 'run.json'));
+      if (manifestMissing) writeFileSync(join(dir, 'run.json'), runRecordText, 'utf8');
+      if (gone) recreations += 1;
+      if (gone) {
+        // The log the commit will read begins at this point, so nothing may be
+        // remembered that was written into the directory that went away. Clearing is not
+        // tidiness: an index that survived would answer `addState` with "already seen"
+        // for a state whose canonical record is gone, and a repeat is written as a
+        // *sighting* — and a sighting of a state with no canonical record is dropped by
+        // the commit, so the state would disappear from the finished graph after the
+        // digest had already counted it.
+        //
+        // The counters are deliberately NOT reset: an id the digest has already reported
+        // must never come back attached to a different record, so it stays `obs_0007`
+        // even though the log now begins with it.
+        stateIdByKey.clear();
+        stateRecordById.clear();
+        stateIdByObservation.clear();
+        capabilityByName.clear();
+        capabilityById.clear();
+        transitionIdByKey.clear();
+        transitionIds.clear();
+        walk.length = 0;
+      }
+      if (gone || manifestMissing) {
+        report({
+          kind: 'recreated',
+          path: dir,
+          message: gone
+            ? 'the run directory was missing and has been recreated, with run.json restored'
+            : 'run.json was missing and has been written back from this run\'s own provenance',
+          at: new Date().toISOString(),
+          trigger,
+        });
+      }
+      return { ok: true, recreated: gone };
+    } catch (error) {
+      return { ok: false, reason: describe(error) };
+    } finally {
+      repairing = false;
+    }
+  };
+
+  /**
+   * The one place this store touches the disk. Returns whether the bytes landed, and
+   * never throws: a record that cannot be written is a fact about the run, not a
+   * reason to break the browser action that produced it.
+   */
+  const write = (path, contents, { append = true } = {}) => {
+    const put = () => (append ? appendFileSync(path, contents, 'utf8') : writeFileSync(path, contents, 'utf8'));
+    const attempt = () => {
+      put();
+      lastWriteProblem = null;
+      return true;
+    };
+    try {
+      return attempt();
+    } catch (firstError) {
+      // A missing parent is the repairable case, and the likely one. Anything the
+      // repair cannot fix (the path is a file, the volume is read-only) is reported
+      // once, with the reason the repair failed, and the run carries on without
+      // pretending the record exists.
+      const repaired = heal(`writing ${path}: ${describe(firstError)}`);
+      let error = firstError;
+      if (repaired.ok) {
+        try {
+          return attempt();
+        } catch (retryError) {
+          error = retryError;
+        }
+      }
+      totalWriteFailures += 1;
+      lastWriteProblem = {
+        path,
+        message: describe(error),
+        at: new Date().toISOString(),
+        repaired: repaired.ok,
+        repair_error: repaired.ok ? null : repaired.reason,
+      };
+      report({ kind: 'unwritten', ...lastWriteProblem, trigger: `writing ${path}` });
+      return false;
+    }
+  };
+
+  /** Append one record. `false` means it is not in the log, so callers must not keep it. */
+  const append = (path, record) => write(path, JSON.stringify(record) + '\n');
 
   // Provenance, written once and never rewritten. Every field answers "could
   // someone reproduce this run?" — what code, what instruction, what model,
@@ -133,7 +284,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
   // checked at all if the producing versions were never recorded. Fields we
   // genuinely cannot see stay null rather than being guessed at: a null is an
   // honest "unknown", a plausible-looking default is a false fact.
-  writeFileSync(join(dir, 'run.json'), JSON.stringify({
+  const runRecordText = JSON.stringify({
     started_at: new Date().toISOString(),
     cwd,
     start_url: provenance.startUrl ?? null,
@@ -153,7 +304,11 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
     // here silently goes stale the first time the package is bumped, which
     // makes every run.json actively claim the wrong version.
     plugin: provenance.plugin ?? null,
-  }, null, 2) + '\n', 'utf8');
+  }, null, 2) + '\n';
+  // Through the same path as every other write: a workspace that cannot be written
+  // to is a run that cannot record anything, and that is a fact to report at the
+  // first step rather than an exception thrown out of a browser action.
+  write(join(dir, 'run.json'), runRecordText, { append: false });
 
   return {
     dir,
@@ -163,13 +318,25 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
     capabilitiesPath,
     transitionsPath,
 
+    /**
+     * The most recent write that did not land, or null if the log is keeping up. A
+     * non-null answer means the run's evidence is incomplete *right now*, so the tools
+     * that record refuse rather than hand the model a reading whose evidence the log
+     * does not contain.
+     */
+    writeProblem: () => lastWriteProblem,
+    /** How many records this run failed to write, ever. Sticky: a gap is a gap. */
+    writeFailures: () => totalWriteFailures,
+    /** How many times a vanished run directory had to be recreated. */
+    recreations: () => recreations,
+
     /** Allocate the next machine-evidence record. Immutable once written. */
     addObservation({ tool, toolArgs, phase, capture, error, screenshot }) {
-      observationCount += 1;
-      const id = 'obs_' + String(observationCount).padStart(4, '0');
-      return append(observationsPath, {
+      const seq = observationCount + 1;
+      const id = 'obs_' + String(seq).padStart(4, '0');
+      const record = {
         id,
-        seq: observationCount,
+        seq,
         recorded_at: new Date().toISOString(),
         tool,
         phase,
@@ -179,7 +346,15 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
         capture: capture ?? null,
         capture_error: error ?? null,
         screenshot: screenshot ?? null,
-      });
+      };
+      // The count moves only when the record does, so a step that could not be
+      // written does not burn its id: the next one lands in the log under the id this
+      // one would have had, and the log stays contiguous. The failure itself is
+      // reported instead (see `writeFailures`), which is the honest account of it —
+      // an unmade record is not evidence, so it has no place in the evidence log.
+      if (!append(observationsPath, record)) return null;
+      observationCount = seq;
+      return record;
     },
 
     /**
@@ -189,8 +364,9 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
      */
     addState({ observationId, page_type, variant, dimensions, summary, elements, detection, confidence, model_status }) {
       const key = identityKey({ page_type, variant, dimensions });
-      let id = stateIdByKey.get(key);
-      const minted = id === undefined;
+      const existing = stateIdByKey.get(key);
+      const minted = existing === undefined;
+      let id = existing;
       if (minted) {
         // The slug is built from the identity tuple — page_type, variant and
         // dimensions — never from a route, a selector or an index. It is derived
@@ -206,7 +382,6 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
         let suffix = 2;
         while (stateRecordById.has(candidate)) candidate = 'state_' + base + '_' + suffix++;
         id = candidate;
-        stateIdByKey.set(key, id);
       }
       const record = {
         id,
@@ -226,6 +401,16 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
         status: model_status ?? 'observed',
         evidence: minted ? 'first_observation' : 'repeat_observation',
       };
+      // Written before it is remembered, and nothing is remembered if it was not
+      // written. The order matters for the first sighting in particular: a state read
+      // as new whose `kind: "state"` line never landed would be a state the commit
+      // only ever sees as a *sighting*, and a sighting of a state with no canonical
+      // record is dropped — so it would disappear from the finished graph after the
+      // digest had already reported it as recorded.
+      const written = { ...record, kind: minted ? 'state' : 'sighting' };
+      if (!append(statesPath, written)) return null;
+      stateIdByKey.set(key, id);
+      if (minted) stateRecordById.set(id, record);
       // The index is updated on every reading, not only on the first: an observation
       // re-read as its own state must keep pointing at it, and a re-reading that
       // *changes* the answer should win, because the latest reading is the one made
@@ -234,10 +419,8 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
       if (!minted) {
         // Not a new state: record the sighting as a re-confirmation, preserving the
         // original identity record rather than overwriting it.
-        return { id, minted, sighting: append(statesPath, { ...record, kind: 'sighting' }) };
+        return { id, minted, sighting: written };
       }
-      stateRecordById.set(id, record);
-      append(statesPath, { ...record, kind: 'state' });
       return { id, minted, record };
     },
 
@@ -274,9 +457,13 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
         notes: Array.isArray(notes) ? notes : [],
         first_seen_at: new Date().toISOString(),
       };
+      // Written before it is remembered. A capability the vocabulary already
+      // remembers but the log does not have would be handed back to the model as
+      // `created: false` — an id for a behaviour the finished graph has never heard
+      // of, and a transition referencing it would dangle.
+      if (!append(capabilitiesPath, { kind: 'capability', ...record })) return null;
       capabilityByName.set(name, record);
       capabilityById.set(id, record);
-      append(capabilitiesPath, { kind: 'capability', ...record });
       return { id, record, created: true };
     },
 
@@ -326,8 +513,6 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
           while (transitionIds.has(candidate)) candidate = base + '_' + destination + '_' + suffix++;
         }
         id = candidate;
-        transitionIdByKey.set(key, id);
-        transitionIds.add(id);
       }
 
       // Invariant 5 (a journey is a walk) is checkable here for the first time: the
@@ -386,8 +571,15 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {} }) {
         chain_break,
       };
 
+      // The walk advances only once the step is in the log, for the same reason the
+      // indexes are: a step the commit cannot see must not decide what the next step's
+      // chain_break is measured against.
+      if (!append(transitionsPath, { kind: 'transition', ...record, repeated: !minted })) return null;
+      if (minted) {
+        transitionIdByKey.set(key, id);
+        transitionIds.add(id);
+      }
       walk.push(record);
-      append(transitionsPath, { kind: 'transition', ...record, repeated: !minted });
       return { id, minted, chain_break, record };
     },
 

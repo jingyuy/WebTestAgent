@@ -143,6 +143,24 @@ const OBSERVED_TOOLS = new Set([
 const workspaceCwd = (exec) => exec?.agent?.session?.header?.cwd ?? process.cwd();
 
 /**
+ * What to tell the model when the evidence log itself is not keeping up.
+ *
+ * A store write that did not land is not a detail of the machinery: every id the
+ * protocol hands out — `obs_*`, `state_*`, `cap_*`, `transition_*` — is a reference
+ * into the log, and a reference the log does not contain cannot be committed. So the
+ * recording tools say so plainly instead of minting an id for a record no one will
+ * ever read, and they name the path, because the realistic cause is a run directory
+ * that was moved or deleted while the agent was still working in it.
+ */
+const storeFailureMessage = (problem, runDirName, retry) => [
+    `The evidence log could not be written (${problem.path}: ${problem.message}), so nothing was recorded.`,
+    problem.repair_error
+        ? `The run directory ${runDirName}/ could not be recreated either (${problem.repair_error}).`
+        : `The run directory ${runDirName}/ was recreated, and the write failed anyway.`,
+    retry,
+].join(' ');
+
+/**
  * The URL a launching action asked for.
  *
  * Taken from the call's own arguments rather than from the page afterwards,
@@ -441,6 +459,15 @@ export function apply(ctx, config) {
      * `from_state` comes from, resolved through the state the model read it as.
      */
     let previousObservation = null;
+    /**
+     * Set when the evidence log lost a step that is still in memory: the run
+     * directory was missing and had to be recreated, so the records it held are not
+     * in the log any more. A transition's `before` is a *reference into the log*, so
+     * one that points at a lost step is refused rather than recorded — and the
+     * refusal says this rather than claiming, as the no-previous-step message does,
+     * that the run has only just begun.
+     */
+    let walkHole = null;
 
     /**
      * The turn's instruction, captured from `agent/pre-step` before the step's
@@ -470,6 +497,21 @@ export function apply(ctx, config) {
                 plugin: self,
                 ...agentProvenance(exec),
             },
+            // The store is created from inside the recorder, so nothing it does here
+            // may throw: `run.json` is written through the same guarded path as every
+            // other record, and an unwritable workspace is reported as a store problem
+            // to be named at the first attempt to record, not as an exception that
+            // fails the browser action that happened to be first.
+            onStoreError: (problem) => {
+                if (problem.kind === 'recreated') {
+                    warn(
+                        `${problem.message}: ${problem.path} — records made before this point are only in the`
+                        + ' directory that was moved or deleted',
+                    );
+                } else {
+                    warn(`store write failed: ${problem.path} — ${problem.message}`);
+                }
+            },
         });
         warn(`run started: ${run.dir}`);
         return run;
@@ -497,6 +539,14 @@ export function apply(ctx, config) {
      * recorded failure, never into a broken browser action. The failure IS
      * recorded, because a silently missing observation is exactly the false-pass
      * this tooling exists to remove.
+     *
+     * That includes the store itself. Writing the record can fail for reasons that
+     * have nothing to do with the page — most realistically the run directory being
+     * moved or deleted while the agent is still working in it — and when it does the
+     * observation is dropped (the store returns null) and named in the log. What it
+     * must not do is escape here, because a browser action that worked would then be
+     * reported to the model as a failure, and the model would retry it against a page
+     * that had already moved on.
      */
     const capture = async (exec, { tool, toolArgs, screenshotPath }) => {
         const store = ensureRun(exec);
@@ -523,17 +573,41 @@ export function apply(ctx, config) {
             }
         }
 
-        const observation = store.addObservation({
-            tool,
-            toolArgs,
-            phase: 'after',
-            capture: captureValue,
-            error: captureError,
-            screenshot,
-        });
-        if (captureValue) {
-            previousObservation = latestObservation;
-            previousCapture = latestObservation?.capture ?? null;
+        let observation = null;
+        const repairs = store.recreations();
+        try {
+            observation = store.addObservation({
+                tool,
+                toolArgs,
+                phase: 'after',
+                capture: captureValue,
+                error: captureError,
+                screenshot,
+            });
+        } catch (error) {
+            // The store does not throw, so this is the belt to that braces: the
+            // recorder runs inside the agent's own tool waterfall, where an exception
+            // replaces a result the browser already produced.
+            warn('could not write the observation', error);
+        }
+
+        // Only a *written* observation becomes the pair the semantic layer reads: a
+        // reference in a transition has to resolve to a line the log actually has, so
+        // a dropped observation must leave the chain where it was rather than advance
+        // it to a record that does not exist.
+        if (captureValue && observation) {
+            if (store.recreations() !== repairs) {
+                // This write is the one that had to rebuild the run directory, so the
+                // step before it — and everything the store remembered about the walk
+                // so far — is no longer in the log the commit will read. The chain stops
+                // here instead of pointing at evidence that is gone.
+                walkHole = `the run directory had to be recreated while step ${observation.id} was being written`;
+                previousObservation = null;
+                previousCapture = null;
+            } else {
+                previousObservation = latestObservation;
+                previousCapture = latestObservation?.capture ?? null;
+            }
             latestObservation = observation;
         }
         return observation;
@@ -644,6 +718,15 @@ export function apply(ctx, config) {
         },
         async execute(args, exec) {
             const store = ensureRun(exec);
+            const problem = store.writeProblem();
+            if (problem) {
+                throw new Error(storeFailureMessage(
+                    problem,
+                    runDirName,
+                    'Nothing was recorded. The page is still where it is, so once the workspace is writable again '
+                    + 'this reading can be made straight away — no action has to be repeated for it.',
+                ));
+            }
             const latest = latestObservation;
             if (!latest) {
                 throw new Error(
@@ -687,6 +770,18 @@ export function apply(ctx, config) {
                     confidence: args.confidence,
                     model_status: 'observed',
                 });
+                if (!recorded) {
+                    // The reading was refused rather than half-kept: an id handed back
+                    // for a record the log does not contain is a reference that cannot
+                    // be committed, and the model would go on to write transitions
+                    // against it.
+                    throw new Error(storeFailureMessage(
+                        store.writeProblem() ?? { path: store.statesPath, message: 'the write failed' },
+                        runDirName,
+                        'Nothing was recorded, so call this again once the workspace is writable: the page is still '
+                        + 'showing what it showed, and no browser action has to be repeated.',
+                    ));
+                }
                 state = {
                     state_id: recorded.id,
                     new: recorded.minted,
@@ -743,6 +838,18 @@ export function apply(ctx, config) {
                     capabilities_recorded: store.capabilityCount(),
                     transitions_recorded: store.transitionCount(),
                     steps_walked: store.walkLength(),
+                    // Steps the log does not have, because a write failed at some point
+                    // and the run got past it. Non-zero means the counters above are not
+                    // the whole story of what was done to this page, and the graph will
+                    // be missing those steps — reported so the model can say so in its
+                    // hand-off instead of presenting a short walk as a complete one.
+                    unwritten_records: store.writeFailures(),
+                    // A different loss, and not inferable from the one above: the run
+                    // directory had to be rebuilt, so records that *were* written are in
+                    // the directory that moved away rather than in this log. Each one
+                    // means the log begins again somewhere inside the run, and the graph
+                    // assembled from it is the part of the run after that point.
+                    directory_recreations: store.recreations(),
                 },
             };
             return trimDigest(digest, config.maxDigestChars ?? 14000);
@@ -840,12 +947,28 @@ export function apply(ctx, config) {
             if (args.capability === undefined) {
                 const last = store.lastTransition();
                 const ignored = Object.keys(args).filter((key) => args[key] !== undefined);
+                const failure = store.writeProblem();
+                const unwritten = store.writeFailures();
+                const recreations = store.recreations();
                 return {
                     recorded: false,
                     note: ignored.length
                         ? `No capability was given, so nothing was recorded — these arguments were read and ignored: `
                             + `${ignored.join(', ')}. Pass \`capability\` to record a transition.`
                         : 'No arguments were given, so nothing was recorded. This is the state of the walk.',
+                    // Reported here as well as in the digest: this call is where a
+                    // model looks after a chain break, and a run whose log is not
+                    // keeping up has to say so there rather than let it conclude that
+                    // it simply never acted.
+                    ...(failure || unwritten || recreations
+                        ? {
+                            store: {
+                                unwritten_records: unwritten,
+                                directory_recreations: recreations,
+                                last_write_failure: failure ? `${failure.path}: ${failure.message}` : null,
+                            },
+                        }
+                        : {}),
                     walk: {
                         steps_walked: store.walkLength(),
                         transitions_recorded: store.transitionCount(),
@@ -866,6 +989,21 @@ export function apply(ctx, config) {
                 };
             }
 
+            // Recording is refused while the log is not keeping up, and refused before
+            // anything is read from the chain: the store's memory only ever contains
+            // what the log contains, so what is in it now is a *shorter* walk than the
+            // model remembers having made, and writing against it would produce a graph
+            // whose steps are missing without saying so.
+            const problem = store.writeProblem();
+            if (problem) {
+                throw new Error(storeFailureMessage(
+                    problem,
+                    runDirName,
+                    'Nothing was recorded. Once the workspace is writable again, carry on from here: the walk in the '
+                    + 'log is what it is, and the next step you record will be chained to it.',
+                ));
+            }
+
             const after = latestObservation;
             if (!after) {
                 throw new Error(
@@ -884,11 +1022,15 @@ export function apply(ctx, config) {
 
             const before = previousObservation;
             if (!before) {
-                throw new Error(
-                    'There is no step before this one, so there is no transition: the first browser action establishes '
-                    + 'the entry state rather than moving between states. Record it with '
-                    + `\`${observeTool}\` and act again.`,
-                );
+                throw new Error(walkHole
+                    ? `There is no longer any step before this one: ${walkHole}, so the record of it is in the directory `
+                        + 'that was moved or deleted rather than in the log the graph is assembled from. A transition '
+                        + 'needs both ends to be evidence, and nothing was recorded. Act once more and read the state '
+                        + `again with \`${observeTool}\` — the next step will start a new strand of the walk, and the `
+                        + 'digest and the commit report both say the log lost ground.'
+                    : 'There is no step before this one, so there is no transition: the first browser action establishes '
+                        + 'the entry state rather than moving between states. Record it with '
+                        + `\`${observeTool}\` and act again.`);
             }
 
             const toState = store.stateForObservation(after.id);
@@ -933,6 +1075,17 @@ export function apply(ctx, config) {
                 output: args.capability_output,
                 notes,
             });
+            if (!capability) {
+                // The name is still unclaimed, so the call is repeatable as it stands —
+                // and it has to be, because a transition is keyed by the capability id
+                // and the log has to have the capability it references.
+                throw new Error(storeFailureMessage(
+                    store.writeProblem() ?? { path: store.capabilitiesPath, message: 'the write failed' },
+                    runDirName,
+                    'Nothing was recorded. Call again once the workspace is writable: the capability is not in the '
+                    + 'vocabulary yet, so the same call will create it.',
+                ));
+            }
 
             // --- the transition's own references ----------------------------
             if (args.target !== undefined && !/^element[-_][A-Za-z0-9._:-]+$/.test(String(args.target))) {
@@ -1027,6 +1180,17 @@ export function apply(ctx, config) {
                 observed_change: observedChange,
                 notes: warnings,
             });
+            if (!recorded) {
+                // Refused rather than half-kept: the capability above is already in the
+                // log, but the step is not, so the walk has not moved and the same call
+                // records it once the workspace is writable again.
+                throw new Error(storeFailureMessage(
+                    store.writeProblem() ?? { path: store.transitionsPath, message: 'the write failed' },
+                    runDirName,
+                    `Nothing was recorded — but the capability \`${capabilityName}\` was, so the walk is still one step `
+                    + 'behind this one. Call again once the workspace is writable: the same call will record the step.',
+                ));
+            }
 
             return {
                 transition: {
@@ -1065,6 +1229,8 @@ export function apply(ctx, config) {
                     transitions_recorded: store.transitionCount(),
                     steps_walked: store.walkLength(),
                     observations_recorded: store.observationCount(),
+                    unwritten_records: store.writeFailures(),
+                    directory_recreations: store.recreations(),
                 },
             };
         },
