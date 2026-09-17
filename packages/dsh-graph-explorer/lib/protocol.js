@@ -43,6 +43,11 @@ You never need to collect that, and you must never invent it. Read
 
 **Your job is the part the harness cannot do: deciding what the page MEANS.**
 
+The first action of a run is a step, not a transition. Nothing came before it, so there is
+no state for it to have moved between — read the state it arrived in with
+\`${config.observeTool}\`, and record transitions from the second action onward. The tool
+refuses the first one rather than inventing an entry state for it.
+
 For every step:
 
 1. Act with exactly one \`browser_*\` tool. One action at a time — a compound step
@@ -112,8 +117,17 @@ For every step:
      element's \`semantic_purpose\` — \`email_input\`, not \`login.email\` and not a
      selector, and the tool refuses a target no state has declared; for the rest
      (\`storage_changed\`, \`list_changed\`) it is a semantic path or key
-     (\`localStorage.draft\`, \`order.items\`). Set \`"observed": true\` only for what the
-     evidence shows — an effect you inferred is a weaker claim, and it should say so.
+     (\`localStorage.draft\`, \`order.items\`). What \`to\` is depends on the effect too:
+     for \`value_changed\` and \`visibility_changed\` it is what the element moved to
+     (\`"test@example.com"\`, \`"absent"\`); for \`state_entered\` it is the **state id**
+     the reading ended in — the \`state_id\` the tool reported for this step's own
+     reading (\`state_project_list_authenticated_signed_in\`), never the \`page_type\`
+     (\`project_list\`) or the \`variant\` (\`authenticated\`), neither of which is a
+     state. The step's \`to_state\` is derived from evidence — it is where the action
+     actually landed — so the effect's \`to\` is that same id, and the tool refuses the
+     step when the two disagree rather than guess which one you meant.
+     Set \`"observed": true\` only for what the evidence shows — an effect you
+     inferred is a weaker claim, and it should say so.
    - \`arguments\` — the concrete values used this time, e.g. \`{"coupon_code":"SAVE10"}\`.
    - \`guard\` — the condition that made this transition possible, if there is one.
 

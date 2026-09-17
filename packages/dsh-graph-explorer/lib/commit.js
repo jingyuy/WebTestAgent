@@ -1081,6 +1081,14 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
           ? 'the same edge was walked again without the recorder’s objection'
           : 'a repeat of the same edge; the step is in the walk, but one edge is one edge',
         findings: loser.findings,
+        // A superseded candidate is not a rejection, so there is no reason to give — but the
+        // key has to be here all the same. `decisions[]` is one table with one shape, and a row
+        // whose keys depend on which branch produced it is a row every reader has to special-case.
+        // The tool boundary is where that stops being a style question: the projection copies
+        // these fields straight out, and a key that is absent rather than null is `undefined`,
+        // which is not JSON. See `graph_commit`'s projection.
+        rejection_reason: null,
+        rejection_basis: null,
       });
     }
 

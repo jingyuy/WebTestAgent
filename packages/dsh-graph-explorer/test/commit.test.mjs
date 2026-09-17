@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { commitRun, assembleJourneys, invariantsOf, reconcile, readRun } from '../lib/commit.js';
 import { createRun } from '../lib/session.js';
+import { losslessPaths } from './lossless.mjs';
 
 let fails = 0;
 const check = (label, actual, expected) => {
@@ -209,6 +210,15 @@ const superseded = report.decisions.filter((item) => item.decision === 'supersed
 check('the objection was superseded, not committed', superseded.map((item) => item.transition_id), ['transition_login_dashboard_authenticated']);
 check('supersede reason explains itself', superseded[0].reason.includes('without the recorder'), true);
 check('the superseded candidate is named by its own timestamp', typeof superseded[0].candidate_recorded_at, 'string');
+check('and it reasons null, because it was not rejected — it lost', [superseded[0].rejection_reason, superseded[0].rejection_basis], [null, null]);
+// One table, one shape. A row that omits a key is a row whose reader has to know which branch
+// produced it, and at the tool boundary it is worse than untidy: the projection copies these
+// fields straight out, `undefined` is not JSON, and the harness refuses the whole `graph_commit`
+// call with an error that names no field. The pair below is the regression that failure wanted.
+check('every decision row carries the same keys', report.decisions.map((row) => Object.keys(row).filter((key) => key === 'rejection_reason' || key === 'rejection_basis').sort()),
+  report.decisions.map(() => ['rejection_basis', 'rejection_reason']));
+check('the report survives a JSON round-trip', losslessPaths(report), []);
+check('and so does the document', losslessPaths(graph), []);
 check('the winning decision is the clean walk', report.decisions
   .filter((item) => item.transition_id === 'transition_login_dashboard_authenticated' && item.decision === 'committed')
   .map((item) => item.candidates), [2]);

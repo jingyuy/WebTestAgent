@@ -736,7 +736,9 @@ export function crossCheckEffects({ effects, before, after, fromState, toState, 
         if (effect.type === 'state_entered' && effect.to && effect.to !== toState) {
             errors.push(
                 `effect state_entered says the app entered ${JSON.stringify(effect.to)} while to_state is `
-                + `${JSON.stringify(toState)}. A transition cannot end in two places — fix whichever of the two is wrong.`,
+                + `${JSON.stringify(toState)}. A transition cannot end in two places. to_state is read from the `
+                + 'evidence — it is the state this step\'s own reading was recorded in — so it is the effect\'s `to` '
+                + 'that has to change: it is that state id, not the page_type and not the variant.',
             );
         }
 
@@ -1444,6 +1446,8 @@ export function apply(ctx, config) {
                 description: 'What changed. Each entry is {type, ...}: navigation/url_changed/state_entered need `to`; '
                     + 'value_changed/visibility_changed need `target` and `to`; message needs `message`; request needs '
                     + '`api`; storage_changed/validation_error/list_changed/element_created/element_destroyed need `target`. '
+                    + 'state_entered\'s `to` is the state id the step arrived in — the `state_id` the tool reported for this '
+                    + 'step\'s own reading — not the page_type or the variant. navigation/url_changed\'s `to` is the URL. '
                     + 'An element-shaped target (value_changed, visibility_changed, element_created, element_destroyed, '
                     + 'validation_error) is the element\'s semantic_purpose — `email_input`, not `login.email` and not a '
                     + 'selector: an effect that does not resolve to a declared element is dropped at commit, so it is '
@@ -1901,13 +1905,19 @@ export function apply(ctx, config) {
                     severity: result.severity,
                     detail: result.detail,
                 })),
+                // This is the tool's declared output (`{type: 'json'}`), so it has to be lossless
+                // for *any* report the commit can produce. The framework rejects the whole call
+                // when a value does not survive a JSON round-trip, and its error names no field —
+                // a report row that omitted a key failed `graph_commit` outright with nothing to
+                // read. `?? null` says these fields are nullable here, where the promise is made,
+                // rather than in every reader.
                 decisions: report.decisions.map((decision) => ({
-                    transition_id: decision.transition_id,
+                    transition_id: decision.transition_id ?? null,
                     decision: decision.decision,
-                    capability: decision.capability,
-                    from_state: decision.from_state,
-                    to_state: decision.to_state,
-                    rejection_reason: decision.rejection_reason,
+                    capability: decision.capability ?? null,
+                    from_state: decision.from_state ?? null,
+                    to_state: decision.to_state ?? null,
+                    rejection_reason: decision.rejection_reason ?? null,
                     warnings: (decision.findings ?? decision.warnings ?? []).map((finding) => finding.code),
                 })),
                 blocked_by: report.blocking,

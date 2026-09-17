@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
 import { apply, Config } from '../lib/index.js';
+import { losslessPaths } from './lossless.mjs';
 
 let fails = 0;
 const check = (label, actual, expected) => {
@@ -70,6 +71,13 @@ check('all three tools registered', [...tools.keys()].sort(), ['graph_commit', '
 check('protocol section contributed', sections.map((s) => [s.name, s.order]), [['graph:exploration-protocol', 150]]);
 check('protocol teaches the transition tool', sections[0].text.includes('graph_transition'), true);
 check('protocol teaches where the run ends', sections[0].text.includes('graph_commit'), true);
+// Two runs recorded a transition for their first action and were refused: the procedure said to
+// record a transition for every step, and the rule that the first one has no state to move between
+// was only in the tool description. A procedure whose first iteration is not the procedure.
+check('protocol says the first action is a step, not a transition', sections[0].text.includes('The first action of a run is a step, not a transition'), true);
+// And two runs wrote the page_type where a state id was meant, because the paragraph that defines
+// `target` as a semantic name left `to` undefined for `state_entered`.
+check('protocol says what state_entered\'s `to` is', sections[0].text.includes('**state id**'), true);
 
 // --- refusals before anything has happened --------------------------------
 await refuses('observe with no evidence', () => observe({}), 'nothing to interpret');
@@ -141,6 +149,15 @@ await refuses('bad capability kind', () => transition({ capability: 'go_to_login
 await refuses('bad target id', () => transition({ capability: 'go_to_login', target: 'div#login' }), 'element_<semantic_purpose>');
 await refuses('bad api id', () => transition({ capability: 'go_to_login', apis: ['/api/login'] }), 'api_<name>');
 await refuses('effect contradicting the derived destination', () => transition({ capability: 'go_to_login', effects: [{ type: 'state_entered', to: 'state_home_anonymous' }] }), 'cannot end in two places');
+// A refusal is only as good as the correction it suggests. `to_state` is derived — the model never
+// passes it — so a message that leaves the reader to work out which of the two is wrong sends it
+// back to a field it did not choose. Two live runs guessed here: one wrote the page_type, one the
+// variant, and neither is a state.
+await refuses(
+  'the refusal says which side has to change',
+  () => transition({ capability: 'go_to_login', effects: [{ type: 'state_entered', to: 'state_home_anonymous' }] }),
+  'not the page_type and not the variant',
+);
 check('a refused transition records nothing', readFileSync(join(cwd, 'graph-run', 'transitions.jsonl'), 'utf8').trim().split('\n').length, 1);
 check('a refused transition mints no capability', JSON.parse(readFileSync(join(cwd, 'graph-run', 'capabilities.jsonl'), 'utf8')).name, 'go_to_login');
 
@@ -238,6 +255,35 @@ check('and the walk picks up again from the last step the log still has',
 check('the recreation is counted once, not once per step after it', [resumed.graph.directory_recreations, after.graph.directory_recreations], [1, 1]);
 check('the capability minted after the repair is in the log the commit reads',
   readFileSync(join(runDir, 'capabilities.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).name), ['buy_item']);
+
+// --- walking the same edge twice: the report has to survive its own verdict -
+// Repeating a step is ordinary — a model re-checks a flow, a page is reloaded — and it leaves two
+// candidates for one transition, the second of which is superseded. That row is a decision with no
+// rejection to report, and it is exactly where the tool boundary broke: the projection copies a
+// decision's fields straight out, a field that is *absent* rather than null is `undefined`, and the
+// harness will not call `undefined` JSON. It does not hand back a report with a hole in it — it
+// fails the whole `graph_commit` call, and its error
+// — `value is not lossless JSON` — names neither the field nor the reason. The model sees a tool
+// that stopped working and has nothing to read. Only a re-walk reaches that row, so the walk is
+// repeated here rather than described.
+queue = [capture({ url: 'http://x/cart', title: 'Cart' })];
+await act('browser_click', { selector: '#back' });
+const returned = await observe({ page_type: 'cart', detection: [{ type: 'url' }] });
+const back = await transition({ capability: 'return_to_cart', capability_kind: 'navigation' });
+check('a second visit to a state is a state, not a new one', [returned.graph.state.state_id, returned.graph.state.new, back.transition.to_state], ['state_cart', false, 'state_cart']);
+queue = [capture({ url: 'http://x/thanks', title: 'Thanks' })];
+await act('browser_click', { selector: '#buy' });
+await observe({ page_type: 'order_confirmation', detection: [{ type: 'url' }] });
+const again = await transition({
+  capability: 'buy_item',
+  capability_kind: 'navigation',
+  effects: [{ type: 'navigation', to: 'state_order_confirmation' }],
+});
+check('the same edge walked twice is the same transition', [again.transition.transition_id, again.transition.new], ['transition_buy_item', false]);
+check('and the tool says it reused the edge rather than minting one', again.transition.note.includes('already recorded'), true);
+const rewalked = await commit({ force: true });
+check('the second walk of one edge is superseded, not duplicated', rewalked.counts.transitions.superseded, 1);
+check('and graph_commit still returns JSON', losslessPaths(rewalked), []);
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

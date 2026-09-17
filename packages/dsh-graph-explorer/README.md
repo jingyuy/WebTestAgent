@@ -305,7 +305,13 @@ The two kinds of disagreement are treated differently:
 - **Errors refuse the call and nothing is recorded.** They are self-contradictions
   inside one record — an effect claiming `state_entered: X` while `to_state` is `Y`.
   No amount of evidence makes that true, so there is nothing to record and nothing
-  to warn about.
+  to warn about. `to_state` is the derived one, so `X` is the effect that has to change,
+  and it has to be a **state id**: the `page_type` a reading used (`project_list`) and its
+  `variant` (`authenticated`) are names for what a state *means*, not names for the state
+  itself, and the graph's own reference check would leave a `state_entered` pointing at
+  either of them dangling. Two live runs wrote exactly those two fields in turn, which is
+  the going rate for a parameter the docs left undefined; both corrected it on the next
+  attempt once the refusal named the state id it had derived.
 - **Warnings are reported and recorded**: a claimed `message` no capture carried, a
   claimed navigation across an unchanged URL, an unclaimed URL change, a claimed
   request nobody saw, a step where nothing observable changed, and a self-loop whose
@@ -559,8 +565,8 @@ finds the same package instances the harness itself uses.
 
 ```sh
 cd packages/dsh-graph-explorer
-npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.18.tgz
-dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.18.tgz
+npm pack                                     # -> webtestagent-dsh-graph-explorer-0.1.19.tgz
+dsh plugin --profile graph add "$PWD"/webtestagent-dsh-graph-explorer-0.1.19.tgz
 ```
 
 The version in that filename is load-bearing: pnpm keys a `file:` tarball on the
@@ -809,6 +815,24 @@ rather than by a check. The graph validates against the normative schemas, and i
 are three `effect_targets_resolved` notes at `info`, where an effect named `email_input` and the
 graph carries `element_email_input`.
 
+**Proven by a live agent run, 0.1.19.** The same sign-in walk, on the release that specifies what
+`state_entered`'s `to` is. `ok: true`, no gates, no refused edge, 2 states, 3 capabilities and 3
+edges; the graph validates against the normative schemas; and its findings are three
+`effect_targets_resolved` and three `element_declared_in_several_states`, all at `info`. The edge
+carries `state_entered: state_project_list_authenticated_projects_seeded` — the state id, written
+correctly on the **first** attempt, where the two runs before this one wrote a `page_type` and a
+`variant` in that position and were refused. That is what the fix was for, and it is the whole of
+the evidence for it: one run cannot show a negative, so the argument rests on the two 0.1.18 runs
+that got it wrong and the specification that was missing.
+
+The run does **not** exercise the other half of 0.1.19, and it is worth being explicit about why:
+this walk never repeated an edge, so it produced no `superseded` decision — the row that failed
+`graph_commit` outright in 0.1.18. That path was closed by reproduction rather than by a walk:
+`test/tools.test.mjs` walks one edge twice and asserts the tool still returns, and reverting the
+fix makes it fail with `$.decisions[0].rejection_reason is undefined`. A live run reaches a
+re-walk only when a model chooses to repeat a step, which is ordinary but not obligatory, and
+which is why the class of defect was invisible until a run happened to do it.
+
 It was the third attempt at that walk, and the two before it are why the reading tools refuse.
 The 0.1.15 run's report named nine findings — two detections dropped for having nothing to check,
 two effects dropped for naming a path, a masked-value assertion, a state minted out of a
@@ -948,6 +972,29 @@ and since nothing was recorded the model simply reads again — no action has to
    unaudited, and a threshold that could tell such a case apart would be invented here rather than
    in the application. The commit keeps the same finding as a backstop, for a log written before
    this rule or a reading whose surface was empty when it was made.
+11. **Closed in 0.1.19: a tool's return value is checked for lossless JSON, and the check names no
+   field.** Found by the 0.1.18 live runs above, as `tool "graph_commit" returned invalid output:
+   value is not lossless JSON` — the whole tool call, refused, with nothing in it to read. The
+   harness walks a `{type:'json'}` tool's raw return value (not the rendered text: `JSON.stringify`
+   would have dropped the offending field silently and hidden this) and refuses the call when any
+   part of it would not survive a round-trip. `undefined` is what a value usually is when that
+   happens, and there is no path named in the error, so the model's only recourse is to retry the
+   call that just failed. The trigger here was narrow and entirely ordinary: walking an edge twice
+   makes two candidates for one transition, the loser is a `superseded` decision, and the row for it
+   was pushed without `rejection_reason`/`rejection_basis` while the winner's row carried them as
+   explicit nulls — so the projection copied absent fields into a row every reader has to
+   special-case, and `undefined` travelled into the tool's return. The fix is on both sides of the
+   promise: the reconciler pushes every row of the one `decisions[]` table with the one shape, and
+   the projection coerces each nullable field at the point where the tool declares what it returns.
+   That second half is not a licence to hide reconciler bugs — a report with a null in it is worse
+   than a report with the truth in it, and the null is exactly what would hide one. Which is why the
+   table's *shape* is asserted where the table is built, in `commit.test.mjs`, and not here: what the
+   projection promises is the narrower thing it can promise, that a report the reconciler did produce
+   arrives at all. The alternative on offer was no report.
+   The class of bug is not closed — nothing validates a tool's output *shape* before the harness
+   does — but the seam that hid it is: `test/lossless.mjs` states the harness's rule as a list of
+   offending paths, and the suites now walk a re-walked edge through the tool and assert the call
+   still returns.
 
 ## Tests
 
@@ -1032,6 +1079,18 @@ noted about nothing. The commit-side half gets its smallest inputs in `commit.te
 log can be written by hand: two readings that share no control at all are reported
 `state_readings_share_no_surface` at `warning` with the document still committing, two that share
 a single control are left alone, and a reading that lists no control refutes nothing.
+
+One suite is about a seam the plugin does not own: what a tool returns. A tool that declares JSON
+output gets its raw return value walked by the harness for anything that would not survive a
+round-trip, and a value that does not — `undefined` being the usual one — fails **the whole call**,
+with an error naming neither the field nor the reason (`value is not lossless JSON`). A model on
+the other end sees a tool that stopped working, retries it, and gets the same nothing back.
+`test/lossless.mjs` writes that rule down as the list of offending paths rather than a boolean, so a
+failure reads as a diagnosis instead of a verdict; `commit.test.mjs` asserts the report and the graph
+survive the round-trip and that every `decisions[]` row carries the same keys; and `tools.test.mjs`
+walks one edge twice — the re-walk that produces a superseded candidate, which is where this was
+live — and asserts the tool still returns JSON. That last case is the reproduction, and it was
+confirmed by reverting the fix: it fails with `$.decisions[0].rejection_reason is undefined`.
 
 What they cannot check is that a real page looks like the capture claims. That is what
 a live run against a browser is for, and both are needed: the diff logic is the piece
