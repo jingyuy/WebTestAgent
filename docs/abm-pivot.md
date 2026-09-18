@@ -1,7 +1,7 @@
 # Pivot: generate an Application Behavior Model beside the graph
 
-Status: **Phase 0a and 0b DONE. Phase 1 DONE (stages A, B and C); Phase 2 next — the commit
-writes both documents.**
+Status: **Phase 0a, 0b, 1 and 2 DONE; Phase 3 next — the protocol is where the pivot is actually
+made.**
 Baseline: plugin `0.1.22`, branch
 `fix/graph-explorer-lossless-and-state-entered` (`8738f52`), deployed to the `graph` and
 `web` profiles. Work happens on **`feat/application-behavior-model`**, branched off `8738f52`
@@ -818,6 +818,40 @@ three honest (D8):
 Note that this criterion is a function of a Phase-1 artifact: it is evaluated against the walk
 `test/realization.test.mjs` records — a scripted three-step walk through the real tools, committed
 through the real commit — and not against anything 0b can currently write.
+
+**DONE.** `lib/validate.js` (both documents, closed gap 8), the ABM assembly in `reconcile()` with
+P1–P15 in `invariantsOf()` sharing one definition with 0b's `profileFindings`, the D4 fallback, the
+two-document `commitRun` with its `documents` section, and `test/abm-commit.test.mjs` as the
+acceptance test (all four clauses, green; `npm test` is 12 suites). The work found five things the
+plan had not anticipated, and each is now a rule with a test:
+
+- **The model's steps have to come from the log, not from `graph.json`.** `capabilityStep` is closed
+  on purpose (`additionalProperties: false`) and has no key for a step's `purpose` or its `effects`,
+  so the graph's `steps[]` is a *narrower projection* of the same record. The model reads the
+  `realization_step` records in `capabilities.jsonl` instead. A fact the fallback document cannot
+  hold is not a fact the model loses — that is the whole argument for two documents (D1), and it was
+  one commit away from being violated in the other direction.
+- **D12 reaches further than the edge.** The collapsed edge starts where the *invocation* started,
+  not where its last call did: carrying the last call's `from_state` claimed the behaviour began
+  wherever its final step began, which lost the state the walk was standing in when it was asked for
+  the behaviour. P12's `committed_transition_not_carried` fired on the projection's own defect.
+- **An effect is recorded as a `semantic_purpose` and has to enter the model as an id.** The graph's
+  effect target is resolved at commit time; the model's steps are read from the log, so the
+  resolution has to happen in the projection too. Without it the document named the same control two
+  ways — by id on the step, by purpose on its effect — and P4 refused it.
+- **A state is not blamed for a control it does not offer.** P13 was keyed on the state a call was
+  *recorded from*, so a control declared by the surface that actually offers it was reported as an
+  affordance already walked. An affordance is a claim about a surface, so the claim is filed on the
+  surfaces that declare the control, never on the one the walk happened to be standing in.
+- **D4's fallback is unreachable through the commit.** The commit always reassembles a journey for
+  the walk it recorded, so a journeyless document only ever reaches the projection from a caller who
+  hands it one of its own — which is what the baseline profiler does. It is exercised there, by
+  calling the projection directly, because otherwise its only reachable path would be one no suite
+  ever takes, and a rule no suite takes is a rule nothing holds.
+
+`test/prove-abm.py` grew the six Phase-2 cases that hold these rules down — the collapse, the
+log-sourced steps, the effect resolution, the fallback journey, the model write, and the validation
+gate — each of which must leave the acceptance suite red when removed. All 17 cases are caught.
 
 ### Phase 3 — the protocol
 

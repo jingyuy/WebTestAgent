@@ -8,7 +8,10 @@ capability applied in one state, landing in another — with the machinery's own
 account of the step checked against the model's. `graph_commit` then reconciles the
 whole run into a `graph.json` that validates against the target JSON Schemas, beside
 a `commit_report.json` that says what it committed, what it refused and why, and
-`graph_test` turns that graph into a Playwright spec for one of its journeys. See
+reads the same run a *second* time as an `application-model.json`: what the
+application can be asked to do, in the words a person would ask for it (see
+[The two documents](#the-two-documents)). `graph_test` turns that graph into a
+Playwright spec for one of its journeys. See
 [The commit](#the-commit),
 [Generating a test](#generating-a-test) and
 [What this proves, and what it does not](#what-this-proves-and-what-it-does-not).
@@ -67,9 +70,19 @@ graph-run/
   transitions.jsonl   # one record per walked step, endpoints derived from the readings
   evidence/           # one PNG per captured step
   graph.json          # written by graph_commit, only when the rules are satisfied
+  application-model.json  # the same run read as an application behaviour model
   commit_report.json  # written by graph_commit, always
   <journey>.spec.ts   # written by graph_test, from graph.json alone
 ```
+
+`application-model.json` is not a second format for the graph and it is not derived from
+it: both are readings of the one run — the graph is what the machinery did, the model is
+what the application offers — and each is assembled from the same log (see
+[The two documents](#the-two-documents)). It is written only when all three of these hold:
+the projection assembled it, the profile found no `error` in it, and it validates against
+`schemas/abm/0.2/application-model.schema.json`. `graph.json` is written under exactly the
+conditions it always was, plus validity, and the two verdicts are separate — a model the
+schemas refuse never takes the fallback document away with it.
 
 All four `.jsonl` files are append-only and never rewritten, so a later reading
 cannot silently alter the evidence it was derived from. A reading appends a new
@@ -370,8 +383,14 @@ raw evidence        observations.jsonl          append-only, never rewritten
         │  graph_commit — read all of it, judge each candidate, write both files
         ▼
 committed graph     graph.json                    only what survived the rules
+                    application-model.json        the same run, read as an app's behaviour
                     commit_report.json            every judgement that produced it
 ```
+
+The two documents are written by the same pass and neither is derived from the other. The
+same run read one way is what the machinery did; read the other way it is what the
+application offers — which is what "two readings of one run" means here (see
+[The two documents](#the-two-documents)).
 
 **It never repairs the raw logs.** A refused edge stays in `transitions.jsonl` exactly as
 the walk recorded it; a refuted detection stays in `states.jsonl` exactly as the model
@@ -518,6 +537,39 @@ Evidence is carried across from the steps and deduplicated by observation and ro
 to be: the schema's `evidenceRef` points at observations, never at transitions, so a
 journey's evidence is the readings its steps rested on.
 
+### The two documents
+
+`graph.json` and `application-model.json` are two readings of one run, not two versions of
+one file, and the distinction is the point of the model rather than a detail of how it is
+assembled. The graph answers *what did this walk do*: a capability applied in one state,
+landing in another, with the calls it took to get there named on the edge. The model
+answers *what can this application be asked to do*, in the words a person would ask for it
+— one behaviour per thing a user wants, its `realization[]` the steps it is performed by,
+its parameters the ones the steps bind, and the edges the surfaces it is offered from.
+
+Nothing derives one from the other. Both are projected from the same log, which is why a
+fact the graph cannot hold is not a fact the model loses: a step's `purpose` and its
+`effects` have no key in `capabilityStep` (`additionalProperties: false`, and the shape is
+deliberately narrower), so the model's steps are read from the `realization_step` records
+themselves rather than from the graph's projection of them.
+
+Three things read the model, and each is a way for it to be wrong out loud rather than
+quietly:
+
+- the **schemas** in `schemas/abm/0.2/`, which every document is checked against before it
+  is written;
+- the **profile** (`P1`–`P15`), whose `error` findings withhold the file — a document
+  nothing downstream reads cannot be wrong in a way that matters, so the file is only
+  written when the profile has nothing to say about it;
+- **`test/abm-commit.test.mjs`**, which commits a real walk through the real tools and
+  checks the four things the model owes: the fallback document is unchanged in shape, the
+  model validates and is written, the floor 0.1.22 carried is still carried, and the
+  commit's own model rules are the *same definition* as the standalone profile — asserted
+  by asking both the same question about the same walk, not by reading the source.
+
+The phase-by-phase design, including what each phase is still allowed not to do, is in
+[`docs/abm-pivot.md`](../../docs/abm-pivot.md).
+
 ### The report
 
 `commit_report.json` is the run's own account of the commit, written even when the commit
@@ -530,8 +582,18 @@ states{committed, candidates, deduplicated, readings}
 capabilities{committed, candidates}   transitions{candidates, distinct, committed, rejected, superseded}
 journeys{assembled, walked, unusable_steps, breaks, entry_states}
 observations{records, carried}        elements{declared, conflicts, shared}
+documents{graph{name, schema, checked, valid, written, errors}, model{…}}
 decisions[]   findings[]   invariants[]   notes[]   warnings[]
 ```
+
+`documents` is the per-document verdict, and it exists so "which document is short, and
+why" is answerable without opening two files: `checked` separates *wrong* from *not
+there* (`valid: null` is the third answer), `written` says whether the file is on disk, and
+`errors` is the schema's own list. `invariants[]` carries a `document` field for the same
+reason: the graph's §14 rules and the model's `P1`–`P15` are in one array, each finding
+saying which document it is about. `blocking[]` stays about `graph.json` — that is the
+document the run was for — so a model rule firing cannot block the graph; it withholds the
+model, which is reported in `documents.model.blockers[]`.
 
 `decisions[]` is per candidate (`commit` / `reject` / `supersede`, with the reason);
 `findings[]` is flat and carries its `scope`, so a dropped assertion on a *committed* edge
@@ -1121,9 +1183,15 @@ where the recorded graph has the margin.
    `{"password":{"type":"string","sensitive":true}}` was accepted here and refused there). The
    refusal names the offending key and the ten that are legal, and it fires **before**
    `store.addCapability`, so the vocabulary never learns a signature the schema would refuse.
-   The half that remains open is the general one: the **assembled document** is still not
-   validated against the normative schemas before the result is called `ok`. This closes the
-   field a live run actually got wrong, not the class.
+   *Closed in the ABM pivot:* the half that was still open was the general one — the **assembled
+   document** was not validated against the normative schemas before the result was called `ok`.
+   Both documents are now checked before anything is written (`lib/validate.js`, and the `documents`
+   section of the report — see [The two documents](#the-two-documents)). A document that does not
+   validate is never written, not even under `force`, and it never leaves `report.ok` true: the
+   graph's failure is a `graph_does_not_validate` blocker, the model's is a `model_does_not_validate`
+   entry in `documents.model.blockers[]`. That is the class rather than the field, which is what the
+   0.1.16 fix could not be — a projection with a `realization[].action` outside the enum is exactly
+   the kind of defect that shipped twice.
 9. **A repaired log is the tail of the run, and nothing says so on disk.** Found while
    closing the store's write path (0.1.14): when `graph-run/` is deleted mid-run, the store
    recreates it and carries on, which is right — but the new log holds only what came after

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Break one Phase-1 rule at a time and check the suite notices.
+"""Break one Phase-1 or Phase-2 rule at a time and check the suite notices.
 
 Each case: an exact string in a source file, the edit that removes the rule, and the suite that has
 to fail. A rule whose removal leaves the suite green is a rule nobody is testing — and Phase 1's
 rules are the ones most likely to rot quietly, because every one of them is about a claim that ends
 up in the *log* rather than in `graph.json`: nothing downstream fails when a recording rule is
 deleted, the run simply claims less and looks cleaner for it.
+
+Phase 2's cases are different in kind and are listed separately: there the artifact is a *second
+document*, and the way to earn its acceptance without earning it is to write less of it — an empty
+model is schema-valid and has no findings. So each Phase-2 case removes one rule that the two
+documents owe each other and checks that `test/abm-commit.test.mjs` notices.
 
 Same protocol as `test/prove-generate.py`: break the rule, not a clause the code already treats as
 equivalent. Restores every file it touches, including on the exception path, and leaves the tree
@@ -123,6 +128,70 @@ CASES = [
         'old': "        ...(actorRecords.length ? { actors: actorRecords } : {}),",
         'new': "        ...({}),",
         'suite': 'test/realization.test.mjs',
+    },
+    # --- Phase 2: the two documents, and what each one owes the other ---------
+    {
+        # D5/D12. The calls of one invocation are one move: without the merge a behaviour is as
+        # many edges as it made calls, and "what a user asks for" stops being the unit the model
+        # counts. A projection that reports the walk once per call is the walk's log, not a model.
+        'rule': 'the calls of one behaviour between two states are one edge',
+        'file': 'lib/abm.js',
+        'old': "      if (!carried.length) continue;",
+        'new': "      if (true) continue;",
+        'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # The graph's `steps[]` is a deliberately narrower projection of the recorded step —
+        # `capabilityStep` is closed and has no room for a `purpose` or an `effects` — so the model
+        # has to read the log. Remove that and the model loses exactly the facts the graph never
+        # carried, which is the reason there are two documents rather than one.
+        'rule': 'the model\'s steps are the recorded ones, not the graph\'s projection of them',
+        'file': 'lib/abm.js',
+        'old': "      recordedStepsIn(dir),",
+        'new': "      null,",
+        'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # Every reference in the document is an id. An element-shaped effect is recorded with the
+        # control's `semantic_purpose` (`email_input`), and a document whose steps name their
+        # element by id while their effects name the same control by purpose has two vocabularies
+        # in it. P4 refuses the second one, so this one has to be resolved.
+        'rule': 'an element-shaped effect is resolved to an element id, not left as a purpose',
+        'file': 'lib/abm.js',
+        'old': "        ELEMENT_TARGET_EFFECTS.has(effect.type) && !isElementId(effect.target) && elementIdByPurpose.has(effect.target)",
+        'new': "        false",
+        'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # D4's fallback. A walk that named no journey still has to be projected as one, because
+        # P12's `no_journey` is an *error*: without the fallback a run that claimed no goal is
+        # blocked by a fact about the run rather than by anything wrong with the model.
+        'rule': 'a walk that claimed no journey is projected as the walk it was',
+        'file': 'lib/abm.js',
+        'old': "  const walkedJourneys = journeys.length || !projectedTransitions.length ? journeys : [{",
+        'new': "  const walkedJourneys = journeys.length || true ? journeys : [{",
+        'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # The model is a document beside the graph, not a description of the graph: it is written
+        # where the run is, and a commit that reports a model it did not write is the report this
+        # phase exists to make honest.
+        'rule': 'the model is written beside the graph, not only reported',
+        'file': 'lib/commit.js',
+        'old': "  if (modelDocument) writeFileSync(modelPath, JSON.stringify(modelDocument, null, 2) + '\\n', 'utf8');",
+        'new': "  if (false) writeFileSync(modelPath, JSON.stringify(modelDocument, null, 2) + '\\n', 'utf8');",
+        'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # README gap 8, which Phase 2 exists to close: both documents are checked against the
+        # schema they name *before* `report.ok` is answered, and one that does not validate is
+        # never written. Checking nothing is not checking and passing — `valid: null` is the third
+        # answer, and the write gate treats it as a refusal.
+        'rule': 'the model is checked against the schema it names before the commit answers',
+        'file': 'lib/commit.js',
+        'old': "    model: check(model, 'abm/0.2/application-model.schema.json', 'application-model.json'),",
+        'new': "    model: check(null, 'abm/0.2/application-model.schema.json', 'application-model.json'),",
+        'suite': 'test/abm-commit.test.mjs',
     },
 ]
 

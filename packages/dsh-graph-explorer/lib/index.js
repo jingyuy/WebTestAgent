@@ -2445,7 +2445,7 @@ export function apply(ctx, config) {
                 );
             }
 
-            const { graph, report, graphPath, reportPath } = commitRun({
+            const { graph, model, report, graphPath, modelPath, reportPath } = commitRun({
                 dir,
                 command: `${self?.name ?? 'dsh-graph-explorer'} ${self?.version ?? 'unknown'} ${commitTool}`,
                 force: args.force === true,
@@ -2456,6 +2456,13 @@ export function apply(ctx, config) {
                 committed: report.ok,
                 graph_path: graphPath ?? null,
                 report_path: reportPath,
+                // The commit writes two documents, and they are two readings of one run: the model
+                // is not a rewrite of the graph and the graph is not a view of the model (D1). Both
+                // are reported, and `written` is the field that says which of them exists — the
+                // model is withheld when the profile finds an error in it, and that is a fact about
+                // the run the caller has to be able to read without opening the report.
+                model_path: modelPath ?? null,
+                model: report.documents?.model ?? null,
                 run_dir: dir,
                 application: report.application,
                 counts: {
@@ -2495,6 +2502,10 @@ export function apply(ctx, config) {
                 },
                 invariants: report.invariants.map((result) => ({
                     code: result.code,
+                    // Which document the rule is about. The list is one list on purpose — "is this
+                    // commit's output sound" is one question — and the tag is what keeps the graph's
+                    // thirteen rules and the model's fifteen readable apart in one answer.
+                    document: result.document ?? 'graph',
                     ok: result.ok,
                     severity: result.severity,
                     detail: result.detail,
@@ -2518,6 +2529,7 @@ export function apply(ctx, config) {
                 next: report.ok
                     ? `The graph is at ${graphPath}. It is built from ${report.transitions.committed} committed edge(s); `
                         + `${report.transitions.rejected} candidate(s) were refused and ${report.transitions.superseded} superseded. `
+                        + `${modelPath ? `The application model is at ${modelPath}. ` : report.documents?.model?.written === false ? 'No application model was written; the model section of the report says which rule withheld it. ' : ''}`
                         + 'Report the graph and the findings — a warning in warnings[] is a fact about the run, not a failure to paper over.'
                     : `No graph was written. ${report.blocking.length} blocking rule(s) fired; each one is a fact the run `
                         + 'does not settle. Resolve them and commit again — the raw evidence is unchanged, so a fix here is a '

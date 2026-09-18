@@ -276,7 +276,12 @@ console.log('\n# projection');
       dimension_of: ['state_project_list_authenticated_projects_populated'],
       detection: { type: 'value', element: 'element_project_list', operator: 'equals', expected: 'populated' },
       evidence: [evidence('obs_0003', 'identity')],
-      metadata: { confidence: 1, status: 'verified', extra: { derived: 'state.identity.dimensions' } },
+      metadata: {
+        confidence: 0.5,
+        status: 'inferred',
+        producer: 'importer:dsh-graph-explorer',
+        extra: { derived: 'state.identity.dimensions' },
+      },
     }]);
   check('the journey keeps the walk order, the edge arguments and the starting variant',
     model.journeys[0].steps.map((step) => [step.transition, step.arguments?.email ?? step.arguments?.password ?? null]),
@@ -306,20 +311,23 @@ console.log('\n# the 0.1.22 defect, in miniature');
     ['behavior_fill_login_email', 'behavior_fill_login_password', 'behavior_submit_login']);
   check('and passes the composite that names the goal', subjects(findings, 'P1').includes('behavior_login'), false);
   const p14 = withRule(findings, 'P14');
-  check('P14 refuses nine claims the same way the real walk measured (8 read, 1 derived)',
+  // A derived state variable used to claim `verified` with no producer behind it, which is the one
+  // claim in the projection that outranked the reading it came from. It is now inferred, honestly,
+  // and P14 no longer refuses it: the level is the level of the thing that produced it.
+  check('P14 refuses eight claims the same way the real walk measured (8 read, 0 derived)',
     [p14.length, p14.filter((finding) => finding.code === 'claim_outranks_its_producer').length,
       p14.filter((finding) => finding.code === 'claim_has_no_producer').length],
-    [9, 8, 1]);
-  check('and the three steps, their three edges, both states and one derived variable are which',
+    [8, 8, 0]);
+  check('and the three steps, their three edges and both states are which',
     subjects(findings, 'P14'),
-    ['behavior_fill_login_email', 'behavior_fill_login_password', 'behavior_submit_login', 'projects',
+    ['behavior_fill_login_email', 'behavior_fill_login_password', 'behavior_submit_login',
       'state_login_anonymous', 'state_project_list_authenticated_projects_populated',
       'transition_fill_login_email', 'transition_fill_login_password', 'transition_submit_login']);
   check('the composite and the journey are the two the commit wrote honestly, so they are untouched',
     [subjects(findings, 'P14').includes('behavior_login'), subjects(findings, 'P14').includes('journey_login_anonymous_to_project_list')],
     [false, false]);
   check('the summary counts them the way a gate would read them', summarizeFindings(findings),
-    { total: 15, errors: 12, warnings: 3, infos: 0, bySeverity: { info: 0, warning: 3, error: 12 }, byRule: { P1: 3, P2: 3, P14: 9 }, failed: true });
+    { total: 14, errors: 11, warnings: 3, infos: 0, bySeverity: { info: 0, warning: 3, error: 11 }, byRule: { P1: 3, P2: 3, P14: 8 }, failed: true });
   ok('the fixture really is the run\'s own vocabulary',
     MECHANISM_VERBS.has('fill') && MECHANISM_VERBS.has('submit') && source.capabilities[3].name === 'login');
 }

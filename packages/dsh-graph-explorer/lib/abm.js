@@ -43,7 +43,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, readRun, reconcile } from './commit.js';
+import { CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, readRun, readJsonl, reconcile } from './commit.js';
 import { EVIDENCE_ROLES } from './schema.js';
 import { slugify } from './session.js';
 
@@ -207,13 +207,25 @@ const placeholdersIn = (value) => {
  * one that has already been judged once. Reading it back is what makes 0b runnable against runs
  * that are already on disk, which is the only way to quantify the defect before changing anything.
  */
-export function candidatesFromGraph(graph, run = null) {
+export function candidatesFromGraph(graph, run = null, recordedSteps = null) {
+  // `capabilities[].steps[]` as *written* has been through the graph's own step shape
+  // (`capability.schema.json#/$defs/capabilityStep`, which sets `additionalProperties: false`), so
+  // it has no room for `purpose` or `effects` — the two keys the behaviour model's `behaviorStep`
+  // adds, and `commit.js` drops them at the projection and says why. The run's log keeps the whole
+  // record, so when the caller can hand over what was recorded, that is what the model is built
+  // from and the graph's narrower steps are the fallback. Nothing is invented either way: it is the
+  // same recorded step, read at the resolution the behaviour document gives it — and the prose on a
+  // step is exactly what says a collapsed move arrived somewhere in the middle of itself.
+  const capabilities = rows(graph?.capabilities).map((capability) => {
+    const recorded = recordedSteps?.get(capability.id);
+    return recorded?.length ? { ...capability, steps: recorded } : capability;
+  });
   return {
     run: run ?? null,
     application: graph.application ?? null,
     observations: rows(graph.observations),
     states: rows(graph.states),
-    capabilities: rows(graph.capabilities),
+    capabilities,
     transitions: rows(graph.transitions),
     journeys: rows(graph.journeys),
     coverage: graph.coverage ?? null,
@@ -223,11 +235,37 @@ export function candidatesFromGraph(graph, run = null) {
 }
 
 /**
+ * The steps a run recorded, per capability, out of the run's own log.
+ *
+ * `capabilities.jsonl` holds three kinds of record and the `realization_step` one is the behaviour
+ * model's step — a `behaviorStep`, with the `purpose` and the `effects` the graph's step shape has
+ * no key for. Reading them here rather than out of `graph.json` is what keeps a behaviour's own
+ * account of itself in the model: a step's `purpose` is why a person asked for it, and a step's
+ * `effects` is where the move landed, which is the only thing that can explain a state the walk
+ * entered between two calls of one behaviour (P12, `collapsed_past_a_state`).
+ *
+ * `null` when there is no log to read, which is a plain "the graph is all there is" and not an
+ * empty answer.
+ */
+function recordedStepsIn(dir) {
+  const path = join(dir, 'capabilities.jsonl');
+  if (!existsSync(path)) return null;
+  const byCapability = new Map();
+  for (const record of readJsonl(path)) {
+    const id = record?.capability_id;
+    if (record?.kind !== 'realization_step' || typeof id !== 'string') continue;
+    byCapability.set(id, [...(byCapability.get(id) ?? []), record]);
+  }
+  return byCapability;
+}
+
+/**
  * Everything one run recorded, read-only.
  *
  * `graph.json` wins when it is there: it is the document that was judged and it carries the
  * journeys, which the logs do not (a journey is a claim about a walk, and only the commit makes
- * it).
+ * it) — and the log wins for the *steps*, because the graph's step shape is narrower than the
+ * behaviour model's on purpose and the model is not built from the narrower one.
  *
  * Without it the four logs are read — and through `reconcile()`, not by hand. The logs hold the
  * *candidate* records, whose shape is older and looser than the committed one (`states.jsonl`
@@ -243,7 +281,11 @@ export function candidatesFromRun(dir) {
   const runPath = join(dir, 'run.json');
   const run = existsSync(runPath) ? JSON.parse(readFileSync(runPath, 'utf8')) : null;
   if (existsSync(graphPath)) {
-    return candidatesFromGraph(JSON.parse(readFileSync(graphPath, 'utf8')), run);
+    return candidatesFromGraph(
+      JSON.parse(readFileSync(graphPath, 'utf8')),
+      run,
+      recordedStepsIn(dir),
+    );
   }
   const read = readRun(dir);
   const { graph, draft, report } = reconcile({ ...read, command: 'graph_profile' });
@@ -298,12 +340,168 @@ export function modelFromCandidates({
   const stateById = new Map(states.map((entry) => [entry.id, entry]));
   const variantOfState = (stateId) => stateById.get(stateId)?.identity?.variant ?? null;
 
-  const edgesByCapability = new Map();
-  for (const edge of transitions) {
-    const capability = edge.action?.capability ?? null;
-    if (!capability) continue;
-    edgesByCapability.set(capability, [...(edgesByCapability.get(capability) ?? []), edge]);
+  // --- the realisation the run recorded, and what it demotes (D13/D14) --------------------------
+  // A capability is a *behaviour* only while nothing recorded it as a *step*. Phase 1 fills
+  // `capabilities[].steps[]` out of the `realization_step` log, so a capability that carries steps
+  // is the behaviour those steps perform, and the capabilities those same steps named are the
+  // mechanism rather than behaviours: `fill_login_email` is how `login` happens, not something a
+  // person asks for. The gate is that record and never `composed_of` alone — a capability composed
+  // of other capabilities (`session` = `go` then `b`) is a real behaviour built from real
+  // behaviours, and demoting its members because they are members would delete two behaviours a
+  // model declared and nothing refuted. On a run that recorded no realisation (`0.1.22`), nothing
+  // is demoted and the projection is the one 0b quantified.
+  const stepsOf = (capability) => rows(capability?.steps);
+  const realized = capabilities.filter((capability) => stepsOf(capability).length > 0);
+  const ownerOf = new Map(); // a step capability's id -> the realized behaviour that performed it
+  for (const behaviour of realized) {
+    for (const member of rows(behaviour.composed_of)) {
+      if (typeof member === 'string' && capabilityById.has(member)) ownerOf.set(member, behaviour);
+    }
   }
+  const ownerOfCall = (edge) => {
+    const called = edge.action?.capability;
+    if (typeof called !== 'string') return null;
+    return ownerOf.get(called) ?? capabilityById.get(called) ?? null;
+  };
+
+  // --- D5/D12: one edge per move a behaviour performs, not per call it makes ---------------------
+  // `transitions[]` is re-scoped to the behaviour: a behaviour whose steps were recorded is *one*
+  // move, and its destination is where its last step landed. The walk's own order is what makes the
+  // move readable — an invocation is a chain of the behaviour's calls, each starting where the one
+  // before it arrived — so two invocations of one behaviour are two edges however many calls each
+  // took, and a behaviour is never collapsed across a state it did not stay in. The log and
+  // `graph.json` keep every call, because a call is what happened and the edge is what it means.
+  // The survivor is the last call of the invocation, so the edge is known by the id of the call that
+  // ended it, its `metadata.extra.commit.step` is the reading it ended in, and the calls it absorbed
+  // are named on it — which is what P12a checks every committed call against.
+  const dedupeRefs = (list, key) => {
+    const seen = new Set();
+    const kept = [];
+    for (const item of list) {
+      const id = key(item);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      kept.push(item);
+    }
+    return kept;
+  };
+  const absorbed = new Map(); // an absorbed call's id -> the id of the edge that carries it
+  const survivorById = new Map(); // the surviving edge's id -> the merged edge
+  for (const behaviour of realized) {
+    const ownerId = behaviour.id ?? behaviour.capability_id;
+    const order = [ownerId, ...rows(behaviour.composed_of).filter((member) => typeof member === 'string')];
+    const rank = new Map(order.map((id, index) => [id, index]));
+    const calls = transitions
+      .filter((edge) => rank.has(edge.action?.capability))
+      .sort((left, right) => rank.get(left.action.capability) - rank.get(right.action.capability));
+    const invocations = [];
+    for (const call of calls) {
+      const current = invocations[invocations.length - 1];
+      if (current && current[current.length - 1].to_state === call.from_state) current.push(call);
+      else invocations.push([call]);
+    }
+    // D5's key then dedupes the invocations: two invocations of one behaviour between the same two
+    // states are one edge walked twice, however many calls each of them took, and the edge's
+    // `metadata.extra.collapsed.calls` is where that is written down.
+    const byMove = new Map();
+    for (const invocation of invocations) {
+      const key = `${invocation[0].from_state}|${invocation[invocation.length - 1].to_state}`;
+      const list = byMove.get(key) ?? [];
+      list.push(invocation);
+      byMove.set(key, list);
+    }
+    for (const group of byMove.values()) {
+      const final = group[group.length - 1];
+      const last = final[final.length - 1];
+      const carried = group.flatMap((invocation) => invocation).slice(0, -1);
+      for (const call of carried) absorbed.set(call.id, last.id);
+      if (!carried.length) continue;
+      survivorById.set(last.id, {
+        ...last,
+        // D12: the edge is the behaviour's *move*, so it starts where the invocation started and ends
+        // where the last of its calls landed. Its id is still the id of the call that ended it — that
+        // is what keeps the collapse readable against the log — but a move's origin is the reading it
+        // was performed from, and carrying the last call's `from_state` would have claimed the
+        // behaviour started wherever its final call started and lost the state the walk stood in when
+        // it was asked for.
+        from_state: final[0].from_state,
+        action: { ...last.action },
+        effects: dedupeRefs([...carried, last].flatMap((call) => rows(call.effects)), (effect) => JSON.stringify(effect)),
+        apis: distinct([...carried, last].flatMap((call) => rows(call.apis))),
+        evidence: dedupeRefs(
+          [...carried, last].flatMap((call) => rows(call.evidence)),
+          (ref) => `${ref.observation ?? ''}|${ref.role ?? ''}`,
+        ),
+        metadata: {
+          ...(last.metadata ?? {}),
+          extra: {
+            ...(last.metadata?.extra ?? {}),
+            collapsed: {
+              behaviour: ownerId,
+              // The move's own bounds, and then the calls it swallowed. `from_state` here is the
+              // edge's origin, so the two agree: a reader checking the collapse against the log has
+              // one place to look and no way to read the pair as disagreeing.
+              from_state: final[0].from_state,
+              to_state: last.to_state,
+              // How many times the behaviour was walked between these two states, and which calls
+              // each of those invocations made. A reader has to be able to tell "walked twice" from
+              // "one walk with a detour", because only the first is a repetition the model can
+              // rely on — and `calls` alone cannot say which without knowing where each began.
+              invocations: group.length,
+              calls: [...carried, last].map((call) => call.id),
+              passed_through: distinct(carried.map((call) => call.to_state).filter((state) => state !== last.to_state)),
+            },
+          },
+        },
+      });
+    }
+  }
+  // The surviving edges in the document's own order: a call that was absorbed is not an edge any
+  // more, and the edge that carries it stands where that call's last step stood.
+  const survivors = [];
+  const survivorSeen = new Set();
+  for (const edge of transitions) {
+    if (absorbed.has(edge.id)) continue;
+    const survivor = survivorById.get(edge.id) ?? edge;
+    if (survivorSeen.has(survivor.id)) continue;
+    survivorSeen.add(survivor.id);
+    survivors.push(survivor);
+  }
+  const edgesByCapability = new Map(); // a capability's id -> the surviving calls it made
+  const behaviourEdges = new Map(); // a realized behaviour's id -> the surviving edges it performs
+  for (const edge of survivors) {
+    const called = edge.action?.capability ?? null;
+    if (typeof called === 'string') {
+      edgesByCapability.set(called, [...(edgesByCapability.get(called) ?? []), edge]);
+    }
+    const owner = ownerOfCall(edge);
+    if (owner) {
+      const id = owner.id ?? owner.capability_id;
+      behaviourEdges.set(id, [...(behaviourEdges.get(id) ?? []), edge]);
+    }
+  }
+  const edgesFor = (capability) => {
+    const id = capability.id ?? capability.capability_id;
+    return behaviourEdges.get(id) ?? edgesByCapability.get(id) ?? [];
+  };
+
+  // A realized behaviour's parameters live on the step capabilities that declared them, so the
+  // behaviour's `input` is their union: a step binding `{{email}}` is the behaviour's parameter,
+  // and a behaviour that performs that step without declaring it is the `unbound_parameter` the
+  // profile refuses (P5). Nothing is invented — the union is a copy of a declaration the run made.
+  const inputOf = (behaviour) => {
+    const declared = behaviour.input && typeof behaviour.input === 'object' ? behaviour.input : null;
+    const members = rows(behaviour.composed_of)
+      .map((member) => (typeof member === 'string' ? capabilityById.get(member) : null))
+      .filter((member) => member?.input && typeof member.input === 'object');
+    if (!members.length) return declared;
+    const union = Object.assign({}, ...members.map((member) => member.input), declared ?? {});
+    if (!Object.keys(union).length) return undefined;
+    if (!declared) {
+      notes.push(`${behaviour.id}: input was taken from the capabilities its realization performs (${members.map((member) => member.id).join(', ')}), because a behaviour whose steps bind a parameter has to declare it.`);
+    }
+    return union;
+  };
 
   // --- actors: the declared vocabulary first, then the variants the run used and nobody declared -
   // `application.actors[]` is the one part of the document the evidence cannot supply. A page shows
@@ -349,7 +547,16 @@ export function modelFromCandidates({
         dimension_of: [],
         detection: detectionFor(state, value),
         evidence: [],
-        metadata: { confidence: 1, status: 'verified', extra: { derived: 'state.identity.dimensions' } },
+        // A variable is not read off a page the way a state is: the state is the reading, the
+        // variable is the commit's reading *of the reading*, so it is `inferred` and says who
+        // inferred it. Claiming `verified` here was the one row in the projection that carried a
+        // level with no producer behind it (P14/`claim_has_no_producer`).
+        metadata: {
+          confidence: 0.5,
+          status: 'inferred',
+          producer: 'importer:dsh-graph-explorer',
+          extra: { derived: 'state.identity.dimensions' },
+        },
       };
       if (!variable.values.includes(value)) variable.values.push(value);
       if (!variable.dimension_of.includes(state.id)) variable.dimension_of.push(state.id);
@@ -358,53 +565,117 @@ export function modelFromCandidates({
     }
   }
 
-  // --- behaviours: one per committed capability, in the order the document declares them ------
-  const behaviors = capabilities.map((capability) => {
-    const name = slugify(capability.name ?? capability.id ?? '');
-    if (name !== capability.name) {
-      notes.push(`${capability.id}: name "${capability.name}" is not a behaviour-name slug and was carried as "${name}".`);
+  // --- behaviours: one per committed capability, minus what the run recorded as a step ---------
+  // An element-shaped effect names the control it happened to. The tool's own description of `effects`
+  // says the target is written as a `semantic_purpose`, and the commit resolves it to an element id
+  // where it writes the edge, because every other reference in the graph is an id. A step of the
+  // model reads the *recorded* step, which still carries the purpose, so the same resolution happens
+  // here — a document whose steps name their element by id and whose effects name theirs by purpose
+  // is a document with two vocabularies in it, and P4 refuses the second one. A purpose that resolves
+  // to no element this run declared is left alone rather than guessed at, and P4 reports it.
+  const elementIdByPurpose = new Map();
+  for (const state of states) {
+    for (const element of rows(state.elements)) {
+      const purpose = element.semantic?.purpose;
+      if (typeof purpose === 'string' && isElementId(element.id)) elementIdByPurpose.set(purpose, element.id);
     }
-    const edges = edgesByCapability.get(capability.id ?? capability.capability_id) ?? [];
-    const composed = rows(capability.composed_of).map((member) => (
-      capabilityById.has(member) ? behaviorIdFor(capabilityById.get(member).name) : member
-    ));
-    const actor = singleVariant([
-      ...edges.map((edge) => variantOfState(edge.from_state)),
-      ...composed.flatMap((member) => (edgesByCapability.get(memberIdOf(member, capabilityById)) ?? [])
-        .map((edge) => variantOfState(edge.from_state))),
-    ]);
-    const steps = stepsOfCapability(capability, notes);
-    return prune({
-      id: behaviorIdFor(name),
-      name,
-      description: capability.description,
-      kind: BEHAVIOR_KINDS.has(capability.kind) ? capability.kind : undefined,
-      actor,
-      input: capability.input,
-      output: capability.output,
-      realization: steps,
-      composed_of: composed,
-      aliases: rows(capability.aliases),
-      evidence: rows(capability.evidence),
-      metadata: capability.metadata,
-    });
+  }
+  const resolveEffectTargets = (steps) => steps.map((step) => {
+    if (!rows(step.effects).length) return step;
+    return {
+      ...step,
+      effects: rows(step.effects).map((effect) => (
+        ELEMENT_TARGET_EFFECTS.has(effect.type) && !isElementId(effect.target) && elementIdByPurpose.has(effect.target)
+          ? { ...effect, target: elementIdByPurpose.get(effect.target) }
+          : effect
+      )),
+    };
   });
+  const behaviorIdOf = (capability) => behaviorIdFor(slugify(capability?.name ?? capability?.id ?? ''));
+  const behaviors = capabilities
+    .filter((capability) => !ownerOf.has(capability.id ?? capability.capability_id))
+    .map((capability) => {
+      const name = slugify(capability.name ?? capability.id ?? '');
+      if (name !== capability.name) {
+        notes.push(`${capability.id}: name "${capability.name}" is not a behaviour-name slug and was carried as "${name}".`);
+      }
+      const edges = edgesFor(capability);
+      const steps = resolveEffectTargets(stepsOfCapability(capability, notes));
+      // D14: `realization[]` is how a behaviour is performed, `composed_of` is what it is made of,
+      // and a behaviour with both has two answers to one question. A realized behaviour's members
+      // *are* its steps, so the composition is dropped with the demotion (D13); a behaviour with no
+      // recorded realization keeps its composition, because that is the only answer it has.
+      const composed = steps.length ? [] : rows(capability.composed_of).map((member) => (
+        capabilityById.has(member) ? behaviorIdFor(capabilityById.get(member).name) : member
+      ));
+      const actor = singleVariant([
+        ...edges.map((edge) => variantOfState(edge.from_state)),
+        ...composed.flatMap((member) => (edgesByCapability.get(memberIdOf(member, capabilityById)) ?? [])
+          .map((edge) => variantOfState(edge.from_state))),
+      ]);
+      // P9: a realized behaviour is anchored by the evidence of the calls its steps performed. The
+      // capability's own `evidence[]` is empty — the commit collects evidence per edge — so without
+      // this a behaviour whose members were just demoted would carry no evidence and no walkable
+      // member, which is exactly the shape `behavior_without_evidence` refuses.
+      const evidence = steps.length
+        ? dedupeRefs(edges.flatMap((edge) => rows(edge.evidence)), (ref) => `${ref.observation ?? ''}|${ref.role ?? ''}`)
+        : rows(capability.evidence);
+      return prune({
+        id: behaviorIdFor(name),
+        name,
+        description: capability.description,
+        kind: BEHAVIOR_KINDS.has(capability.kind) ? capability.kind : undefined,
+        actor,
+        input: steps.length ? inputOf(capability) : capability.input,
+        output: capability.output,
+        // The recorded steps, when the run recorded any: they are what the behaviour is, and the
+        // `steps[]` a 0.1 capability carries is the same claim in the older spelling.
+        realization: steps,
+        composed_of: composed,
+        aliases: rows(capability.aliases),
+        evidence,
+        metadata: capability.metadata,
+      });
+    });
 
   // --- affordances: declared controls on a surface that no committed step used -----------------
+  // Read off the walk's own calls, not the collapsed edges: the question is which declared controls
+  // the walk *used*, and a control used by a call that a behaviour's move absorbed was used.
+  //
+  // And marked used on the surfaces that *declare* the control, not on the state the call was
+  // recorded from. Which page a control belongs to is a fact about the state; which state the walk
+  // stood in when a call was written is a fact about the walk, and a call made right after a
+  // navigation the walk did not record a call for is attributed to the page it started on. Reading
+  // `from_state` would report a control the walk used as an offer nobody took, on the very page it
+  // was used on — a finding the evidence refutes, which is the one thing a profile must never say.
+  const surfacesOfElementId = new Map();
+  for (const state of states) {
+    for (const element of rows(state.elements)) {
+      if (!isElementId(element.id)) continue;
+      surfacesOfElementId.set(element.id, distinct([...(surfacesOfElementId.get(element.id) ?? []), state.id]));
+    }
+  }
   const actedOn = new Map();
   for (const edge of transitions) {
-    const from = edge.from_state;
-    const list = actedOn.get(from) ?? new Set();
-    if (isElementId(edge.action?.target)) list.add(edge.action.target);
-    for (const effect of rows(edge.effects)) {
-      if (ELEMENT_TARGET_EFFECTS.has(effect.type) && isElementId(effect.target)) list.add(effect.target);
+    const touched = distinct([
+      edge.action?.target,
+      ...rows(edge.effects)
+        .filter((effect) => ELEMENT_TARGET_EFFECTS.has(effect.type))
+        .map((effect) => effect.target),
+    ].filter(isElementId));
+    for (const element of touched) {
+      for (const surface of surfacesOfElementId.get(element) ?? distinct([edge.from_state])) {
+        actedOn.set(surface, new Set([...(actedOn.get(surface) ?? []), element]));
+      }
     }
-    actedOn.set(from, list);
   }
 
+  // A call made by a demoted step capability is performed *by* the behaviour that owns it, so the
+  // edge names the behaviour and not the step: `login` is what the walk did, and
+  // `fill_login_email` was how.
   const behaviorOfEdge = (edge) => {
-    const capability = capabilityById.get(edge.action?.capability);
-    return capability ? behaviorIdFor(capability.name) : undefined;
+    const owner = ownerOfCall(edge);
+    return owner ? behaviorIdOf(owner) : undefined;
   };
 
   // `state.capabilities` is 0.1's inverse view and 0.2 renamed it `behaviors` (D2), so the key is
@@ -418,21 +689,23 @@ export function modelFromCandidates({
         notes.push(`${state.id}: capabilities[] names "${id}", which no committed capability declares; the behaviour reference was dropped.`);
         return null;
       }
-      return behaviorIdFor(capability.name);
+      // An offered step capability is offered as the behaviour that performs it, because the step
+      // is not a behaviour any more (D13).
+      return behaviorIdOf(ownerOf.get(id) ?? capability);
     });
     return {
       ...prune(rest),
       // The inverse view of `transitions[].from_state`, plus what 0.1 already recorded as offered.
       behaviors: distinct([
-        ...transitions.filter((edge) => edge.from_state === state.id).map(behaviorOfEdge),
+        ...survivors.filter((edge) => edge.from_state === state.id).map(behaviorOfEdge),
         ...fromDocument,
       ]),
-      affordances: affordancesOf(state, actedOn.get(state.id) ?? new Set()),
+      affordances: affordancesOf(state, actedOn.get(state.id) ?? new Set(), state.affordances),
     };
   });
 
-  // --- transitions: the committed edges, one per move ------------------------------------------
-  const projectedTransitions = transitions.map((edge) => {
+  // --- transitions: one edge per move a behaviour performs (D5) --------------------------------
+  const projectedTransitions = survivors.map((edge) => {
     const capability = capabilityById.get(edge.action?.capability);
     if (!capability) {
       notes.push(`${edge.id}: names capability "${edge.action?.capability}", which is not declared; the edge was carried without a behaviour.`);
@@ -458,8 +731,44 @@ export function modelFromCandidates({
   });
 
   // --- journeys: the walk the commit reassembled, with an actor the document declares ----------
-  const projectedJourneys = journeys.map((journey, index) => {
-    const steps = journeySteps(journey, transitionById);
+  //
+  // D4's fallback, and the reason it is here rather than only in the commit: a document with edges
+  // and no walk is a document P12 has nothing to check (its `no_journey` finding is an *error*, so
+  // the model would be blocked by a fact about the run rather than about the model). The fallback is
+  // the run's own walk — `transitions[]` in the order they were taken, which is the order the run
+  // records them in — with `goal_stated: false`, because nobody asked for it. No priority is judged
+  // either, so `criticality` is omitted and the schema default applies: a fallback that guessed a
+  // priority would be the projection making the one judgement this module never makes.
+  //
+  // A journey the commit reassembled always exists when there is an edge, so this is reached only
+  // by a caller who handed the projection a graph of its own (the baseline profiler does) — which
+  // is exactly the case D4 is written for: the profiler must be able to say something about a walk
+  // it was given, not only about one the commit built.
+  const walkedJourneys = journeys.length || !projectedTransitions.length ? journeys : [{
+    id: 'journey_derived_walk',
+    name: `Derived walk: ${projectedTransitions[0].from_state} to ${projectedTransitions[projectedTransitions.length - 1].to_state} (${projectedTransitions.length} step(s))`,
+    goal_stated: false,
+    start_state: projectedTransitions[0].from_state,
+    transitions: projectedTransitions.map((transition) => transition.id),
+    metadata: {
+      status: 'inferred',
+      confidence: 0.5,
+      producer: 'importer:dsh-graph-explorer',
+      extra: {
+        derived: 'D4: the document carried no journey, so the order of `transitions[]` — the order the run took them — is used as the walk',
+        goal_stated: false,
+        criticality: 'not set: no priority was judged, so the schema default (standard) applies',
+        ...(typeof run?.instruction === 'string' && run.instruction ? { run_instruction: run.instruction } : {}),
+      },
+    },
+  }];
+  const projectedJourneys = walkedJourneys.map((journey, index) => {
+    // The walk's per-call ids are remapped onto the edges that carry them, so a journey names the
+    // behaviour it walked. Two calls of one behaviour between the same two states are one edge
+    // walked twice, and the journey names it twice (D5/D12).
+    const steps = journeySteps(journey, transitionById).map((step) => (
+      absorbed.has(step.transition) ? { ...step, transition: absorbed.get(step.transition) } : step
+    ));
     const startState = journey.start_state ?? steps[0]?.from_state ?? null;
     const actor = startState ? variantOfState(startState) : null;
     const endState = [...steps].reverse().map((step) => transitionById.get(step.transition)?.to_state)[0] ?? null;
@@ -546,6 +855,11 @@ function stepsOfCapability(capability, notes) {
       notes.push(`${capability.id}: a step with no action was not carried (a realisation step needs one).`);
       continue;
     }
+    // A `behaviorStep` has no `metadata` key — the schema closes it, and rightly: a step is a
+    // position inside a behaviour, not a claim that can be trusted on its own, and a step that
+    // claimed `verified` would outrank the behaviour it belongs to (D11). Nothing is lost by
+    // leaving the level off, because the behaviour that performs the step carries the metadata and
+    // the step's provenance is the record it was folded from.
     steps.push(prune({
       action: step.action,
       element: isElementId(step.element ?? step.target) ? step.element ?? step.target : undefined,
@@ -554,7 +868,8 @@ function stepsOfCapability(capability, notes) {
       arguments: step.arguments,
       effects: rows(step.effects),
       description: step.description,
-      metadata: { confidence: 1, status: 'verified', extra: { derived: 'capability.steps' } },
+      optional: step.optional,
+      timeout_ms: step.timeout_ms,
     }));
   }
   return steps;
@@ -578,18 +893,45 @@ function detectionFor(state, value) {
 }
 
 /**
- * What a surface offers and the walk never took (D6).
+ * What a surface offers and the walk never took (D6/D15).
  *
- * Only controls (`CONTROL_ROLES`), because a heading is not something a user can do, and only
- * elements no committed step on this surface touched, because an affordance the walk performed is
- * refuted by the walk (P13's second clause). `expected_behavior` is the element's own declared
- * purpose: the projection has no name to offer and will not invent one, so the claim is the
- * element's vocabulary and its confidence is 0.3 — the number §3 gives a claim nothing refuted.
+ * Two claims, one name. The run may have *recorded* an affordance: the reading that declared a
+ * control no step acted on names it (D15), and that claim is carried as recorded — but only where
+ * the state's own readings declare the element, because an affordance is offered by a surface and a
+ * claim about an element no reading saw is not about this state. What the run did not record is
+ * derived: a declared control on this surface that no committed step touched. Both are `inferred`,
+ * because both are read out of the reading rather than observed acting: the recorded one says which
+ * record it came from, the derived one says which element it was read off.
+ *
+ * Only controls (`CONTROL_ROLES`) are derived, because a heading is not something a user can do.
+ * `expected_behavior` is the element's own declared purpose: the projection has no name to offer and
+ * will not invent one, and the confidence is 0.3 — the number §3 gives a claim nothing refuted.
  */
-function affordancesOf(state, actedOn) {
+function affordancesOf(state, actedOn, recorded = []) {
   const evidence = rows(state.evidence);
+  const elementIds = new Set(rows(state.elements).map((element) => element.id));
+  const claimed = new Map();
+  for (const entry of rows(recorded)) {
+    const element = entry?.element ?? entry?.element_id ?? null;
+    if (!isElementId(element) || !elementIds.has(element)) continue;
+    claimed.set(element, prune({
+      element,
+      expected_behavior: typeof entry.expected_behavior === 'string' && entry.expected_behavior
+        ? entry.expected_behavior
+        : expectedBehaviorOf(rows(state.elements).find((each) => each.id === element) ?? {}),
+      description: `Recorded as offered by this surface when it was read${
+        entry.expected_behavior ? ` (${entry.expected_behavior})` : ''}.`,
+      evidence: rows(entry.evidence).length ? rows(entry.evidence) : evidence,
+      metadata: {
+        confidence: 0.5,
+        status: 'inferred',
+        producer: 'importer:dsh-graph-explorer',
+        extra: { derived: 'the affordances recorded on this reading' },
+      },
+    }));
+  }
   return rows(state.elements)
-    .filter((element) => CONTROL_ROLES.has(element.role) && !actedOn.has(element.id))
+    .filter((element) => CONTROL_ROLES.has(element.role) && !actedOn.has(element.id) && !claimed.has(element.id))
     .map((element) => prune({
       element: element.id,
       expected_behavior: expectedBehaviorOf(element),
@@ -602,7 +944,8 @@ function affordancesOf(state, actedOn) {
         producer: 'importer:dsh-graph-explorer',
         extra: { derived: 'declared control with no committed step' },
       },
-    }));
+    }))
+    .concat([...claimed.values()]);
 }
 
 const expectedBehaviorOf = (element) => {
@@ -613,13 +956,16 @@ const expectedBehaviorOf = (element) => {
 
 /** A journey's steps, in the order the walk took them, with the values the edge was walked with. */
 function journeySteps(journey, transitionById) {
+  // `journeyStep` is closed to `transition` and `arguments` (journey.schema.json: "anything a step
+  // could restate about the edge ... already lives on the edge"), so a step's own prose and its
+  // optionality are dropped here rather than written into a document the schema would refuse. Both
+  // are on the edge the step names: `description` from the graph's transition, and `optional`
+  // nowhere, because nothing in a recorded walk was optional.
   const declared = rows(journey.steps).filter((step) => typeof step?.transition === 'string');
   if (declared.length) {
     return declared.map((step) => prune({
       transition: step.transition,
       arguments: step.arguments,
-      description: step.description,
-      optional: step.optional,
     }));
   }
   return rows(journey.transitions)
@@ -796,6 +1142,23 @@ export function profileFindings(model, { candidates = null } = {}) {
   }
 
   // --- P4: every element a step or an effect names is a declared element id ---------------------
+  // The surfaces a behaviour's steps may have been performed on: its own edges' origins, plus the
+  // origins of the calls a collapsed edge absorbed. A behaviour is one move (D5), so the edge that
+  // swallowed two calls starts where the invocation started — and the step performed in the middle of
+  // it was performed on the surface that call started from, which is the second reason the collapse
+  // names the calls it absorbed instead of only counting them.
+  const committedById = new Map(rows(candidates?.transitions).map((call) => [call.id, call]));
+  const surfacesOfBehavior = (behaviorId) => {
+    const found = new Set();
+    for (const edge of rows(edgesByBehavior.get(behaviorId))) {
+      if (edge.from_state) found.add(edge.from_state);
+      for (const id of rows(edge.metadata?.extra?.collapsed?.calls)) {
+        const call = committedById.get(id);
+        if (call?.from_state) found.add(call.from_state);
+      }
+    }
+    return found;
+  };
   const elementIds = new Set(surfacesOfElement.keys());
   const checkElement = (value, { rule, code, scope, subject, what }) => {
     if (value === undefined) return;
@@ -809,7 +1172,7 @@ export function profileFindings(model, { candidates = null } = {}) {
   };
 
   for (const behavior of behaviors) {
-    const surfaces = new Set(rows(edgesByBehavior.get(behavior.id)).map((edge) => edge.from_state));
+    const surfaces = surfacesOfBehavior(behavior.id);
     for (const [index, step] of rows(behavior.realization).entries()) {
       checkElement(step.element, {
         rule: 'P4', code: 'realization_element', scope: 'behaviors', subject: behavior.id,
@@ -1128,6 +1491,27 @@ export function profileFindings(model, { candidates = null } = {}) {
     }
   }
 
+  // A collapse may not hide a state. An invocation whose steps passed through a state the edge does
+  // not name has taken a reading at a place no transition of the document leads to, and that reading
+  // is a fact: the projection writes down what it passed through rather than dropping it, and the
+  // behaviour's own steps may account for it — a step whose effect entered that state is the model
+  // saying the behaviour did arrive there. When neither says so, the move is refused (D12).
+  for (const transition of transitions) {
+    const passed = rows(transition.metadata?.extra?.collapsed?.passed_through);
+    if (!passed.length) continue;
+    const behavior = behaviorById.get(transition.behavior);
+    const explained = new Set(rows(behavior?.realization).flatMap((step) => rows(step.effects)
+      .filter((effect) => effect?.type === 'state_entered' && typeof effect.to === 'string')
+      .map((effect) => effect.to)));
+    for (const state of passed) {
+      if (explained.has(state)) continue;
+      add({
+        rule: 'P12', code: 'collapsed_past_a_state', severity: 'error', scope: 'transitions', subject: transition.id,
+        detail: `The edge ${transition.from_state} → ${transition.to_state} collapsed calls that went through ${state}, and no step of "${transition.behavior}" says it arrived there. A state the walk entered that no edge leads to is a reading nothing in the document explains.`,
+      });
+    }
+  }
+
   if (!journeys.length) {
     add({
       rule: 'P12', code: 'no_journey', severity: 'error', scope: 'journeys', subject: null,
@@ -1359,6 +1743,41 @@ export function summarizeFindings(findings) {
     byRule,
     failed: bySeverity.error > 0,
   };
+}
+
+/**
+ * The rules as invariants, in the shape `commit.js` reports the graph's own invariants in.
+ *
+ * The profile is a diagnostic and the commit is a gate, and the one thing that must not happen is
+ * for the two to disagree about what the rules are: a document that passes the commit and fails
+ * the profiler (or the reverse) makes both worthless. So the commit calls `profileFindings` and
+ * maps *its* output here rather than restating any rule — one definition, two readers, and the
+ * mapping is mechanical enough to be checked.
+ *
+ * One entry per rule, in the table's order. `ok` is "no error-severity finding of this rule": a
+ * warning is something the profile noted and the document still carries, which is what
+ * `PROFILE_RULES` says a warning is. `severity` is the worst the rule can report, so a reader can
+ * tell `P12` (which explains an unchecked coverage as an `info`) from `P2` (which never fails a
+ * document). The `document` field says which of the two documents the entry is about — this is
+ * about the application model, and `report.ok` is about `graph.json`.
+ */
+export function profileInvariants(findings) {
+  const list = rows(findings);
+  return Object.entries(PROFILE_RULES).map(([rule, severities]) => {
+    const mine = list.filter((finding) => finding.rule === rule);
+    const failures = mine.filter((finding) => finding.severity === 'error');
+    return {
+      code: rule,
+      name: `application model ${rule} (${severities.join('/')})`,
+      severity: severities.includes('error') ? 'error' : 'warning',
+      ok: failures.length === 0,
+      detail: mine.length
+        ? mine.map((finding) => `${finding.severity}: ${finding.code}${finding.subject ? ` (${finding.subject})` : ''} — ${finding.detail}`).join(' | ')
+        : `no finding from ${rule}.`,
+      document: 'model',
+      findings: mine.length,
+    };
+  });
 }
 
 /** The evidence roles this module assumes the schema defines. Asserted once, at import. */

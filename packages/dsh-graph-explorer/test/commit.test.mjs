@@ -424,7 +424,15 @@ check('the graph says the goal is the run\'s own, and that a priority was not ju
 check('and the coverage note counts the walks', graph.coverage.notes.includes('1 walk(s) reassembled from 3 step(s)'), true);
 
 // --- invariants -------------------------------------------------------------
-const invariants = Object.fromEntries(report.invariants.map((result) => [result.code, result]));
+// `report.invariants` carries both documents' rules in one flat list, and `document` says which
+// document each entry is about: `report.ok` is about `graph.json`, so the graph's own set is what
+// this suite documents. The model's fifteen rules are pinned separately, below.
+const invariants = Object.fromEntries(
+  report.invariants.filter((result) => result.document === 'graph').map((result) => [result.code, result]),
+);
+const modelInvariants = Object.fromEntries(
+  report.invariants.filter((result) => result.document === 'model').map((result) => [result.code, result]),
+);
 check('ids are unique across states', [invariants.unique_ids.ok, invariants.unique_ids.detail.includes('element ids')], [true, true]);
 check('no dangling references', invariants.no_dangling_references.ok, true);
 check('every element reference resolves', invariants.elements_reachable.ok, true);
@@ -447,6 +455,14 @@ check('the rule set is the documented one', Object.keys(invariants).sort(), [
   'journey_is_a_walk', 'no_dangling_references', 'reachability', 'short_form_hygiene', 'state_identity_unique',
   'state_indistinguishable_from_another', 'unique_ids', 'version_coherence',
 ]);
+// Phase 2: the application model's fifteen rules are in the same section, with `document: 'model'`,
+// so that "is this commit's output sound" is one question about two documents rather than two
+// sections a reader has to know to look in. They are *not* part of `blocking` — a rule the model
+// adds must never take `graph.json` away from a run that satisfied every rule the graph has (D1).
+check('the model\'s rules are reported beside them, and name the other document', Object.keys(modelInvariants).sort(), [
+  'P1', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9',
+]);
+check('and none of them is a blocker of the graph', report.blocking.some((blocker) => /^P\d+$/.test(blocker.code ?? '')), false);
 
 // --- what lands on disk -----------------------------------------------------
 check('the report is written', existsSync(join(FIXTURE, 'commit_report.json')), true);
