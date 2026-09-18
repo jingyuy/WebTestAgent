@@ -1,6 +1,6 @@
 # Pivot: generate an Application Behavior Model beside the graph
 
-Status: **plan, not started.** Baseline: plugin `0.1.22`, branch
+Status: **Phase 0a and 0b DONE, Phase 1 next.** Baseline: plugin `0.1.22`, branch
 `fix/graph-explorer-lossless-and-state-entered` (`8738f52`), deployed to the `graph` and
 `web` profiles. Work happens on **`feat/application-behavior-model`**, branched off `8738f52`
 (not `main`, which is three commits behind on `commit.js`/`generate.js`).
@@ -448,23 +448,73 @@ Four things 0a settled that the plan had wrong or had not seen:
 `test/fixtures/abm/example.json` against `schemas/abm/0.2/`. The fixture is §3 made executable,
 and it is also the expected shape for 0b.
 
-**0b — the projection, as a *check*, not as the pipeline.** `lib/abm.js`, pure, no writes:
-`modelFromCandidates({observations, states, capabilities, transitions, instruction})` → the ABM
-shape of §3, plus `profileFindings(model)` implementing P1–P13. This is a **diagnostic over
-recorded runs**, never the production path — `commitRun` will build the same document from the
-same store, and Phase 0b exists to have something to measure with before any live run.
+**0b — the projection, as a *check*, not as the pipeline. DONE.** `lib/abm.js` is pure and writes
+nothing: `modelFromCandidates(candidates)` → the ABM shape of §3, and `profileFindings(model,
+{candidates})` → P1–P13 as the flat findings `commitRun` already emits (`{rule, code, severity,
+scope, subject, detail, basis}`), counted by `summarizeFindings()` for a CLI. This is a **diagnostic
+over recorded runs**, never the production path — `commitRun` will build the same document from the
+same store, and 0b exists to have something to measure with before any live run.
 
-- Fixtures: `artifacts/graph-spike/` (12 observations / 11 readings, 0.1.0) and
-  `~/tmp/live-graph/graph-run/` (the 0.1.22 sign-in walk).
-- New suite `test/abm.test.mjs`.
-- **Acceptance:** running `profileFindings` over the real 0.1.22 `graph.json` reports
-  `fill_login_email` / `fill_login_password` / `submit_login` as **P1 violations**. That is the
-  motivating defect, quantified, against real output, before a single line of the plugin changes.
-- 0b is also where 0a's unenforced rules have to land: the five `SHAPE_ONLY` references (a step
-  naming an edge that exists, a realization naming an element some state declares, an affordance
-  naming an element *its own* state declares, an actor some `actors[]` entry declares, one edge
-  per `(from_state, behaviour, to_state)`) and the five `NOT_STRUCTURAL` judgement rules (P1, P5,
-  P9, P10, P11). `prove-schema.mjs` lists both families so neither can be quietly forgotten.
+- `npm test` is **10 suites**; `test/abm.test.mjs` is 80 checks, one per rule plus both directions
+  of each ("break exactly this one thing, and exactly this one rule notices").
+- `npm run profile:abm` (`test/abm-baseline.mjs`) is the acceptance proof. It is a harness and not
+  a suite, because the run it profiles is not in the clone: with no run directory it prints `SKIP`
+  and exits 0.
+- Fixtures: `artifacts/graph-spike/` (the 0.1.0 run that never committed) and
+  `~/tmp/live-graph/graph-run/` (the 0.1.22 sign-in walk). Both are local — `artifacts/` is ignored,
+  and a run recorded on a machine is not evidence a clone has — so `profile:abm` takes a directory
+  and SKIPs without one.
+
+**Acceptance (0b): MET.** Over the 0.1.22 walk the profile reports
+`{total: 6, errors: 3, warnings: 3, failed: true}` — **P1 ×3, on exactly the three motivating
+behaviours** (`behavior_fill_login_email`, `behavior_fill_login_password`, `behavior_submit_login`),
+P2 ×3 because those three capabilities are steps of `login` and have no `realization[]`, and
+**nothing else**: on the real document the other eleven rules are silent, which is the half of the
+claim that matters. The proof does not compare against a snapshot — it derives the expected refusals
+from the run's own `capabilities.jsonl` (every committed capability whose leading word is a
+mechanism verb must come out refused, and nothing else may be refused for that reason), so a fixture
+cannot be made to pass by editing the fixture. It also asserts that the projection validates against
+`schemas/abm/0.2/` (ajv, all 10 schemas, resolved by `test/ajv.mjs`) and that profiling a run does
+not modify the run it read.
+
+Five things 0b settled that the plan had not seen:
+
+1. **P9 reads a composition as anchored by its parts.** §3's literal wording refuses `cap_login`,
+   which carries no `evidence` key at all while the three capabilities it names do — and a
+   composition's evidence *is* its parts': the readings of `fill_email → fill_password → submit`
+   are the readings of `login`. Anchoring therefore recurses, and it still has teeth: a leaf with no
+   evidence is refused, and a member that loses its anchor de-anchors the composite above it (both
+   are reported, because both are now unobserved claims). This is a reading of §3, not a relaxation
+   of it, and it is the one place the implementation does not follow the table word for word.
+2. **The log path is the commit, run again — not a second reading of the same evidence.**
+   `candidatesFromRun()` prefers `graph.json`; without it it calls `reconcile()` from `commit.js`
+   and projects `graph ?? draft`, carrying the commit's blocking gates as notes. The `.jsonl`
+   records are *candidate*-shaped (`semantic_purpose` instead of `semantic`, a raw CSS string
+   instead of a locator object, no element id at all), so anything this module normalised by hand
+   would have been a divergent second opinion about the same run — and it was: the hand-written
+   version produced a document that failed validation on seven counts. It also means a run that
+   never committed is profileable, which is precisely the run a profile is for.
+3. **A run that declares no application cannot be projected, and is refused in the commit's own
+   words.** `modelFromCandidates()` throws naming `application_not_declared` rather than emitting a
+   placeholder: `application.id` and `application.name` are required by the schema, a host is not an
+   application, and a placeholder would produce a document that passes every shape check while
+   naming nothing. Measured on `graph-spike` (which has no `application` in `run.json`): the two
+   refusals agree, and `test/abm-baseline.mjs` asserts that they do.
+4. **A missing committed log is not a missing walk.** P12 needs the committed transitions to say
+   whether an edge was walked; with no log it reports one `info` (`coverage_unchecked`) and skips
+   both coverage loops. Refusing every edge instead would turn an absent input into a document full
+   of invented moves — the loudest possible false accusation.
+5. **0.1's `state.capabilities` is 0.2's `state.behaviors` (D2), and an id that no capability
+   declares is dropped with a note**, not carried as a behaviour that does not exist. This is the
+   second half of 0a's finding that the schema cannot check a single reference: being unable to
+   check it means the *projection* has to, and say so when it does.
+
+**0b is also where 0a's unenforced rules land**, and both families now have an owner: the five
+`SHAPE_ONLY` references are P4/P6/P12/P13 (`test/abm.test.mjs` checks each one refuses), and the
+five `NOT_STRUCTURAL` judgement rules are P1/P5/P9/P10/P11. `prove-schema.mjs` lists both families
+so neither can be quietly forgotten, and `test/ajv.mjs` is now the one place that knows how to find
+ajv on this machine (ESM `import()` ignores `NODE_PATH`, which is why the schema proof used to
+`SKIP` here while the fork proof passed).
 
 ### Phase 1 — behavioural recording
 

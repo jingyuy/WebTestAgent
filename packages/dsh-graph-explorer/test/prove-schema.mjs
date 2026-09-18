@@ -30,8 +30,8 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+import { loadAjv } from './ajv.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SCHEMA_DIRS = {
@@ -43,20 +43,14 @@ const ROOTS = {
   'abm/0.2': 'https://webtestagent.local/schemas/abm/0.2/application-model.schema.json',
 };
 
-const require = createRequire(import.meta.url);
-let Ajv2020;
-let addFormats;
-try {
-  const mod = require('ajv/dist/2020.js');
-  Ajv2020 = mod.default ?? mod;
-  const formats = require('ajv-formats');
-  addFormats = formats.default ?? formats;
-} catch {
+const ajvModules = await loadAjv();
+if (!ajvModules) {
   console.log('SKIP  ajv is not resolvable from here, so the schema proof did not run.');
   console.log('      npm i -D ajv ajv-formats && npm run prove:schema');
-  console.log('      (or set NODE_PATH to a node_modules that has them)');
+  console.log('      (or set ABM_AJV_ROOT to a directory that has them)');
   process.exit(0);
 }
+const { Ajv2020, addFormats } = ajvModules;
 
 function compiler(schemaDir, rootId) {
   const schemas = readdirSync(schemaDir)
