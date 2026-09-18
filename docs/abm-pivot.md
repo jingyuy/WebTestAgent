@@ -16,6 +16,7 @@ Status: **Phase 0a and 0b DONE, Phase 1 next.** Baseline: plugin `0.1.22`, branc
 | **D5** | **`transitions[]` comes back, re-scoped to the behaviour.** One entry per `(from_state, behaviour, to_state)` — never per tool call. `journeys[].steps[]` references them, the way `journeys[].transitions[]` already does. | §3: an edge is first-class again, so `preconditions[]`/`effects[]` leave `behaviors[]`. **P12 is repaired** (it cannot hold without this — see the note below). |
 | **D6** | **The ABM represents unwalked affordances.** `state.affordances[]` — an affordance is offered *by a surface*, so it lives on the state that offers it. | §3: new array + **P13**, which makes "nobody did this" checkable rather than asserted. |
 | **D7** | **No `features[]` in the ABM.** Feature grouping stays a `graph.json` layer; the ABM is a behaviour model, not a product map. | §3: "what the ABM deliberately does not gain". §2: `feature.schema.json` is **not** forked. The `feature` protocol argument keeps feeding `graph.json` only. |
+| **D8** | **An acceptance number needs a floor under it, and a shared rule needs a test.** "Zero errors" is satisfiable by recording less, "byte-comparable" is not a property of bytes, and "one definition" is an intention until something runs both. | §5: Phase 2's acceptance is four checkable clauses — validity **and** the counts 0.1.22 carried **and** a key-path diff **and** `profileFindings` ≡ `invariantsOf`. Every later phase states its acceptance the same way. |
 
 **Why D5 is not just a preference — P12 could not hold without it.** The current §3 made a walk step a
 *behaviour* (`login`) while P12 demanded "every committed transition appears as exactly one
@@ -556,9 +557,27 @@ with three `realization[]` entries and no top-level step capability. Covered by
 - `commit_report.json` gains a per-document section (`documents: { graph: {…}, model: {…} }`)
   so "which document is short, and why" is answerable without reading two files.
 
-**Acceptance:** on the Phase-1 walk, `graph.json` is **schema-VALID** against `schemas/0.1/` and
-byte-comparable in shape with 0.1.22; `application-model.json` is **schema-VALID** against
-`schemas/abm/0.2/`; zero `error`-severity findings in both.
+**Acceptance:** on the Phase-1 walk — all four clauses, and the fourth is the one that keeps the first
+three honest (D8):
+
+1. `graph.json` is **schema-VALID** against `schemas/0.1/`, and its **key paths are unchanged from
+   0.1.22**: the same top-level keys, the same per-record key sets modulo the fields Phase 1 adds, and
+   no key 0.1.22 carries going missing. That diff *is* what "byte-comparable in shape" means — the
+   bytes cannot match (`generated_at`, ids, record order), so the check is a diff of key paths and it
+   is run as one, not eyeballed.
+2. `application-model.json` is **schema-VALID** against `schemas/abm/0.2/`.
+3. **The floor.** Both documents still carry what the 0.1.22 walk carried — 4 capabilities, 2 states,
+   3 transitions, 1 journey in `graph.json` — and the ABM carries `login` with **three ordered
+   `realization[]` steps** and no top-level step capability. Clause 4 alone is satisfiable by
+   recording less: an empty document is schema-valid and has no findings, so the error count needs a
+   floor under it or the acceptance can be earned by shrinking the walk.
+4. **Zero `error`-severity findings in both, and the drift test**: profile the committed ABM through
+   Phase 0b's `profileFindings` *and* through `invariantsOf()` in `commit.js`, and assert the two
+   findings lists are identical. "Sharing one definition so they cannot drift" is an intention until
+   something runs both; this is the same doctrine 0b was built on.
+
+Note that this criterion is a function of a Phase-1 artifact that does not exist yet: it is evaluated
+against the walk `test/prove-abm.py` produces, not against anything 0b can currently write.
 
 ### Phase 3 — the protocol
 
