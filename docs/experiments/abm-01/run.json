@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-09-17T22:34:08.644Z",
+  "cwd": "/Users/jingyuyan/tmp/live-graph",
+  "start_url": "http://127.0.0.1:4173/",
+  "instruction": "Using the browser tools, open the Acme demo app at http://127.0.0.1:4173/ and sign in with test@example.com and password123. Follow the graph exploration protocol: call graph_observe to read the page state after every action (including the first), and graph_transition to record each move. Keep it short.",
+  "application": {
+    "id": "app_acme-demo",
+    "name": "Acme Demo App"
+  },
+  "max_steps": null,
+  "provider": "deepseek-official",
+  "model": "deepseek-flash",
+  "session_id": "session-2ce02651-5254-45f1-b192-c4749cd6cff3",
+  "agent_preset": null,
+  "plugin": {
+    "name": "@webtestagent/dsh-graph-explorer",
+    "version": "0.1.22"
+  }
+}

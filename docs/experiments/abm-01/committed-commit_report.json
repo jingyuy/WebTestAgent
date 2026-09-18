@@ -1,0 +1,364 @@
+{
+  "generated_at": "2026-09-17T22:34:44.532Z",
+  "command": "@webtestagent/dsh-graph-explorer 0.1.22 graph_commit",
+  "run_dir": "/Users/jingyuyan/tmp/live-graph/graph-run",
+  "application": {
+    "id": "app_acme-demo",
+    "name": "Acme Demo App"
+  },
+  "start_url": "http://127.0.0.1:4173/",
+  "instruction": "Using the browser tools, open the Acme demo app at http://127.0.0.1:4173/ and sign in with test@example.com and password123. Follow the graph exploration protocol: call graph_observe to read the page state after every action (including the first), and graph_transition to record each move. Keep it short.",
+  "version": {
+    "plugin": {
+      "name": "@webtestagent/dsh-graph-explorer",
+      "version": "0.1.22"
+    },
+    "model": "deepseek-flash",
+    "provider": "deepseek-official"
+  },
+  "ok": true,
+  "blocking": [],
+  "gates": [],
+  "states": {
+    "candidates": 4,
+    "committed": 2,
+    "deduplicated": 2,
+    "readings": 2
+  },
+  "capabilities": {
+    "candidates": 4,
+    "committed": 4,
+    "compositions": 2,
+    "composites": 1,
+    "attempts": {
+      "cap_fill_login_email": [
+        {
+          "transition_id": "transition_fill_login_email",
+          "from_state": "state_login_anonymous",
+          "to_state": "state_login_anonymous",
+          "decision": "committed",
+          "severity": "info",
+          "recorded_at": "2026-09-17T22:34:24.727Z",
+          "rejection_reason": null
+        }
+      ],
+      "cap_fill_login_password": [
+        {
+          "transition_id": "transition_fill_login_password",
+          "from_state": "state_login_anonymous",
+          "to_state": "state_login_anonymous",
+          "decision": "committed",
+          "severity": "info",
+          "recorded_at": "2026-09-17T22:34:31.750Z",
+          "rejection_reason": null
+        }
+      ],
+      "cap_submit_login": [
+        {
+          "transition_id": "transition_submit_login",
+          "from_state": "state_login_anonymous",
+          "to_state": "state_project_list_authenticated_projects_populated",
+          "decision": "committed",
+          "severity": "info",
+          "recorded_at": "2026-09-17T22:34:43.289Z",
+          "rejection_reason": null
+        }
+      ]
+    }
+  },
+  "transitions": {
+    "candidates": 3,
+    "distinct": 3,
+    "committed": 3,
+    "rejected": 0,
+    "superseded": 0
+  },
+  "journeys": {
+    "assembled": 1,
+    "walked": 3,
+    "unusable_steps": 0,
+    "breaks": 0,
+    "entry_states": [
+      "state_login_anonymous"
+    ],
+    "stated_goals": 1,
+    "instruction": "Using the browser tools, open the Acme demo app at http://127.0.0.1:4173/ and sign in with test@example.com and password123. Follow the graph exploration protocol: call graph_observe to read the page state after every action (including the first), and graph_transition to record each move. Keep it short.",
+    "named_by_model": 1,
+    "names_from_goals": 0,
+    "names_derived": 0,
+    "name_conflicts": []
+  },
+  "features": {
+    "claimed": [
+      "authentication"
+    ],
+    "committed": 1,
+    "ids": [
+      "feature_authentication"
+    ],
+    "unassigned": {
+      "capabilities": [],
+      "states": [],
+      "transitions": [],
+      "journeys": []
+    },
+    "note": "A feature is claimed by the model on the step that belongs to it (graph_transition `feature`) and its membership is then derived from that step: the capability it performs, the states it joins, the walk that contains it, the endpoints it called. Nothing here is inferred from a URL or a screen — a page does not say what a product area is for. Feature ids are slugs of the name and the name is the model's spelling, so `metadata.extra.declared.name` is the authoritative form."
+  },
+  "observations": {
+    "records": 4,
+    "carried": 4
+  },
+  "apis": {
+    "endpoints": 0,
+    "requests": 0,
+    "by_method": {},
+    "statuses": [],
+    "failures": 0,
+    "referenced_by_transitions": 0,
+    "unreferenced": [],
+    "id_collisions": [],
+    "note": "Derived from the request log the page hooks keep (observations[].network), never from the model: an endpoint is here because a reading shows a call to it, and no endpoint is here that the run did not call. No bodies were recorded, so a generator has to supply what a call takes and returns."
+  },
+  "elements": {
+    "declared": 12,
+    "conflicts": 0,
+    "shared": 0
+  },
+  "notes": [
+    "`ok` and `blocking` describe the graph document: `blocking` is the gates plus the failed error-severity invariants, and `graph.json` is written only when it is empty.",
+    "`findings[].severity` describes the candidate record, not the document: `error` means a claim was refused (and the refusal is the repair), `warning` means something was dropped or weakened, `info` means it was noted and carried through.",
+    "The raw logs are not touched by a commit. Every record this report judged is still in the run directory exactly as the walk wrote it, which is why a rejected candidate can be re-judged later without re-walking anything.",
+    "One candidate does not become one edge: candidates sharing a `transition_id` are the same edge walked more than once, and only the best of them is committed. `decisions[]` records what happened to the rest.",
+    "`journeys[]` is derived, not decided: it is the transitions log read back in walk order and cut where a step does not start where the previous one ended, or where its edge is not a committed edge between two committed states. The walk is evidence; the name is the model's own word for the walk when a step claimed one (`journey_name`, recorded per step in `metadata.extra.journey_names_claimed`), the run's instruction verbatim from `run.json` when the run walked one strand and the name was not claimed, and the endpoints of the walk otherwise — `metadata.extra.name_from` says which, and `name_stated` says whether any of it was a person's words."
+  ],
+  "decisions": [
+    {
+      "transition_id": "transition_fill_login_email",
+      "capability": "cap_fill_login_email",
+      "from_state": "state_login_anonymous",
+      "to_state": "state_login_anonymous",
+      "decision": "committed",
+      "status": "verified",
+      "severity": "info",
+      "warnings": [
+        {
+          "code": "effect_targets_resolved",
+          "severity": "info",
+          "basis": "reference_check",
+          "detail": "1 effect target(s) were written as a semantic purpose and are carried as the element id: email_input → element_email_input."
+        }
+      ],
+      "rejection_reason": null,
+      "rejection_basis": null,
+      "evidence": [
+        {
+          "observation": "obs_0001",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        }
+      ],
+      "candidates": 1
+    },
+    {
+      "transition_id": "transition_fill_login_password",
+      "capability": "cap_fill_login_password",
+      "from_state": "state_login_anonymous",
+      "to_state": "state_login_anonymous",
+      "decision": "committed",
+      "status": "verified",
+      "severity": "info",
+      "warnings": [
+        {
+          "code": "effect_targets_resolved",
+          "severity": "info",
+          "basis": "reference_check",
+          "detail": "1 effect target(s) were written as a semantic purpose and are carried as the element id: password_input → element_password_input."
+        }
+      ],
+      "rejection_reason": null,
+      "rejection_basis": null,
+      "evidence": [
+        {
+          "observation": "obs_0002",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        }
+      ],
+      "candidates": 1
+    },
+    {
+      "transition_id": "transition_submit_login",
+      "capability": "cap_submit_login",
+      "from_state": "state_login_anonymous",
+      "to_state": "state_project_list_authenticated_projects_populated",
+      "decision": "committed",
+      "status": "verified",
+      "severity": "info",
+      "warnings": [],
+      "rejection_reason": null,
+      "rejection_basis": null,
+      "evidence": [
+        {
+          "observation": "obs_0003",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        }
+      ],
+      "candidates": 1
+    }
+  ],
+  "findings": [
+    {
+      "code": "effect_targets_resolved",
+      "severity": "info",
+      "basis": "reference_check",
+      "detail": "1 effect target(s) were written as a semantic purpose and are carried as the element id: email_input → element_email_input.",
+      "scope": "transition_fill_login_email"
+    },
+    {
+      "code": "effect_targets_resolved",
+      "severity": "info",
+      "basis": "reference_check",
+      "detail": "1 effect target(s) were written as a semantic purpose and are carried as the element id: password_input → element_password_input.",
+      "scope": "transition_fill_login_password"
+    },
+    {
+      "scope": "transition_submit_login",
+      "code": "persistence_evidence_recorded",
+      "severity": "info",
+      "basis": "evidence_check",
+      "detail": "the reading at the end of this step shows \"localStorage.acme-demo-state\" written to the page's own storage, so state_project_list_authenticated_projects_populated is remembered rather than merely displayed. Kept as evidence and deliberately not offered as a dimension: no browser can be asked what the application remembers about a user, so a value assertion over a storage key is a check nothing can evaluate. It belongs in this edge's evidence and in a test's setup, or as a precondition on the states that depend on it."
+    }
+  ],
+  "invariants": [
+    {
+      "code": "unique_ids",
+      "name": "§14.1 uniqueness",
+      "severity": "error",
+      "ok": true,
+      "detail": "15 entity ids and 12 element ids are unique."
+    },
+    {
+      "code": "no_dangling_references",
+      "name": "§14.2 dangling references",
+      "severity": "error",
+      "ok": true,
+      "detail": "every id that is referenced exists."
+    },
+    {
+      "code": "elements_reachable",
+      "name": "§14.3 element reachability",
+      "severity": "error",
+      "ok": true,
+      "detail": "10 element references all resolve to a declared element."
+    },
+    {
+      "code": "state_identity_unique",
+      "name": "§14.4 state identity uniqueness",
+      "severity": "error",
+      "ok": true,
+      "detail": "no two of 2 states share (page_type, variant, dimensions)."
+    },
+    {
+      "code": "state_indistinguishable_from_another",
+      "name": "states told apart by their own evidence (this rule is the plugin's, beyond §14)",
+      "severity": "warning",
+      "ok": true,
+      "detail": "2 of 2 state(s) carry a fingerprint from their readings, and no two of them are equal."
+    },
+    {
+      "code": "journey_is_a_walk",
+      "name": "§14.5 journey is a walk",
+      "severity": "error",
+      "ok": true,
+      "detail": "1 journey(s) walk 3 step(s), and every step starts where the one before it ended."
+    },
+    {
+      "code": "reachability",
+      "name": "§14.6 reachability",
+      "severity": "warning",
+      "ok": true,
+      "detail": "entry state(s), from where the walks began: state_login_anonymous; a walk stops at state_project_list_authenticated_projects_populated, which is where a sample ends rather than where the application does"
+    },
+    {
+      "code": "detection_complete",
+      "name": "§14.7 detection completeness",
+      "severity": "error",
+      "ok": true,
+      "detail": "all 2 states carry detection."
+    },
+    {
+      "code": "evidence_integrity",
+      "name": "§14.8 evidence integrity",
+      "severity": "warning",
+      "ok": true,
+      "detail": "every one of 2 states and 3 edges is bound to readings that exist in the log, and no observation claims a state it is not attached to."
+    },
+    {
+      "code": "version_coherence",
+      "name": "§14.9 version coherence",
+      "severity": "info",
+      "ok": true,
+      "detail": "no application version was recorded and no observation claims a build, so there is nothing to disagree — the graph cannot be tied to a version at all."
+    },
+    {
+      "code": "feature_closure",
+      "name": "§14.10 feature closure (should, not must)",
+      "severity": "warning",
+      "ok": true,
+      "detail": "every one of 9 object(s) is covered by one of 1 feature(s)."
+    },
+    {
+      "code": "short_form_hygiene",
+      "name": "§14.11 short-form hygiene",
+      "severity": "info",
+      "ok": true,
+      "detail": "every produced source_mappings/evidence/preconditions/assertions is full form; the short forms the model wrote were normalized, and anything that could not resolve was dropped and reported."
+    },
+    {
+      "code": "confidence_floor",
+      "name": "§14.12 confidence floor",
+      "severity": "info",
+      "ok": true,
+      "detail": "1 object(s) are below the confidence floor or marked inferred and must not drive a criticality:critical test: cap_login"
+    }
+  ],
+  "warnings": [
+    "transition_fill_login_email: effect_targets_resolved — 1 effect target(s) were written as a semantic purpose and are carried as the element id: email_input → element_email_input.",
+    "transition_fill_login_password: effect_targets_resolved — 1 effect target(s) were written as a semantic purpose and are carried as the element id: password_input → element_password_input.",
+    "transition_submit_login: persistence_evidence_recorded — the reading at the end of this step shows \"localStorage.acme-demo-state\" written to the page's own storage, so state_project_list_authenticated_projects_populated is remembered rather than merely displayed. Kept as evidence and deliberately not offered as a dimension: no browser can be asked what the application remembers about a user, so a value assertion over a storage key is a check nothing can evaluate. It belongs in this edge's evidence and in a test's setup, or as a precondition on the states that depend on it.",
+    "application: no application version was recorded, so this graph cannot be tied to a build — invariant 9 (version coherence) is vacuous here, and evidence from a different build cannot be told apart from this one.",
+    "journeys: 1 walk(s) were reassembled from the order the steps were taken, and the run's own instruction is carried as their goal — quoted from run.json, not paraphrased, because nothing in a browser session says what a user was trying to achieve. Each `criticality` is the schema default, so a test generator still has to judge the priority.",
+    "features: 1 feature(s) were committed from the names the steps claimed, with their membership derived from those steps — the name is the model's, and nothing here was inferred from a URL or a screen. Every committed object belongs to one."
+  ]
+}

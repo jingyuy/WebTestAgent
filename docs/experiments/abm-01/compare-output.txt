@@ -1,0 +1,59 @@
+
+=== 1. STATES: does the semantic reading reproduce? ===
+  axis                               blind read                     committed graph
+  count                              2                              2
+  identity[0]                        login/anonymous/{}             login/anonymous/{}
+  identity[1]                        project_list/authenticated/{"projects":"populated"} project_list/authenticated/{"projects":"populated"}
+  identity sets identical: YES
+
+=== 2. THE WALK: same actions, same elements, same endpoints? ===
+  axis                               blind read                     committed graph
+  count                              3                              3
+  actions                            fill(sign_in_email) fill(sign_in_password) click(sign_in_submit) self:email_input self:password_input move:sign_in_button
+  arrival states                     state_project_list_authenticated_projects_populated state_project_list_authenticated_projects_populated
+  self-loops                         2                              2
+
+=== 3. BEHAVIOURS vs CAPABILITIES (the defect this pivot exists for) ===
+  axis                               blind read                     committed graph
+  top-level names                    sign_in                        fill_login_email, login, fill_login_password, submit_login
+  how many are sub-steps             0 (steps live in realization[]) 3 of 4
+  composite present                  0                              1
+  realization recorded               yes (3 steps)                  capability.steps[] never written
+
+=== 4. WHAT THE COMMITTED GRAPH HAS NO HOME FOR ===
+  axis                               blind read                     committed graph
+  actors[]                           2                              ABSENT (no top-level array)
+  entities[]                         2                              ABSENT (no top-level array)
+  state_variables[]                  3                              ABSENT (no top-level array)
+  affordances[]                      5                              ABSENT (no top-level array)
+  application.actors[] in graph: "<absent>"
+
+=== 5. ELEMENTS ===
+  axis                               blind read                     committed graph
+  declared element ids               14                             12
+  same purpose (normalized)          12                             12
+  only in blind read                 project_item, project_name     
+  only in graph                                                     -
+  name divergence                    sign_in_button                 login_button  (same element)
+  blind read's realization[] references not declared by any state: element_login_email, element_login_password, element_login_submit
+  => blind read satisfies its own P4: NO
+
+=== 6. DETECTION: is every claimed check evaluable? ===
+  axis                               blind read                     committed graph
+  state detections                   2 + 2                          3 + 4
+  state variables                    3                              n/a (dimensions only)
+  checks that read an element        2                              n/a
+  checks nothing can evaluate        notification_frequency         n/a
+  the graph warns about exactly this: transition_submit_login persistence_evidence_recorded
+
+=== 7. FEATURES / JOURNEY META ===
+  axis                               blind read                     committed graph
+  features                           none claimed                   1 (authentication)
+  journey.actor                      authenticated_user             ABSENT
+  journey.criticality                critical                       ABSENT (schema default)
+  journey.steps home                 first-class journeys[].steps[] metadata.extra.steps[] (derived)
+
+=== 8. COVERAGE, AS EACH ARTIFACT STATES IT ===
+  blind read: 1 behaviour(s) realized, 5 affordance(s) offered but never performed
+  graph:      4 capabilities (all fragments of one action), 1 journey, 0 affordances named
+  graph coverage.notes: 2 state(s) reconciled from 4 reading(s); 3 committed edge(s) from 3 candidate(s); 2 repeat reading(s) collapsed; 1 walk(s) reassembled from 3 step(s), with 0 step(s) that could not be walked through.

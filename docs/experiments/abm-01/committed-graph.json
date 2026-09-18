@@ -1,0 +1,1351 @@
+{
+  "schema_version": "0.1",
+  "generated_at": "2026-09-17T22:34:44.532Z",
+  "generator": {
+    "name": "@webtestagent/dsh-graph-explorer",
+    "version": "0.1.22",
+    "command": "@webtestagent/dsh-graph-explorer 0.1.22 graph_commit",
+    "notes": "Assembled by graph_commit from an exploration run. Raw evidence in observations.jsonl is unchanged; this file is derived and can be rebuilt."
+  },
+  "application": {
+    "id": "app_acme-demo",
+    "name": "Acme Demo App",
+    "base_url": "http://127.0.0.1:4173/",
+    "metadata": {
+      "status": "verified",
+      "producer": "manual",
+      "created_at": "2026-09-17T22:34:08.644Z",
+      "extra": {
+        "declared": {
+          "id": "plugin config `application.id`",
+          "name": "plugin config `application.name`"
+        },
+        "observed": {
+          "base_url": "run.json `start_url`"
+        },
+        "note": "The identity is declared, never derived: the start URL is where this walk happened, not what the application is."
+      }
+    }
+  },
+  "features": [
+    {
+      "id": "feature_authentication",
+      "name": "authentication",
+      "capabilities": [
+        "cap_fill_login_email",
+        "cap_fill_login_password",
+        "cap_submit_login",
+        "cap_login"
+      ],
+      "states": [
+        "state_login_anonymous",
+        "state_project_list_authenticated_projects_populated"
+      ],
+      "transitions": [
+        "transition_fill_login_email",
+        "transition_fill_login_password",
+        "transition_submit_login"
+      ],
+      "journeys": [
+        "journey_login_anonymous_to_project_list_authenticated_projects_popu"
+      ],
+      "metadata": {
+        "status": "inferred",
+        "producer": "llm:deepseek-flash",
+        "created_at": "2026-09-17T22:34:08.644Z",
+        "extra": {
+          "declared": {
+            "name": "authentication — the model's own word, claimed on the step(s) transition_fill_login_email, transition_fill_login_password, transition_submit_login",
+            "claimed_by": "graph_transition `feature` argument"
+          },
+          "observed": {
+            "transitions": 3,
+            "capabilities": 3,
+            "states": 2,
+            "journeys": 1,
+            "apis": 0
+          },
+          "derived_from": "the transitions whose step records claimed this name: their capabilities, the states they join, the walks that contain them, the endpoints they called",
+          "id_from": "slugify(\"authentication\") → feature_authentication",
+          "related_features": "not set: which features change together is the model's judgement and nothing in the evidence implies it",
+          "user_value": "not set: why this feature exists for the user is prose nothing in a browser session supplies",
+          "note": "the name is the model's; the membership was derived from the evidence of 3 step(s) and can be re-derived from this graph alone."
+        }
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "cap_fill_login_email",
+      "name": "fill_login_email",
+      "description": "Type the account email into the sign-in form.",
+      "kind": "interaction",
+      "input": {
+        "email": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "evidence": [
+        {
+          "observation": "obs_0001",
+          "role": "identity"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "action"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "effect"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 1,
+        "created_at": "2026-09-17T22:34:24.726Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "attempts": 1,
+            "committed_edges": 1
+          },
+          "vocabulary_notes": [
+            {
+              "signal": "overlapping_words",
+              "you_said": "fill_login_email",
+              "vocabulary_name": "login",
+              "relation": "broader_than",
+              "detail": "\"fill_login_email\" contains the words of \"login\" (which already exists). They may be one behaviour described two ways. Reuse \"login\" if they are."
+            }
+          ],
+          "composed_of_names": [],
+          "kind_recorded_by_a_later_composition": false,
+          "minted_by": "graph_transition (first use of the name)"
+        }
+      }
+    },
+    {
+      "id": "cap_login",
+      "name": "login",
+      "kind": "composite",
+      "composed_of": [
+        "cap_fill_login_email",
+        "cap_fill_login_password",
+        "cap_submit_login"
+      ],
+      "metadata": {
+        "status": "inferred",
+        "producer": "llm:deepseek-flash",
+        "confidence": 0.5,
+        "created_at": "2026-09-17T22:34:24.726Z",
+        "extra": {
+          "commit": {
+            "decision": "inferred",
+            "attempts": 0,
+            "committed_edges": 0
+          },
+          "vocabulary_notes": [],
+          "composed_of_names": [
+            "fill_login_email",
+            "fill_login_password",
+            "submit_login"
+          ],
+          "kind_recorded_by_a_later_composition": false,
+          "minted_by": "graph_transition (first use of the name)"
+        }
+      }
+    },
+    {
+      "id": "cap_fill_login_password",
+      "name": "fill_login_password",
+      "description": "Type the account password into the sign-in form; the collector records the value as [set].",
+      "kind": "interaction",
+      "input": {
+        "password": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "evidence": [
+        {
+          "observation": "obs_0002",
+          "role": "identity"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "action"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "effect"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 1,
+        "created_at": "2026-09-17T22:34:31.750Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "attempts": 1,
+            "committed_edges": 1
+          },
+          "vocabulary_notes": [
+            {
+              "signal": "overlapping_words",
+              "you_said": "fill_login_password",
+              "vocabulary_name": "login",
+              "relation": "broader_than",
+              "detail": "\"fill_login_password\" contains the words of \"login\" (which already exists). They may be one behaviour described two ways. Reuse \"login\" if they are."
+            }
+          ],
+          "composed_of_names": [],
+          "kind_recorded_by_a_later_composition": false,
+          "minted_by": "graph_transition (first use of the name)"
+        }
+      }
+    },
+    {
+      "id": "cap_submit_login",
+      "name": "submit_login",
+      "description": "Submit the sign-in form; the app authenticates the user and shows the project list.",
+      "kind": "interaction",
+      "evidence": [
+        {
+          "observation": "obs_0003",
+          "role": "identity"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "action"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "effect"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 1,
+        "created_at": "2026-09-17T22:34:43.288Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "attempts": 1,
+            "committed_edges": 1
+          },
+          "vocabulary_notes": [
+            {
+              "signal": "overlapping_words",
+              "you_said": "submit_login",
+              "vocabulary_name": "login",
+              "relation": "broader_than",
+              "detail": "\"submit_login\" contains the words of \"login\" (which already exists). They may be one behaviour described two ways. Reuse \"login\" if they are."
+            }
+          ],
+          "composed_of_names": [],
+          "kind_recorded_by_a_later_composition": false,
+          "minted_by": "graph_transition (first use of the name)"
+        }
+      }
+    }
+  ],
+  "states": [
+    {
+      "id": "state_login_anonymous",
+      "identity": {
+        "route": "/",
+        "page_type": "login",
+        "variant": "anonymous"
+      },
+      "description": "The Acme sign-in screen with email, password, remember-me and a Sign in button.",
+      "elements": [
+        {
+          "id": "element_email_input",
+          "role": "textbox",
+          "name": "Email",
+          "semantic": {
+            "purpose": "email_input"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "email-input"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:15.291Z",
+            "extra": {
+              "observed_in": "state_login_anonymous",
+              "raw_locator": "[data-testid=\"email-input\"]"
+            }
+          }
+        },
+        {
+          "id": "element_password_input",
+          "role": "textbox",
+          "name": "Password",
+          "semantic": {
+            "purpose": "password_input"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "password-input"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:15.291Z",
+            "extra": {
+              "observed_in": "state_login_anonymous",
+              "raw_locator": "[data-testid=\"password-input\"]"
+            }
+          }
+        },
+        {
+          "id": "element_remember_checkbox",
+          "role": "checkbox",
+          "name": "Remember me",
+          "semantic": {
+            "purpose": "remember_checkbox"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "remember-checkbox"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:15.291Z",
+            "extra": {
+              "observed_in": "state_login_anonymous",
+              "raw_locator": "[data-testid=\"remember-checkbox\"]"
+            }
+          }
+        },
+        {
+          "id": "element_login_button",
+          "role": "button",
+          "name": "Sign in",
+          "semantic": {
+            "purpose": "login_button"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "login-button"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:15.291Z",
+            "extra": {
+              "observed_in": "state_login_anonymous",
+              "raw_locator": "[data-testid=\"login-button\"]"
+            }
+          }
+        },
+        {
+          "id": "element_forgot_password_link",
+          "role": "link",
+          "name": "Forgot password?",
+          "semantic": {
+            "purpose": "forgot_password_link"
+          },
+          "locator": {
+            "strategy": "id",
+            "value": "forgot"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:15.291Z",
+            "extra": {
+              "observed_in": "state_login_anonymous",
+              "raw_locator": "#forgot"
+            }
+          }
+        }
+      ],
+      "capabilities": [
+        "cap_fill_login_email",
+        "cap_fill_login_password",
+        "cap_submit_login"
+      ],
+      "outgoing_transitions": [
+        "transition_fill_login_email",
+        "transition_fill_login_password",
+        "transition_submit_login"
+      ],
+      "detection": [
+        {
+          "type": "url",
+          "operator": "matches",
+          "expected": "/"
+        },
+        {
+          "type": "element_state",
+          "element": "element_login_button",
+          "operator": "equals",
+          "expected": "visible"
+        },
+        {
+          "type": "element_state",
+          "element": "element_email_input",
+          "operator": "exists"
+        }
+      ],
+      "evidence": [
+        {
+          "observation": "obs_0001",
+          "role": "identity"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "identity"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "identity"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 0.95,
+        "created_at": "2026-09-17T22:34:15.291Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "candidate_id": "state_login_anonymous",
+            "readings": 3,
+            "apis": []
+          },
+          "identity_key": "[\"login\",\"anonymous\",[]]",
+          "observable": {
+            "routes": [
+              "/"
+            ],
+            "surface_size": 5,
+            "surface": [
+              "button:Sign in",
+              "checkbox:Remember me",
+              "link:Forgot password?",
+              "textbox:Email",
+              "textbox:Password"
+            ],
+            "forms": [
+              "GET  [email,password,remember,submit]"
+            ]
+          },
+          "observed_record_kind": "state",
+          "dropped_detection": []
+        }
+      }
+    },
+    {
+      "id": "state_project_list_authenticated_projects_populated",
+      "identity": {
+        "route": "/",
+        "page_type": "project_list",
+        "variant": "authenticated",
+        "dimensions": {
+          "projects": "populated"
+        }
+      },
+      "description": "Signed in as test@example.com, the Projects screen lists one project, \"Website Redesign\".",
+      "elements": [
+        {
+          "id": "element_nav_projects",
+          "role": "button",
+          "name": "Projects",
+          "semantic": {
+            "purpose": "nav_projects"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "nav-projects"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:39.979Z",
+            "extra": {
+              "observed_in": "state_project_list_authenticated_projects_populated",
+              "raw_locator": "[data-testid=\"nav-projects\"]"
+            }
+          }
+        },
+        {
+          "id": "element_nav_settings",
+          "role": "button",
+          "name": "Settings",
+          "semantic": {
+            "purpose": "nav_settings"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "nav-settings"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:39.979Z",
+            "extra": {
+              "observed_in": "state_project_list_authenticated_projects_populated",
+              "raw_locator": "[data-testid=\"nav-settings\"]"
+            }
+          }
+        },
+        {
+          "id": "element_current_user",
+          "role": "generic",
+          "name": "test@example.com",
+          "semantic": {
+            "purpose": "current_user"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "current-user"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:39.979Z",
+            "extra": {
+              "observed_in": "state_project_list_authenticated_projects_populated",
+              "raw_locator": "[data-testid=\"current-user\"]"
+            }
+          }
+        },
+        {
+          "id": "element_logout_button",
+          "role": "button",
+          "name": "Log out",
+          "semantic": {
+            "purpose": "logout_button"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "logout-button"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:39.979Z",
+            "extra": {
+              "observed_in": "state_project_list_authenticated_projects_populated",
+              "raw_locator": "[data-testid=\"logout-button\"]"
+            }
+          }
+        },
+        {
+          "id": "element_project_name_input",
+          "role": "textbox",
+          "name": "New project name",
+          "semantic": {
+            "purpose": "project_name_input"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "project-name-input"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:39.979Z",
+            "extra": {
+              "observed_in": "state_project_list_authenticated_projects_populated",
+              "raw_locator": "[data-testid=\"project-name-input\"]"
+            }
+          }
+        },
+        {
+          "id": "element_add_project_button",
+          "role": "button",
+          "name": "Add project",
+          "semantic": {
+            "purpose": "add_project_button"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "add-project-button"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:39.979Z",
+            "extra": {
+              "observed_in": "state_project_list_authenticated_projects_populated",
+              "raw_locator": "[data-testid=\"add-project-button\"]"
+            }
+          }
+        },
+        {
+          "id": "element_project_list",
+          "role": "generic",
+          "name": "Project list",
+          "semantic": {
+            "purpose": "project_list"
+          },
+          "locator": {
+            "strategy": "testid",
+            "value": "project-list"
+          },
+          "metadata": {
+            "status": "verified",
+            "producer": "playwright",
+            "created_at": "2026-09-17T22:34:39.979Z",
+            "extra": {
+              "observed_in": "state_project_list_authenticated_projects_populated",
+              "raw_locator": "[data-testid=\"project-list\"]"
+            }
+          }
+        }
+      ],
+      "detection": [
+        {
+          "type": "element_state",
+          "element": "element_current_user",
+          "operator": "equals",
+          "expected": "visible"
+        },
+        {
+          "type": "element_state",
+          "element": "element_project_list",
+          "operator": "exists"
+        },
+        {
+          "type": "element_state",
+          "element": "element_add_project_button",
+          "operator": "equals",
+          "expected": "visible"
+        },
+        {
+          "type": "value",
+          "target": "projects",
+          "operator": "equals",
+          "expected": "populated"
+        }
+      ],
+      "evidence": [
+        {
+          "observation": "obs_0004",
+          "role": "identity"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 0.95,
+        "created_at": "2026-09-17T22:34:39.979Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "candidate_id": "state_project_list_authenticated_projects_populated",
+            "readings": 1,
+            "apis": []
+          },
+          "identity_key": "[\"project_list\",\"authenticated\",[\"projects=populated\"]]",
+          "observable": {
+            "routes": [
+              "/"
+            ],
+            "surface_size": 5,
+            "surface": [
+              "button:Add project",
+              "button:Log out",
+              "button:Projects",
+              "button:Settings",
+              "textbox:New project name"
+            ],
+            "forms": [
+              "GET  [email,password,remember,submit]"
+            ],
+            "storage_keys": [
+              "acme-demo-state"
+            ]
+          },
+          "observed_record_kind": "state",
+          "dropped_detection": []
+        }
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "id": "transition_fill_login_email",
+      "from_state": "state_login_anonymous",
+      "to_state": "state_login_anonymous",
+      "action": {
+        "capability": "cap_fill_login_email",
+        "arguments": {
+          "email": "test@example.com"
+        },
+        "target": "element_email_input"
+      },
+      "description": "Type the account email into the sign-in form.",
+      "effects": [
+        {
+          "type": "value_changed",
+          "target": "element_email_input",
+          "to": "test@example.com",
+          "observed": true
+        }
+      ],
+      "evidence": [
+        {
+          "observation": "obs_0001",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 1,
+        "created_at": "2026-09-17T22:34:24.727Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "severity": "info",
+            "candidate_id": "transition_fill_login_email",
+            "candidates_seen": 1,
+            "warnings": [
+              {
+                "code": "effect_targets_resolved",
+                "severity": "info",
+                "basis": "reference_check",
+                "detail": "1 effect target(s) were written as a semantic purpose and are carried as the element id: email_input → element_email_input."
+              }
+            ],
+            "rejection_reason": null,
+            "rejection_basis": null,
+            "dropped": {
+              "effects": [],
+              "assertions": [],
+              "apis": []
+            },
+            "apis_declared": [],
+            "apis_observed": [],
+            "state_variables": {
+              "moved": [],
+              "recorded": [],
+              "unrecorded": [],
+              "semantic": [],
+              "persistence": []
+            },
+            "step": {
+              "action_id": "action_0002",
+              "before_observation": "obs_0001",
+              "after_observation": "obs_0002",
+              "before_role": "identity",
+              "after_role": "action",
+              "before_surface": 5,
+              "after_surface": 5
+            },
+            "candidate_assertions": [],
+            "candidate_assertions_declined": []
+          },
+          "recorder": {
+            "observed_change": {
+              "changed": [
+                "textbox:Email: value=\"\" → value=\"test@example.com\""
+              ]
+            },
+            "chain_break": null,
+            "notes": 0,
+            "evidence": [
+              {
+                "observation": "obs_0001",
+                "role": "identity",
+                "note": "the surface as it stood when the action was taken (from_state)"
+              },
+              {
+                "observation": "obs_0002",
+                "role": "action",
+                "note": "the action itself, and the surface it produced (to_state)"
+              },
+              {
+                "observation": "obs_0002",
+                "role": "effect",
+                "note": "what the machinery saw change between the two readings"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "transition_fill_login_password",
+      "from_state": "state_login_anonymous",
+      "to_state": "state_login_anonymous",
+      "action": {
+        "capability": "cap_fill_login_password",
+        "target": "element_password_input"
+      },
+      "description": "Type the account password into the sign-in form; the collector records the value as [set].",
+      "effects": [
+        {
+          "type": "value_changed",
+          "target": "element_password_input",
+          "to": "[set]",
+          "observed": true
+        }
+      ],
+      "evidence": [
+        {
+          "observation": "obs_0002",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 1,
+        "created_at": "2026-09-17T22:34:31.750Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "severity": "info",
+            "candidate_id": "transition_fill_login_password",
+            "candidates_seen": 1,
+            "warnings": [
+              {
+                "code": "effect_targets_resolved",
+                "severity": "info",
+                "basis": "reference_check",
+                "detail": "1 effect target(s) were written as a semantic purpose and are carried as the element id: password_input → element_password_input."
+              }
+            ],
+            "rejection_reason": null,
+            "rejection_basis": null,
+            "dropped": {
+              "effects": [],
+              "assertions": [],
+              "apis": []
+            },
+            "apis_declared": [],
+            "apis_observed": [],
+            "state_variables": {
+              "moved": [],
+              "recorded": [],
+              "unrecorded": [],
+              "semantic": [],
+              "persistence": []
+            },
+            "step": {
+              "action_id": "action_0003",
+              "before_observation": "obs_0002",
+              "after_observation": "obs_0003",
+              "before_role": "identity",
+              "after_role": "action",
+              "before_surface": 5,
+              "after_surface": 5
+            },
+            "candidate_assertions": [],
+            "candidate_assertions_declined": []
+          },
+          "recorder": {
+            "observed_change": {
+              "changed": [
+                "textbox:Password: value=\"\" → value=\"[set]\""
+              ]
+            },
+            "chain_break": null,
+            "notes": 0,
+            "evidence": [
+              {
+                "observation": "obs_0002",
+                "role": "identity",
+                "note": "the surface as it stood when the action was taken (from_state)"
+              },
+              {
+                "observation": "obs_0003",
+                "role": "action",
+                "note": "the action itself, and the surface it produced (to_state)"
+              },
+              {
+                "observation": "obs_0003",
+                "role": "effect",
+                "note": "what the machinery saw change between the two readings"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "transition_submit_login",
+      "from_state": "state_login_anonymous",
+      "to_state": "state_project_list_authenticated_projects_populated",
+      "action": {
+        "capability": "cap_submit_login",
+        "target": "element_login_button"
+      },
+      "description": "Submit the sign-in form; the app authenticates the user and shows the project list.",
+      "effects": [
+        {
+          "type": "state_entered",
+          "to": "state_project_list_authenticated_projects_populated",
+          "observed": true
+        },
+        {
+          "type": "storage_changed",
+          "target": "localStorage.acme-demo-state",
+          "observed": true
+        }
+      ],
+      "evidence": [
+        {
+          "observation": "obs_0003",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        }
+      ],
+      "metadata": {
+        "status": "verified",
+        "producer": "llm:deepseek-flash",
+        "confidence": 1,
+        "created_at": "2026-09-17T22:34:43.289Z",
+        "extra": {
+          "commit": {
+            "decision": "committed",
+            "severity": "info",
+            "candidate_id": "transition_submit_login",
+            "candidates_seen": 1,
+            "warnings": [],
+            "rejection_reason": null,
+            "rejection_basis": null,
+            "dropped": {
+              "effects": [],
+              "assertions": [],
+              "apis": []
+            },
+            "apis_declared": [],
+            "apis_observed": [],
+            "state_variables": {
+              "moved": [
+                {
+                  "name": "localStorage.acme-demo-state",
+                  "kind": "storage",
+                  "role": "persistence"
+                }
+              ],
+              "recorded": [],
+              "unrecorded": [],
+              "semantic": [],
+              "persistence": [
+                "localStorage.acme-demo-state"
+              ]
+            },
+            "step": {
+              "action_id": "action_0004",
+              "before_observation": "obs_0003",
+              "after_observation": "obs_0004",
+              "before_role": "identity",
+              "after_role": "action",
+              "before_surface": 5,
+              "after_surface": 5
+            },
+            "candidate_assertions": [
+              {
+                "assertion": {
+                  "type": "state",
+                  "state": "state_project_list_authenticated_projects_populated",
+                  "operator": "equals"
+                },
+                "basis": "effect",
+                "detail": "the step claims it arrived in state_project_list_authenticated_projects_populated, and state_project_list_authenticated_projects_populated is a state this graph commits.",
+                "from": "obs_0004"
+              }
+            ],
+            "candidate_assertions_declined": [
+              {
+                "effect": "dimension",
+                "reason": "no_reading_counted_the_collection",
+                "target": "projects",
+                "detail": "\"projects\" is declared as \"populated\", and no reading bound to state_project_list_authenticated_projects_populated carries a row count for the collection it names."
+              }
+            ]
+          },
+          "recorder": {
+            "observed_change": {
+              "appeared": [
+                "button:Projects",
+                "button:Settings",
+                "generic:test@example.com",
+                "button:Log out",
+                "textbox:New project name",
+                "button:Add project",
+                "generic:Website Redesigntest@example.com",
+                "generic:Website Redesign"
+              ],
+              "disappeared": [
+                "textbox:Email",
+                "textbox:Password",
+                "checkbox:Remember me",
+                "button:Sign in",
+                "link:Forgot password?"
+              ],
+              "storage": {
+                "acme-demo-state": "{\"user\":\"test@example.com\",\"projects\":[{\"name\":\"Website Redesign\",\"owner\":\"test@example.com\"}],\"notificationFrequency\":\"never\"}"
+              }
+            },
+            "chain_break": null,
+            "notes": 0,
+            "evidence": [
+              {
+                "observation": "obs_0003",
+                "role": "identity",
+                "note": "the surface as it stood when the action was taken (from_state)"
+              },
+              {
+                "observation": "obs_0004",
+                "role": "action",
+                "note": "the action itself, and the surface it produced (to_state)"
+              },
+              {
+                "observation": "obs_0004",
+                "role": "effect",
+                "note": "what the machinery saw change between the two readings"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "apis": [],
+  "journeys": [
+    {
+      "id": "journey_login_anonymous_to_project_list_authenticated_projects_popu",
+      "name": "Sign in to the Acme demo app",
+      "goal": "Using the browser tools, open the Acme demo app at http://127.0.0.1:4173/ and sign in with test@example.com and password123.",
+      "start_state": "state_login_anonymous",
+      "transitions": [
+        "transition_fill_login_email",
+        "transition_fill_login_password",
+        "transition_submit_login"
+      ],
+      "evidence": [
+        {
+          "observation": "obs_0001",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        },
+        {
+          "observation": "obs_0002",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        },
+        {
+          "observation": "obs_0003",
+          "role": "identity",
+          "note": "the surface as it stood when the action was taken (from_state)"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "action",
+          "note": "the action itself, and the surface it produced (to_state)"
+        },
+        {
+          "observation": "obs_0004",
+          "role": "effect",
+          "note": "what the machinery saw change between the two readings"
+        }
+      ],
+      "tags": [
+        "derived"
+      ],
+      "metadata": {
+        "status": "inferred",
+        "producer": "importer:dsh-graph-explorer",
+        "created_at": "2026-09-17T22:34:44.532Z",
+        "extra": {
+          "derivation": "transitions.jsonl in walk order, cut where a step does not start where the previous one ended, or where its edge is not a committed edge between two committed states",
+          "steps": [
+            {
+              "transition": "transition_fill_login_email",
+              "from_state": "state_login_anonymous",
+              "to_state": "state_login_anonymous"
+            },
+            {
+              "transition": "transition_fill_login_password",
+              "from_state": "state_login_anonymous",
+              "to_state": "state_login_anonymous"
+            },
+            {
+              "transition": "transition_submit_login",
+              "from_state": "state_login_anonymous",
+              "to_state": "state_project_list_authenticated_projects_populated"
+            }
+          ],
+          "distinct_transitions": 3,
+          "goal_stated": true,
+          "goal_source": "run.json `instruction`, quoted verbatim: the run walked one strand, so the instruction describes exactly this walk",
+          "run_instruction": "Using the browser tools, open the Acme demo app at http://127.0.0.1:4173/ and sign in with test@example.com and password123. Follow the graph exploration protocol: call graph_observe to read the page state after every action (including the first), and graph_transition to record each move. Keep it short.",
+          "criticality": "not set: the walk was recorded, the priority was not judged, so the schema default (standard) applies",
+          "name_from": "the model's own name for this walk, claimed on transition_submit_login of it (journey_name on the step record)",
+          "name_source_kind": "model",
+          "name_stated": true,
+          "journey_names_claimed": [
+            "Sign in to the Acme demo app"
+          ],
+          "name_derived_from": "state_login_anonymous to state_project_list_authenticated_projects_populated, the endpoints of the walk (kept here rather than used as the name)"
+        }
+      }
+    }
+  ],
+  "observations": [
+    {
+      "id": "obs_0001",
+      "type": "browser_state",
+      "timestamp": "2026-09-17T22:34:10.351Z",
+      "url": "http://127.0.0.1:4173/",
+      "title": "Acme Demo App",
+      "state": "state_login_anonymous",
+      "screenshot": "evidence/step-001-open.png",
+      "collector": {
+        "tool": "dsh-browser",
+        "run_id": "session-2ce02651-5254-45f1-b192-c4749cd6cff3",
+        "artifacts_dir": "evidence"
+      },
+      "metadata": {
+        "status": "verified",
+        "producer": "playwright",
+        "created_at": "2026-09-17T22:34:10.351Z",
+        "extra": {
+          "tool": "browser_open",
+          "phase": "after",
+          "tool_arguments": {
+            "url": "http://127.0.0.1:4173/"
+          },
+          "capture_error": null,
+          "linkage": {
+            "observation_role": "before_action",
+            "action_id": "action_0001",
+            "action": {
+              "tool": "browser_open",
+              "arguments": {
+                "url": "http://127.0.0.1:4173/"
+              }
+            },
+            "documents": null,
+            "precedes": [
+              "transition_fill_login_email"
+            ],
+            "note": "this reading was the surface transition_fill_login_email started from, so it documents that step's source rather than the step. It is also the first reading of the run, and no action produced it."
+          }
+        }
+      }
+    },
+    {
+      "id": "obs_0002",
+      "type": "browser_state",
+      "timestamp": "2026-09-17T22:34:21.024Z",
+      "url": "http://127.0.0.1:4173/",
+      "title": "Acme Demo App",
+      "state": "state_login_anonymous",
+      "transition": "transition_fill_login_email",
+      "parent": "obs_0001",
+      "screenshot": "evidence/step-002-type.png",
+      "collector": {
+        "tool": "dsh-browser",
+        "run_id": "session-2ce02651-5254-45f1-b192-c4749cd6cff3",
+        "artifacts_dir": "evidence"
+      },
+      "metadata": {
+        "status": "verified",
+        "producer": "playwright",
+        "created_at": "2026-09-17T22:34:21.024Z",
+        "extra": {
+          "tool": "browser_type",
+          "phase": "after",
+          "tool_arguments": {
+            "selector": "[data-testid=\"email-input\"]",
+            "text": "test@example.com"
+          },
+          "capture_error": null,
+          "linkage": {
+            "observation_role": "after_action",
+            "action_id": "action_0002",
+            "action": {
+              "tool": "browser_type",
+              "arguments": {
+                "selector": "[data-testid=\"email-input\"]",
+                "text": "test@example.com"
+              }
+            },
+            "documents": "transition_fill_login_email",
+            "precedes": [
+              "transition_fill_login_password"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "obs_0003",
+      "type": "browser_state",
+      "timestamp": "2026-09-17T22:34:27.619Z",
+      "url": "http://127.0.0.1:4173/",
+      "title": "Acme Demo App",
+      "state": "state_login_anonymous",
+      "transition": "transition_fill_login_password",
+      "parent": "obs_0002",
+      "screenshot": "evidence/step-003-type.png",
+      "collector": {
+        "tool": "dsh-browser",
+        "run_id": "session-2ce02651-5254-45f1-b192-c4749cd6cff3",
+        "artifacts_dir": "evidence"
+      },
+      "metadata": {
+        "status": "verified",
+        "producer": "playwright",
+        "created_at": "2026-09-17T22:34:27.619Z",
+        "extra": {
+          "tool": "browser_type",
+          "phase": "after",
+          "tool_arguments": {
+            "selector": "[data-testid=\"password-input\"]",
+            "text": "password123"
+          },
+          "capture_error": null,
+          "linkage": {
+            "observation_role": "after_action",
+            "action_id": "action_0003",
+            "action": {
+              "tool": "browser_type",
+              "arguments": {
+                "selector": "[data-testid=\"password-input\"]",
+                "text": "password123"
+              }
+            },
+            "documents": "transition_fill_login_password",
+            "precedes": [
+              "transition_submit_login"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "obs_0004",
+      "type": "browser_state",
+      "timestamp": "2026-09-17T22:34:33.476Z",
+      "url": "http://127.0.0.1:4173/",
+      "title": "Acme Demo App",
+      "state": "state_project_list_authenticated_projects_populated",
+      "transition": "transition_submit_login",
+      "parent": "obs_0003",
+      "screenshot": "evidence/step-004-click.png",
+      "collector": {
+        "tool": "dsh-browser",
+        "run_id": "session-2ce02651-5254-45f1-b192-c4749cd6cff3",
+        "artifacts_dir": "evidence"
+      },
+      "metadata": {
+        "status": "verified",
+        "producer": "playwright",
+        "created_at": "2026-09-17T22:34:33.476Z",
+        "extra": {
+          "tool": "browser_click",
+          "phase": "after",
+          "tool_arguments": {
+            "selector": "[data-testid=\"login-button\"]"
+          },
+          "capture_error": null,
+          "linkage": {
+            "observation_role": "after_action",
+            "action_id": "action_0004",
+            "action": {
+              "tool": "browser_click",
+              "arguments": {
+                "selector": "[data-testid=\"login-button\"]"
+              }
+            },
+            "documents": "transition_submit_login",
+            "precedes": []
+          },
+          "keys_captured": {
+            "localStorage": [
+              "acme-demo-state"
+            ],
+            "sessionStorage": [],
+            "cookies": []
+          }
+        }
+      }
+    }
+  ],
+  "coverage": {
+    "visited_routes": [
+      "/"
+    ],
+    "unmodelled_routes": [],
+    "notes": "2 state(s) reconciled from 4 reading(s); 3 committed edge(s) from 3 candidate(s); 2 repeat reading(s) collapsed; 1 walk(s) reassembled from 3 step(s), with 0 step(s) that could not be walked through."
+  },
+  "warnings": [
+    "transition_fill_login_email: effect_targets_resolved — 1 effect target(s) were written as a semantic purpose and are carried as the element id: email_input → element_email_input.",
+    "transition_fill_login_password: effect_targets_resolved — 1 effect target(s) were written as a semantic purpose and are carried as the element id: password_input → element_password_input.",
+    "transition_submit_login: persistence_evidence_recorded — the reading at the end of this step shows \"localStorage.acme-demo-state\" written to the page's own storage, so state_project_list_authenticated_projects_populated is remembered rather than merely displayed. Kept as evidence and deliberately not offered as a dimension: no browser can be asked what the application remembers about a user, so a value assertion over a storage key is a check nothing can evaluate. It belongs in this edge's evidence and in a test's setup, or as a precondition on the states that depend on it.",
+    "application: no application version was recorded, so this graph cannot be tied to a build — invariant 9 (version coherence) is vacuous here, and evidence from a different build cannot be told apart from this one.",
+    "journeys: 1 walk(s) were reassembled from the order the steps were taken, and the run's own instruction is carried as their goal — quoted from run.json, not paraphrased, because nothing in a browser session says what a user was trying to achieve. Each `criticality` is the schema default, so a test generator still has to judge the priority.",
+    "features: 1 feature(s) were committed from the names the steps claimed, with their membership derived from those steps — the name is the model's, and nothing here was inferred from a URL or a screen. Every committed object belongs to one."
+  ]
+}

@@ -1,0 +1,303 @@
+{
+  "schema_version": "0.2-blind-read",
+  "_provenance": {
+    "produced_from": [
+      "observations.jsonl (4 records)",
+      "run.json.instruction",
+      "docs/abm-pivot.md §3 (the profile shape)"
+    ],
+    "deliberately_not_read": [
+      "states.jsonl",
+      "capabilities.jsonl",
+      "transitions.jsonl",
+      "graph.json",
+      "commit_report.json"
+    ],
+    "purpose": "§8 experiment: can an LLM produce the ABM directly from the evidence layer, without the observation graph existing?"
+  },
+
+  "application": {
+    "id": "app_acme-demo",
+    "name": "Acme Demo App",
+    "base_url": "http://127.0.0.1:4173/"
+  },
+
+  "actors": [
+    {
+      "id": "anonymous_visitor",
+      "description": "No session. The app offers the sign-in form and nothing else.",
+      "evidence": [{ "observation": "obs_0001", "role": "identity" }]
+    },
+    {
+      "id": "authenticated_user",
+      "description": "A signed-in user. Evidence of the identity itself is obs_0004 (storage.user and the current_user element); the credentials to obtain it come from the run instruction, not from the page.",
+      "credentials_ref": "TEST_USER",
+      "evidence": [{ "observation": "obs_0004", "role": "identity" }]
+    }
+  ],
+
+  "entities": [
+    {
+      "name": "session",
+      "description": "The signed-in session. Its observable footprint is storage.user plus the current_user element.",
+      "reads": ["element_current_user"],
+      "writes": ["behavior_sign_in"],
+      "evidence": [{ "observation": "obs_0004", "role": "identity" }]
+    },
+    {
+      "name": "project",
+      "description": "A unit of work, owned by a user. Held in storage.projects[] and rendered as project-list > project-item > project-name.",
+      "reads": ["element_project_list", "element_project_item", "element_project_name"],
+      "writes": [],
+      "evidence": [{ "observation": "obs_0004", "role": "identity" }],
+      "metadata": {
+        "confidence": 0.9,
+        "status": "inferred",
+        "note": "The entity is evidenced in full, but its WRITE path is not: add_project is offered by the UI and never performed, so no observation shows what creating a project does."
+      }
+    }
+  ],
+
+  "state_variables": [
+    {
+      "name": "session",
+      "type": "string",
+      "values": ["absent", "test@example.com"],
+      "dimension_of": [
+        "state_login_anonymous",
+        "state_projects_authenticated_projects_populated"
+      ],
+      "detection": {
+        "type": "element_value",
+        "target": "current_user",
+        "operator": "equals",
+        "expected": "test@example.com"
+      },
+      "evidence": [
+        { "observation": "obs_0001", "role": "identity" },
+        { "observation": "obs_0004", "role": "effect" }
+      ]
+    },
+    {
+      "name": "projects",
+      "type": "collection",
+      "values": ["populated"],
+      "dimension_of": ["state_projects_authenticated_projects_populated"],
+      "detection": {
+        "type": "element_value",
+        "target": "project_list",
+        "operator": "equals",
+        "expected": "populated"
+      },
+      "evidence": [{ "observation": "obs_0004", "role": "effect" }],
+      "metadata": {
+        "confidence": 0.6,
+        "status": "inferred",
+        "note": "Only 'populated' was observed (items: 1). An empty-list state is plausible but NOT evidenced by this walk, so no 'empty' value is claimed."
+      }
+    },
+    {
+      "name": "notification_frequency",
+      "type": "string",
+      "values": ["never"],
+      "detection": {
+        "type": "value",
+        "target": "notification_frequency",
+        "operator": "equals",
+        "expected": "never"
+      },
+      "evidence": [{ "observation": "obs_0004", "role": "effect" }],
+      "metadata": {
+        "confidence": 0.4,
+        "status": "inferred",
+        "note": "Present in storage only. The Settings section was never opened, so no element reads it and no other value was ever observed. values[] lists 'never' because that is the only value the evidence shows — it is not asserted to be the enum."
+      }
+    }
+  ],
+
+  "behaviors": [
+    {
+      "id": "behavior_sign_in",
+      "name": "sign_in",
+      "kind": "interaction",
+      "actor": "anonymous_visitor",
+      "preconditions": [
+        { "kind": "element_state", "element": "element_login_email", "operator": "visible" }
+      ],
+      "input": {
+        "email": { "type": "string", "required": true },
+        "password": { "type": "string", "required": true, "format": "password" },
+        "remember": { "type": "boolean", "required": false }
+      },
+      "output": { "session": { "type": "entity", "entity": "session" } },
+      "realization": [
+        { "action": "fill", "element": "element_login_email", "value": "{{email}}", "purpose": "enter_credentials" },
+        { "action": "fill", "element": "element_login_password", "value": "{{password}}", "purpose": "enter_credentials" },
+        { "action": "click", "element": "element_login_submit", "purpose": "submit" }
+      ],
+      "effects": [
+        { "type": "state_entered", "to": "state_projects_authenticated_projects_populated", "observed": true },
+        { "type": "storage_changed", "target": "localStorage.acme-demo-state", "observed": true },
+        { "type": "element_destroyed", "target": "email_input", "observed": true },
+        { "type": "element_destroyed", "target": "password_input", "observed": true },
+        { "type": "element_destroyed", "target": "sign_in_button", "observed": true },
+        { "type": "element_created", "target": "logout_button", "observed": true },
+        { "type": "element_created", "target": "project_list", "observed": true }
+      ],
+      "composed_of": [],
+      "evidence": [
+        { "observation": "obs_0002", "role": "action" },
+        { "observation": "obs_0003", "role": "action" },
+        { "observation": "obs_0004", "role": "effect" }
+      ],
+      "metadata": { "confidence": 0.95, "status": "verified", "producer": "blind-read" }
+    }
+  ],
+
+  "affordances": [
+    {
+      "id": "affordance_open_projects",
+      "element": "element_nav_projects",
+      "offered_in": ["state_projects_authenticated_projects_populated"],
+      "expected_behavior": "open_projects",
+      "evidence": [{ "observation": "obs_0004", "role": "action" }],
+      "metadata": { "status": "unwalked", "confidence": 0.3 }
+    },
+    {
+      "id": "affordance_open_settings",
+      "element": "element_nav_settings",
+      "offered_in": ["state_projects_authenticated_projects_populated"],
+      "expected_behavior": "open_settings",
+      "evidence": [{ "observation": "obs_0004", "role": "action" }],
+      "metadata": { "status": "unwalked", "confidence": 0.3 }
+    },
+    {
+      "id": "affordance_sign_out",
+      "element": "element_logout_button",
+      "offered_in": ["state_projects_authenticated_projects_populated"],
+      "expected_behavior": "sign_out",
+      "evidence": [{ "observation": "obs_0004", "role": "action" }],
+      "metadata": { "status": "unwalked", "confidence": 0.3 }
+    },
+    {
+      "id": "affordance_add_project",
+      "element": "element_add_project_button",
+      "offered_in": ["state_projects_authenticated_projects_populated"],
+      "expected_behavior": "add_project",
+      "evidence": [{ "observation": "obs_0004", "role": "action" }],
+      "metadata": { "status": "unwalked", "confidence": 0.3 }
+    },
+    {
+      "id": "affordance_forgot_password",
+      "element": "element_forgot_password_link",
+      "offered_in": ["state_login_anonymous"],
+      "expected_behavior": "forgot_password",
+      "evidence": [{ "observation": "obs_0001", "role": "action" }],
+      "metadata": { "status": "unwalked", "confidence": 0.3 }
+    }
+  ],
+
+  "states": [
+    {
+      "id": "state_login_anonymous",
+      "identity": { "page_type": "login", "variant": "anonymous", "dimensions": {} },
+      "summary": "The visitor sees the sign-in form.",
+      "elements": [
+        { "semantic_purpose": "email_input", "role": "textbox", "name": "Email", "locator": "[data-testid=\"email-input\"]" },
+        { "semantic_purpose": "password_input", "role": "textbox", "name": "Password", "locator": "[data-testid=\"password-input\"]" },
+        { "semantic_purpose": "remember_checkbox", "role": "checkbox", "name": "Remember me", "locator": "[data-testid=\"remember-checkbox\"]" },
+        { "semantic_purpose": "sign_in_button", "role": "button", "name": "Sign in", "locator": "[data-testid=\"login-button\"]" },
+        { "semantic_purpose": "forgot_password_link", "role": "link", "name": "Forgot password?", "locator": "#forgot" }
+      ],
+      "detection": [
+        { "type": "element_state", "target": "email_input", "operator": "visible" },
+        { "type": "absence", "target": "current_user" }
+      ]
+    },
+    {
+      "id": "state_projects_authenticated_projects_populated",
+      "identity": {
+        "page_type": "project_list",
+        "variant": "authenticated",
+        "dimensions": { "projects": "populated" }
+      },
+      "summary": "The signed-in user sees their project list.",
+      "elements": [
+        { "semantic_purpose": "nav_projects", "role": "button", "name": "Projects", "locator": "[data-testid=\"nav-projects\"]" },
+        { "semantic_purpose": "nav_settings", "role": "button", "name": "Settings", "locator": "[data-testid=\"nav-settings\"]" },
+        { "semantic_purpose": "current_user", "role": "generic", "name": "test@example.com", "locator": "[data-testid=\"current-user\"]" },
+        { "semantic_purpose": "logout_button", "role": "button", "name": "Log out", "locator": "[data-testid=\"logout-button\"]" },
+        { "semantic_purpose": "project_name_input", "role": "textbox", "name": "New project name", "locator": "[data-testid=\"project-name-input\"]" },
+        { "semantic_purpose": "add_project_button", "role": "button", "name": "Add project", "locator": "[data-testid=\"add-project-button\"]" },
+        { "semantic_purpose": "project_list", "role": "generic", "name": "Website Redesigntest@example.com", "locator": "[data-testid=\"project-list\"]" },
+        { "semantic_purpose": "project_item", "role": "generic", "name": "Website Redesigntest@example.com", "locator": "[data-testid=\"project-item\"]" },
+        { "semantic_purpose": "project_name", "role": "generic", "name": "Website Redesign", "locator": "[data-testid=\"project-name\"]" }
+      ],
+      "detection": [
+        { "type": "element_value", "target": "current_user", "operator": "equals", "expected": "test@example.com" },
+        { "type": "element_state", "target": "project_list", "operator": "visible" }
+      ]
+    }
+  ],
+
+  "journeys": [
+    {
+      "id": "journey_sign_in_and_see_projects",
+      "name": "Sign in and see the project list",
+      "goal": "Sign in with test@example.com and reach the project list",
+      "goal_stated": true,
+      "actor": "authenticated_user",
+      "start_state": "state_login_anonymous",
+      "steps": [
+        {
+          "behavior": "behavior_sign_in",
+          "arguments": { "email": "test@example.com", "password": "{{password}}" },
+          "to_state": "state_projects_authenticated_projects_populated",
+          "to_state_observed": true
+        }
+      ],
+      "assertions": [
+        { "type": "element_value", "target": "current_user", "operator": "equals", "expected": "test@example.com" }
+      ],
+      "criticality": "critical",
+      "evidence": [
+        { "observation": "obs_0001", "role": "identity" },
+        { "observation": "obs_0004", "role": "effect" }
+      ]
+    }
+  ],
+
+  "self_loops": [
+    {
+      "state": "state_login_anonymous",
+      "behavior": "behavior_sign_in",
+      "realization_index": 0,
+      "effect": { "type": "value_changed", "target": "email_input", "from": "", "to": "test@example.com", "observed": true },
+      "evidence": [{ "observation": "obs_0002", "role": "effect" }]
+    },
+    {
+      "state": "state_login_anonymous",
+      "behavior": "behavior_sign_in",
+      "realization_index": 1,
+      "effect": { "type": "value_changed", "target": "password_input", "from": "", "to": "[set]", "observed": true },
+      "evidence": [{ "observation": "obs_0003", "role": "effect" }]
+    }
+  ],
+
+  "observations": [
+    { "id": "obs_0001", "seq": 1, "tool": "browser_open", "url": "http://127.0.0.1:4173/", "screenshot": "evidence/step-001-open.png" },
+    { "id": "obs_0002", "seq": 2, "tool": "browser_type", "url": "http://127.0.0.1:4173/", "screenshot": "evidence/step-002-type.png" },
+    { "id": "obs_0003", "seq": 3, "tool": "browser_type", "url": "http://127.0.0.1:4173/", "screenshot": "evidence/step-003-type.png" },
+    { "id": "obs_0004", "seq": 4, "tool": "browser_click", "url": "http://127.0.0.1:4173/", "screenshot": "evidence/step-004-click.png" }
+  ],
+
+  "coverage": {
+    "behaviors_realized": ["sign_in"],
+    "behaviors_count": 1,
+    "affordances_unwalked_count": 5,
+    "sections_exercised": ["sign in", "projects"],
+    "sections_offered_but_unwalked": ["settings"],
+    "navigation_observed": false,
+    "note": "The app is a single-page app: url and document.title are byte-identical before and after sign_in, and all three section headings are present in every observation. Nothing moved in the URL, so every state distinction is carried by the visible element set and by storage."
+  }
+}
