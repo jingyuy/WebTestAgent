@@ -312,6 +312,29 @@ CASES = [
         'new': "new URL('../schemas-2/', import.meta.url)",
         'suite': 'test/package.test.mjs',
     },
+    {
+        # A section's text is a prompt template, and 0.1.24 shipped a placeholder written as a
+        # template: the harness refused to boot with `unknown prompt variable "{{param}}"`. The
+        # placeholder is a legitimate thing to want in an example, which is why the suite has to
+        # say that this is not how to write one.
+        'rule': 'the protocol text cannot spell a prompt variable the harness does not register',
+        'file': 'lib/protocol.js',
+        'old': 'a \\`"<param>"\\` template bound to the behaviour',
+        'new': 'a \\`"{{param}}"\\` template bound to the behaviour',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # P12's boundary, which the live sign-in walk of 2026-09-18 was refused for. A call that stays
+        # where the walk already stood puts that state in `passed_through`, and that state is the
+        # surviving edge's own `from_state` — so requiring the behaviour to "arrive" there asks a step
+        # to record a `state_entered` for a state the walk never left, and the only way to satisfy it
+        # is a false effect. Removing the guard puts that demand back.
+        'rule': 'a state the surviving edge itself names is not a state the collapse hid',
+        'file': 'lib/abm.js',
+        'old': '      if (state === transition.from_state || state === transition.to_state) continue;\n',
+        'new': '',
+        'suite': 'test/abm-commit.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

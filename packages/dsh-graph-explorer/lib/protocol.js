@@ -222,7 +222,7 @@ For every step:
      without: a realisation with no verb is not a step, and the capability's name is not the verb —
      \`fill_login_email\` is how a capability is spelled, not what the browser did. \`element\` is
      an element id (\`element_email_input\`), the same form \`target\` takes. \`value\` is a
-     literal or a \`"{{param}}"\` template bound to the behaviour's input. \`purpose\` is the
+     literal or a \`"<param>"\` template bound to the behaviour's input. \`purpose\` is the
      step's part in the behaviour, in the behaviour's own words (\`enter_credentials\`,
      \`submit\`) — it is what still means something after the element is renamed, so write one for
      every step: a step with no purpose is a step the model cannot describe. \`effects\` are this

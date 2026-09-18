@@ -109,10 +109,12 @@ await observe({
     { semantic_purpose: 'submit_button', role: 'button', name: 'Sign in' },
   ],
 });
-// The state the walk is standing in when it performs the first step. `login` is one behaviour made
-// of two calls, and its move is one edge (D5) — so the reading it took in the middle of the move is
-// a state the document has to account for, and the step's own effect is where it says so (`P12`,
-// `collapsed_past_a_state`). Read from the log rather than guessed, because the tool checks it.
+// The state the first call landed in. The walk's own chain says that call was performed from
+// `state_home_anonymous` (the click that navigated was never recorded as a transition, so the chain
+// still begins at the entry state), which makes `state_login` a state the collapsed edge does not
+// name — the reading the move took in the middle of itself, and the step's own effect is where the
+// document accounts for it (`P12`, `collapsed_past_a_state`). Read from the log rather than guessed,
+// because the tool is what decides which state a call landed in.
 const loginStateId = logLines('states.jsonl').filter((record) => record.kind === 'state').at(-1).state_id;
 // The behaviour is named for what the user wants (`login`), and the two calls are named for what
 // they did (`fill_login_email`, `submit_login`): P1 is exactly this distinction, and a behaviour
@@ -131,7 +133,9 @@ const fill = await transition({
   // The same effect list in both places, which is what the tool's own description of `realization`
   // says it is: the edge carries it because that is where 0.1 puts what a call did, and the step
   // carries it because a step is the behaviour's account of itself. One effect is a state and the
-  // other an element, because both shapes are shapes the fallback document wrote before the pivot.
+  // other an element, because both shapes are shapes the fallback document wrote before the pivot —
+  // and the state is the one the collapse hid, which is why the step has to say it: a behaviour that
+  // spends two calls to reach a state has to be able to be asked for at the state it starts from.
   effects: [{ type: 'state_entered', to: loginStateId, observed: true }, { type: 'value_changed', target: 'email_input', to: 'test@example.com' }],
   realization: {
     action: 'fill',
@@ -398,6 +402,45 @@ check('every model rule\'s ok is exactly "no error finding of that rule"',
 check('and each rule says how many findings it is about, and which rule they were',
   modelInvariants.map((result) => [result.code, result.findings]),
   modelInvariants.map((result) => [result.code, committed.profile.findings.filter((finding) => finding.rule === result.code).length]));
+
+// --- clause 5: the collapse rule refuses a hidden state, and not an endpoint ------------------
+// The walk above covers one shape of this rule and not the other. Its collapse hides a state that is
+// neither endpoint — `state_login`, which a step of the behaviour accounts for — and that is the
+// shape the rule is for. The other shape is the one it used to refuse wrongly: a call that stays
+// where the walk already stood puts that state in `passed_through`, and that state is then the
+// surviving edge's own `from_state`. The live sign-in walk of 2026-09-18 is exactly that — the demo
+// app's form is on the page the walk begins on, so both fills are self-loops and the collapsed edge
+// goes `state_home_anonymous → state_home_authenticated`, passing through the state it starts from —
+// and the model was withheld for it, with a demand that no honest step can meet: the walk never
+// entered that state, it was already in it. Here the shape is built by hand, because a walk cannot
+// be asked to produce a middle state it never read.
+const collapseModel = (passed, entered) => ({
+  schema_version: 'abm/0.2',
+  application: { name: 'x', actors: [{ id: 'actor_user', name: 'user' }] },
+  states: ['a', 'b', 'c'].map((name) => ({ id: `state_${name}`, identity: { page_type: name, dimensions: {} }, behaviors: ['behavior_go'] })),
+  behaviors: [{
+    id: 'behavior_go', name: 'go', kind: 'interaction', actors: ['actor_user'], states: ['state_a', 'state_c'],
+    realization: [{
+      action: 'click', element: 'element_x', purpose: 'go',
+      effects: entered ? [{ type: 'state_entered', to: 'state_b' }] : [],
+    }],
+  }],
+  transitions: [{
+    id: 'transition_go', from_state: 'state_a', to_state: 'state_c', behavior: 'behavior_go',
+    action: { capability: 'cap_go', target: 'element_x' }, effects: [], evidence: [],
+    metadata: { extra: { collapsed: { passed_through: passed, calls: ['transition_one', 'transition_two'] } } },
+  }],
+  journeys: [{ id: 'journey_go', name: 'go somewhere', steps: [{ transition: 'transition_go' }] }],
+});
+const collapsedStates = (passed, entered) => profileFindings(collapseModel(passed, entered))
+  .filter((finding) => finding.code === 'collapsed_past_a_state')
+  .map((finding) => finding.detail);
+check('a state the collapse passed through that the edge does not name, and no step explains, is refused',
+  collapsedStates(['state_b'], false).map((detail) => detail.includes('went through state_b')), [true]);
+check('the same state is explained rather than refused when a step says the behaviour arrived there',
+  collapsedStates(['state_b'], true), []);
+check('and a state the edge itself names is not refused, however the walk got there',
+  collapsedStates(['state_a', 'state_c'], false), []);
 
 rmSync(cwd, { recursive: true, force: true });
 

@@ -1496,6 +1496,15 @@ export function profileFindings(model, { candidates = null } = {}) {
   // is a fact: the projection writes down what it passed through rather than dropping it, and the
   // behaviour's own steps may account for it — a step whose effect entered that state is the model
   // saying the behaviour did arrive there. When neither says so, the move is refused (D12).
+  //
+  // "the edge does not name" is the whole of the rule, so the edge's own two endpoints are where it
+  // stops. A call that stays where the walk already stood — a self-loop, which is what typing into a
+  // form is — puts that state in `passed_through`, and that state is the surviving edge's
+  // `from_state`. Demanding the behaviour "arrive" there asks for a `state_entered` that no honest
+  // step can record: the walk never entered the state, it was already in it. The only way to satisfy
+  // it would be a false effect, and a rule whose sole satisfaction is a lie is refused here rather
+  // than obeyed — the live sign-in walk of 2026-09-18 is the case: three calls (fill, fill, click)
+  // over two states, one behaviour, and a model withheld for a state the edge itself names.
   for (const transition of transitions) {
     const passed = rows(transition.metadata?.extra?.collapsed?.passed_through);
     if (!passed.length) continue;
@@ -1504,10 +1513,11 @@ export function profileFindings(model, { candidates = null } = {}) {
       .filter((effect) => effect?.type === 'state_entered' && typeof effect.to === 'string')
       .map((effect) => effect.to)));
     for (const state of passed) {
+      if (state === transition.from_state || state === transition.to_state) continue;
       if (explained.has(state)) continue;
       add({
         rule: 'P12', code: 'collapsed_past_a_state', severity: 'error', scope: 'transitions', subject: transition.id,
-        detail: `The edge ${transition.from_state} → ${transition.to_state} collapsed calls that went through ${state}, and no step of "${transition.behavior}" says it arrived there. A state the walk entered that no edge leads to is a reading nothing in the document explains.`,
+        detail: `The edge ${transition.from_state} → ${transition.to_state} collapsed calls that went through ${state}, and no step of "${transition.behavior}" says it arrived there. A state the walk entered between the edge's own two states is a reading nothing in the document explains.`,
       });
     }
   }

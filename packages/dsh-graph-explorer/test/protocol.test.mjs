@@ -83,6 +83,14 @@ check('and the tool names in it are the names the tools were registered with',
   ['graph_observe', 'graph_transition', 'graph_commit', 'graph_test'].filter((name) => !text.includes(name)),
   []);
 
+// A section's text is a prompt template, and the harness substitutes `{{name}}` before the model
+// ever sees it: an unknown name is not text the model reads, it is a refusal to boot. 0.1.24 wrote
+// `"{{param}}"` as a placeholder in the `realization` bullet and the whole run died at startup with
+// `unknown prompt variable "{{param}}" in section "graph:exploration-protocol"` — a defect no suite
+// could see, because the prompt only becomes a template once the harness renders it.
+check('the section declares no prompt variable the harness would try to fill',
+  text.match(/\{\{[^}]*\}\}/g) ?? [], []);
+
 // --- the reading comes before the walk ------------------------------------
 // §5 of the pivot: reorder the procedure to understand → name → infer → validate → walk. A walk
 // that starts at step 1 is a transcript; the point of the phase is that the vocabulary is decided
