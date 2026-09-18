@@ -11,10 +11,21 @@
  *                       nothing is ever rewritten, so a later reading cannot
  *                       silently alter the evidence it was derived from.
  *   states.jsonl      the model's semantic reading, each record bound by
- *                     `observation_id` to the evidence it interprets.
+ *                     `observation_id` to the evidence it interprets. A reading
+ *                     also carries what its surface *offered* and the walk did
+ *                     not take (`affordances[]`): the only claim in the log
+ *                     about an absence, and one that can only be made while the
+ *                     page offering it is still on screen.
  *   capabilities.jsonl  the vocabulary the transitions are phrased in. A capability
  *                       is minted once per name and reused, so "what can this app do"
  *                       is answerable without reading every transition.
+ *                       Also where a step of a behaviour is written down
+ *                       (`kind: "realization_step"`): which browser action
+ *                       realises which step of which behaviour, at which position
+ *                       in the walk. A second record kind in the same file rather
+ *                       than a sixth file, because a step of a behaviour is a
+ *                       claim about the vocabulary — what the behaviour is made
+ *                       of — and the commit reads the two together.
  *   transitions.jsonl the edges: a capability applied from one state, landing in
  *                     another. Recorded in the order they were walked, which is the
  *                     only thing that makes a journey reconstructible afterwards.
@@ -137,6 +148,26 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
   const stateIdByObservation = new Map();
   const capabilityByName = new Map();
   const capabilityById = new Map();
+  /**
+   * One realisation per (behaviour, edge), keyed by both.
+   *
+   * A step of a behaviour is a step *of that behaviour* — the same edge realised as a
+   * step of `login` is one step however many times the edge is walked. So the key is the
+   * pair, exactly as `recordTransition` keys an edge by its endpoints: the same edge
+   * walked twice is the same step, and a second record for it is the walk moving on
+   * rather than a second step appearing.
+   */
+  const realizationByKey = new Map();
+  /**
+   * How many affordances the run's readings have claimed.
+   *
+   * Kept here rather than derived from `stateRecordById` because a reading of a state
+   * already seen is a *sighting*, and a sighting's affordance is a claim about the same
+   * surface made later — real, and not in the canonical record. Counted only when the
+   * record lands, for the reason every other counter here is: a claim the log does not
+   * contain is not a claim the run made.
+   */
+  let affordanceCount = 0;
   const transitionIdByKey = new Map();
   const transitionIds = new Set();
   /** Every recorded transition, in walk order. Duplicates kept: a walk may repeat an edge. */
@@ -210,6 +241,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
         stateIdByObservation.clear();
         capabilityByName.clear();
         capabilityById.clear();
+        realizationByKey.clear();
         transitionIdByKey.clear();
         transitionIds.clear();
         walk.length = 0;
@@ -380,7 +412,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
      * identity tuple and reused afterwards, so two observations of the same
      * identity can never produce two state ids.
      */
-    addState({ observationId, page_type, variant, dimensions, summary, elements, detection, confidence, model_status }) {
+    addState({ observationId, page_type, variant, dimensions, summary, elements, detection, confidence, model_status, affordances }) {
       const key = identityKey({ page_type, variant, dimensions });
       const existing = stateIdByKey.get(key);
       const minted = existing === undefined;
@@ -418,6 +450,15 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
         confidence: typeof confidence === 'number' ? confidence : null,
         status: model_status ?? 'observed',
         evidence: minted ? 'first_observation' : 'repeat_observation',
+        // What the surface offered and the walk did not take. Recorded on the reading rather
+        // than as its own line, because it is part of what that reading claimed about that
+        // surface — and it is the only claim in the vocabulary that is about an absence, so
+        // the reading is the only moment it can be made: the page has to be on screen to be
+        // read for what it offers, and the first step that performs one of these refutes it.
+        // 0.1's `state.schema.json` is `additionalProperties: false` and declares no such key,
+        // so this is a claim the log holds and `graph.json` cannot carry; the commit counts
+        // them so their absence from the document is a stated fact rather than a silent drop.
+        ...(Array.isArray(affordances) && affordances.length ? { affordances } : {}),
       };
       // Written before it is remembered, and nothing is remembered if it was not
       // written. The order matters for the first sighting in particular: a state read
@@ -427,6 +468,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
       // digest had already reported it as recorded.
       const written = { ...record, kind: minted ? 'state' : 'sighting' };
       if (!append(statesPath, written)) return null;
+      affordanceCount += Array.isArray(affordances) ? affordances.length : 0;
       stateIdByKey.set(key, id);
       if (minted) stateRecordById.set(id, record);
       // The index is updated on every reading, not only on the first: an observation
@@ -522,6 +564,52 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
       capabilityByName.set(name, record);
       capabilityById.set(id, record);
       return { id, record, created: true, composition_added: composition };
+    },
+
+    /**
+     * Write down that one edge realises one step of one behaviour.
+     *
+     * `capabilities.jsonl` already says what a behaviour is *composed of* — which
+     * capabilities it contains — and that is a claim about capabilities. This records the
+     * other half, which is a claim about a browser: the verb the step performs, the
+     * element it performs it on, and the value it puts there. The two are not the same
+     * question and neither derives the other. A composition is a list of capability ids,
+     * and the verb a step performs is not in the id: `cap_login` is `fill_login_email` and
+     * the schema's vocabulary starts at `fill`, so a projection asked to expand a
+     * behaviour into steps has to be told the verb rather than guess it from a name.
+     *
+     * Called with the edge already recorded, so the record can name the step it came from
+     * and where in the walk that step stands. Both are needed downstream and neither is
+     * recoverable later: the walk index is what orders a behaviour's steps, and the
+     * transition id is what says which edge — which reading, which states — the step was
+     * made of. The transition id is deliberately not minted here; `recordTransition` owns
+     * that, and a step naming an edge the log does not have would be the same dangling
+     * reference the commit refuses everywhere else.
+     *
+     * `walk_index` is the newest position of the edge, not the first: a re-walk moves the
+     * step, because the walk is where the run is now and the behaviour's edge is its last
+     * step's destination (D12). The earlier record stays in the log — nothing here
+     * rewrites — and the index holds the current view, which is what a commit reads.
+     */
+    addRealizationStep(capabilityId, step, { transitionId, walkIndex } = {}) {
+      if (!capabilityById.has(capabilityId)) return null;
+      const key = JSON.stringify([capabilityId, transitionId ?? null]);
+      const existing = realizationByKey.get(key);
+      const record = {
+        kind: 'realization_step',
+        capability_id: capabilityId,
+        // The edge this step is, and where the walk had got to when it was made. Both are
+        // facts about the run rather than about the step, and both are written here because
+        // they are the only link back from a step of a behaviour to the evidence it came
+        // from.
+        transition_id: transitionId ?? null,
+        walk_index: Number.isInteger(walkIndex) ? walkIndex : null,
+        ...step,
+        first_seen_at: new Date().toISOString(),
+      };
+      if (!append(capabilitiesPath, record)) return null;
+      realizationByKey.set(key, record);
+      return { record, repeated: existing !== undefined, first_walk_index: existing?.walk_index ?? null };
     },
 
     /**
@@ -658,6 +746,17 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
     },
 
     stateCount: () => stateRecordById.size,
+    /**
+     * How many affordances the readings have claimed so far.
+     *
+     * Reported in every reading's digest, because the claim it counts is the one that
+     * does not exist unless somebody makes it: the graph cannot derive "this surface
+     * offers a password reset" from anything it saw, and a walk that never says so is
+     * a walk whose model looks complete and proves less. Zero is a number the model has
+     * to be able to see, which is the only way it can decide the walk really had
+     * nothing untaken rather than that the reading forgot.
+     */
+    affordanceCount: () => affordanceCount,
     /**
      * Every reading bound to a state, in the order they were made.
      *

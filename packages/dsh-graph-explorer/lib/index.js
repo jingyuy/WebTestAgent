@@ -52,8 +52,11 @@ import {
     ELEMENT_PURPOSE_PATTERN,
     LIST_OPERATIONS,
     SEVERITIES,
+    STEP_ACTIONS,
     argumentMapProblem,
+    normalizeAffordance,
     normalizeApplication,
+    normalizeRealizationStep,
     purposeOf,
     vocabularyNotes,
 } from './schema.js';
@@ -109,6 +112,26 @@ export const Config = Schema.object({
         name: Schema.string()
             .min(1)
             .description('Human-readable application name, e.g. Acme.'),
+        // The actor vocabulary is a property of the APPLICATION, not of a walk: a role that
+        // exists is one somebody can sign in as, whether or not this run ever did. So it is
+        // declared here, beside the application, and not inferred from the states a walk
+        // happened to reach — which is why `credentials_ref` can be stated at all (nothing in
+        // a page says which credential a role uses) and why the commit can report a state
+        // whose variant names a role nothing declares.
+        //
+        // The ids are the join: `state.identity.variant` and `journey.actor` already reference
+        // them, and `application.schema.json` already declares the array in both document
+        // versions — this setting is what finally fills it in.
+        actors: Schema.array(Schema.object({
+            id: Schema.string()
+                .min(1)
+                .description('The actor id, which is also the value `state.identity.variant` uses: anonymous, authenticated, admin.'),
+            description: Schema.string()
+                .description('What this role is, in the user\'s terms.'),
+            credentials_ref: Schema.string()
+                .description('Name of a credential entry the role signs in with, for example TEST_USER. A reference, never the credential.'),
+        }))
+            .description('Roles this application can be exercised as. Referenced by `state.identity.variant` and `journey.actor`; declared here because the vocabulary outlives the walk.'),
     })
         .default(null)
         .description('Which application this graph is about. Without it a run still records evidence, but its graph cannot be committed.'),
@@ -1223,6 +1246,15 @@ export function apply(ctx, config) {
                     + 'The condition goes in `operator` or `value`/`expected`; an element must resolve to a semantic_purpose a '
                     + 'state has declared. Refused rather than recorded if it would be dropped at commit.',
             },
+            affordances: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: true },
+                description: 'What this surface OFFERS and the walk is not exercising: '
+                    + '[{element: "element_<semantic_purpose>", expected_behavior: "reset_password"}]. The element must be one THIS '
+                    + 'reading declares in `elements`. Record it here or not at all: a reading is the only moment a surface can be '
+                    + 'read for what it offers, and the first step that performs one of these refutes it. Not a claim about '
+                    + 'coverage — say nothing rather than listing what you did not get round to.',
+            },
             confidence: { type: 'number', description: '0..1 confidence in this reading' },
         },
         output: {
@@ -1257,6 +1289,18 @@ export function apply(ctx, config) {
             const notes = [];
 
             let state = null;
+            if (args.affordances !== undefined && !args.page_type) {
+                // An affordance is a fact about a surface, and it is the surface reading — not the
+                // capture — that names one. Accepting it without `page_type` would mean holding it
+                // until some later reading, which is the one thing this claim cannot survive: the
+                // page it was read from is gone by then, and nothing could refute it.
+                throw new Error(
+                    'affordances were given without page_type, so there is no surface for them to belong to. An affordance is '
+                    + 'what a surface offers: name the state it was read from — `page_type`, and `variant`/`dimensions` if this '
+                    + 'surface is a variant of one — and the reading and its affordances are recorded together. Nothing was '
+                    + 'recorded, and the page has not moved, so call again with the state named.',
+                );
+            }
             if (args.page_type) {
                 if (!Array.isArray(args.detection) || args.detection.length === 0) {
                     throw new Error(
@@ -1284,6 +1328,59 @@ export function apply(ctx, config) {
                 // recorded states declared, plus the ones this reading declares. Built before
                 // anything is written, so a refused reading leaves no trace.
                 const registry = registryFrom(store.states(), args.elements);
+                const stateKey = identityKey({ page_type: args.page_type, variant: args.variant, dimensions: args.dimensions });
+                const alreadyRead = store.states().find((record) => record.identity_key === stateKey);
+                // --- what this surface offers and the walk is not taking --------
+                // The one claim in the vocabulary that is about an absence, checked here for the
+                // reason every other check in this tool is: this is the only moment the surface
+                // that offers it is on screen, and the reading is what makes the claim falsifiable.
+                //
+                // P13 in the small: an affordance is offered BY a surface, so its element has to be
+                // one this state declares — and "this state" is the union of its readings, because
+                // the commit unions them: a repeat reading that restates fewer elements is not a
+                // smaller state. (The store's index holds canonical records only, so an element
+                // first declared by a repeat reading is invisible here; `registryFrom` has the same
+                // limit, and it is the honest one — a tool can only know what the store holds.)
+                const offerable = new Set([...(args.elements ?? []), ...(alreadyRead?.elements ?? [])]
+                    .map((element) => element?.semantic_purpose)
+                    .filter((purpose) => typeof purpose === 'string' && ELEMENT_PURPOSE_PATTERN.test(purpose))
+                    .map((purpose) => `element_${purpose}`));
+                const affordances = args.affordances === undefined ? [] : args.affordances;
+                if (!Array.isArray(affordances)) {
+                    throw new Error(
+                        `affordances must be an array of {element, expected_behavior} entries; got `
+                        + `${JSON.stringify(affordances)}. One entry is one control this surface offers and the walk is not `
+                        + 'taking, so a single object would be a list of one — and the list is the claim. Nothing was recorded.',
+                    );
+                }
+                const recordedAffordances = affordances.map((entry) => normalizeAffordance(entry));
+                for (const affordance of recordedAffordances) {
+                    if (offerable.has(affordance.element)) continue;
+                    // The two ways this happens are worth telling apart, because the repair is not
+                    // the same: an element this state never declared needs declaring on this
+                    // reading, while an element another state declared is a claim about the wrong
+                    // surface — and only the first is a mistake about the id form.
+                    const declaredElsewhere = store.states()
+                        .filter((record) => record.identity_key !== stateKey)
+                        .some((record) => (record.elements ?? [])
+                            .some((element) => element?.semantic_purpose && `element_${element.semantic_purpose}` === affordance.element));
+                    const asPurpose = registry.elementIdByPurpose.has(affordance.element)
+                        ? `\`${affordance.element}\` is a declared purpose and the id form is \`${registry.elementIdByPurpose.get(affordance.element)}\`.`
+                        : '';
+                    throw new Error(
+                        `State "${args.page_type}" was rejected: its affordances name ${JSON.stringify(affordance.element)}, which `
+                        + 'this state\'s own elements do not declare. An affordance is offered BY a surface, so it anchors to an '
+                        + `element of the surface it was read from, and this reading declares: ${listOf([...offerable]) || 'none'}. `
+                        + (declaredElsewhere
+                            ? 'That element is declared on another state, which is the other way this goes wrong: the control belongs '
+                                + 'to a different surface, so either read the state that offers it, or declare the element here as well '
+                                + 'if this surface really has it too. '
+                            : asPurpose ? `${asPurpose} ` : '')
+                        + 'Nothing was recorded, and the page has not moved, so add the element to this reading\'s `elements` with '
+                        + 'the same semantic_purpose — an element the walk acts on later has to be declared here for the same '
+                        + 'reason — and call again.',
+                    );
+                }
                 // A detection is a claim, and a claim the commit cannot resolve or cannot
                 // evaluate is a claim the graph loses. Refused here, while the page that would
                 // give the model a better one is still on screen.
@@ -1298,8 +1395,8 @@ export function apply(ctx, config) {
                 // asked when the other cannot: a detection that names no element is refuted by
                 // nothing, so a reading bound to the state it has just left is visible only in
                 // the surfaces — and only while the tool still has both of them.
-                const stateKey = identityKey({ page_type: args.page_type, variant: args.variant, dimensions: args.dimensions });
-                const alreadyRead = store.states().find((record) => record.identity_key === stateKey);
+                // (`alreadyRead` is derived further up, with the affordances, which have to ask
+                // the same question — which state is this reading about — one step earlier.)
                 const surfaceClash = alreadyRead
                     ? surfaceMismatchRefusal({
                         stateId: alreadyRead.state_id,
@@ -1329,6 +1426,7 @@ export function apply(ctx, config) {
                     detection: args.detection,
                     confidence: args.confidence,
                     model_status: 'observed',
+                    affordances: recordedAffordances,
                 });
                 if (!recorded) {
                     // The reading was refused rather than half-kept: an id handed back
@@ -1348,6 +1446,14 @@ export function apply(ctx, config) {
                     note: recorded.minted
                         ? 'Minted a new state for this identity.'
                         : 'This identity was already recorded — reused the existing state id instead of minting a duplicate.',
+                    // Reported because these are the only claims in the reading that `graph.json`
+                    // has no room for: 0.1's `state.schema.json` is `additionalProperties: false`
+                    // and declares no `affordances`, so they live in the log and reach the
+                    // application model at commit. Saying so here is the difference between a
+                    // claim that was recorded and one the model believes was.
+                    ...(recordedAffordances.length
+                        ? { affordances: recordedAffordances.map((affordance) => affordance.element) }
+                        : {}),
                 };
                 // What the reading itself says about the claims it was given. Both of these were
                 // previously invisible until the commit, by which time the page was gone: a
@@ -1446,6 +1552,13 @@ export function apply(ctx, config) {
                     // that has to be a dimension on the state it produces, and by the time the
                     // commit says so the page where it mattered is gone.
                     state_variables: stateVariableRollup(store),
+                    // What the surfaces read so far have offered and the walk has not taken,
+                    // counted across every reading — sightings included, because a second reading
+                    // of a surface sees the same controls. A count rather than a list, because the
+                    // question is "is this reading the one that finally said what the page
+                    // offers?"; the per-reading answer is on `state.affordances` above, and the
+                    // claims themselves are in `states.jsonl` — `graph.json` has no room for them.
+                    affordances_recorded: store.affordanceCount(),
                     // The two vocabularies the machinery cannot see for itself: what the run has
                     // called the product features and the journeys. Both are the model's words, and
                     // a second name for a thing it already named is the failure mode — so the names
@@ -1532,6 +1645,24 @@ export function apply(ctx, config) {
                     + 'rather than afterwards from memory. Record the behaviour\'s own completion as a separate step of it '
                     + 'when it has one (`login` contains the submit, and the submit is a step of `login`). A behaviour '
                     + 'cannot be a step of itself.',
+            },
+            realization: {
+                type: 'object',
+                additionalProperties: true,
+                description: 'How the browser performs THIS step, as one step of the behaviour named by '
+                    + '`capability_behaviour`: {action, element, value, purpose, arguments, effects, optional, timeout_ms, '
+                    + 'description}. `action` is required and is one of the schema\'s own verbs: '
+                    + `${[...STEP_ACTIONS].join(', ')}. \`element\` is element_<semantic_purpose>, the same id shape as `
+                    + '`target`; `value` is a string — a literal, or "{{param}}" bound to the behaviour\'s input; `purpose` '
+                    + 'is the step\'s part in the behaviour in the behaviour\'s own words (enter_credentials, submit), which '
+                    + 'is what survives an element being renamed; `effects` is the same effect list as the transition\'s, '
+                    + 'scoped to this step, because a multi-step behaviour lands its state only on its last step and without '
+                    + 'them the only way to say which step did the work is to re-read the observations. Refused without '
+                    + '`capability_behaviour`: a step that is a step of nothing is not a step. Recorded in '
+                    + '`capabilities.jsonl` beside the composition, and it is what the graph writes as the capability\'s '
+                    + '`steps[]` (capability.schema.json#/$defs/capabilityStep) — the ordered list a generator expands a '
+                    + 'behaviour with. `purpose` and `effects` are the behaviour model\'s, not the graph\'s: the schema has '
+                    + 'no room for them in `steps[]`, so they stay in the log.',
             },
             journey_name: {
                 type: 'string',
@@ -1777,6 +1908,111 @@ export function apply(ctx, config) {
                 const problem = argumentMapProblem(label, value);
                 if (problem) throw new Error(`${problem} Nothing was recorded, so fix it and call again.`);
             }
+            // Derived up here rather than with the rest of the behaviour handling below, because the
+            // realisation has to be checked before anything is written: a realisation is a step *of*
+            // a behaviour, so the two are either both acceptable or both refused, and a call that
+            // recorded the capability and only then refused the step would have claimed a name it
+            // never performed.
+            const behaviourName = typeof args.capability_behaviour === 'string' ? args.capability_behaviour.trim() : '';
+            // --- the realisation: how this step is performed ------------------
+            // The one argument that describes the browser rather than the application, and it is
+            // required to have a behaviour to belong to. A realisation is not a second name for the
+            // step — it is the verb, the element and the value, which are the three things a test
+            // generator needs and the three things a capability id cannot be read for.
+            if (args.realization !== undefined && !behaviourName) {
+                throw new Error(
+                    'realization was given without capability_behaviour, so the step describes a behaviour that was not named. '
+                    + 'A realisation says HOW a behaviour is performed, step by step, so it needs the behaviour it is a step of: '
+                    + 'pass `capability_behaviour` naming it — the same behaviour the other steps of this walk named — and the two '
+                    + 'are recorded together, in this call. Nothing was recorded, so call again with both.',
+                );
+            }
+            // Thrown rather than repaired, for the reason every other argument here is: the value
+            // would be written to the log as the run\'s account of what the browser did, and a step
+            // with an invented verb is an account of something that did not happen.
+            const realizationStep = args.realization === undefined ? null : normalizeRealizationStep(args.realization);
+            // --- the realisation's own references ---------------------------
+            // Checked here, before the first write, because `capability.schema.json` types a step's
+            // element as an element ID and not as a purpose: the near miss is a purpose with the id
+            // prefix added by hand or a purpose left bare, and both produce a step whose element
+            // resolves to nothing. `fill` on nothing is not a step a generator can perform, and a
+            // realisation that loses its steps is the exact outcome Phase 1 exists to prevent — so
+            // this is a refusal, and it has to come before the capability is created or a refused
+            // step would have claimed a name it never performed.
+            //
+            // The spellings differ, and it is the whole reason this check names both: `target` and
+            // an element-shaped effect take the bare `semantic_purpose` (`email_input`), because
+            // those are the model's shorthand for the control it means, while a step takes the id
+            // `element_email_input`, because a step is a reference to a declared element.
+            const known = registryFrom(store.states(), []);
+            // The ids, not the keys: `elementIdByPurpose` is keyed by the purpose a state declares
+            // (`email_input`) and maps to the id the commit mints for it (`element_email_input`),
+            // and a step is written in the second form. Reading `.has()` off the map is the mistake
+            // that would refuse every valid step and accept every invalid one — which is why this
+            // is a set of the values and why the message below lists them.
+            const declaredElementIds = new Set(known.elementIdByPurpose.values());
+            if (realizationStep?.element !== undefined && !declaredElementIds.has(realizationStep.element)) {
+                const declaredIds = listOf([...declaredElementIds]);
+                // The near miss is the case worth a longer answer: the element IS declared and the
+                // model wrote it the way every other argument in the tool wants it. Naming the id it
+                // should have written is a longer refusal and a shorter repair. (A bare purpose
+                // normally fails the id pattern first, in `normalizeRealizationStep`; this branch is
+                // for the ones that happen to be shaped like an id.)
+                const asPurpose = known.elementIdByPurpose.has(realizationStep.element)
+                    ? `\`${realizationStep.element}\` is declared, and a step takes the ID rather than the purpose: write `
+                        + `\`${known.elementIdByPurpose.get(realizationStep.element)}\`.`
+                    : `A step's element is an element ID — \`element_<semantic_purpose>\`. ${declaredIds
+                        ? `The elements declared so far are: ${declaredIds}.`
+                        : 'No element has been declared yet: the state you read after the action is where its elements belong.'}`;
+                throw new Error(
+                    `realization.element ${JSON.stringify(realizationStep.element)} is not the id of any element this run has `
+                    + `declared, so the step would name a control nothing can resolve. ${asPurpose} A step's element is an `
+                    + 'element ID because the step refers to a declared element rather than restating it — the same form the '
+                    + 'transition\'s `target` takes, and the form `capability.schema.json` types `element` as. The one place the '
+                    + 'bare purpose belongs is an element-shaped effect\'s `target`. A step that acts on the page rather than on a '
+                    + 'control (`goto`, `wait`, `wait_for`) has no element to name: drop `element` rather than inventing one. '
+                    + 'Nothing was recorded, and the page has not moved, so fix it and call again.',
+                );
+            }
+            // The step-scoped effects use the transition's vocabularies, because they are the same
+            // effects: `transition.schema.json#/$defs/effect` is what the behaviour model types them
+            // as. Checked here rather than at the commit because the commit does not project them —
+            // they are the behaviour model's and the graph has no room for them — so nothing
+            // downstream would notice: a step effect that resolved to nothing would sit in the log
+            // for the rest of the run, describing work that no step did.
+            for (const effect of realizationStep?.effects ?? []) {
+                const type = effect?.type;
+                if (!EFFECT_TYPES.has(type)) {
+                    throw new Error(
+                        `realization.effects entry has type ${JSON.stringify(type)}, which is not one of: ${[...EFFECT_TYPES].join(', ')}. `
+                        + 'A step effect is the same effect a transition carries, scoped to this step.',
+                    );
+                }
+                const missing = EFFECT_REQUIRED.get(type).filter((field) => effect[field] === undefined);
+                if (missing.length) {
+                    throw new Error(
+                        `realization.effects entry of type ${JSON.stringify(type)} is missing ${missing.join(', ')}. It is what says `
+                        + 'which step of a multi-step behaviour landed the state, so it has to be as complete as a transition\'s.',
+                    );
+                }
+                if (ELEMENT_TARGET_EFFECTS.has(type) && !known.declarations.has(String(effect.target))) {
+                    throw new Error(
+                        `realization.effects entry of type ${JSON.stringify(type)} targets ${JSON.stringify(effect.target)}, which is `
+                        + 'not the semantic_purpose of any element this run has declared. An element-shaped effect names the element '
+                        + 'itself, exactly as it does on the transition. Nothing was recorded, so fix the target and call again.',
+                    );
+                }
+                if (effect.severity !== undefined && !SEVERITIES.has(effect.severity)) {
+                    throw new Error(
+                        `realization.effects entry has severity ${JSON.stringify(effect.severity)}, which is not one of: ${[...SEVERITIES].join(', ')}.`,
+                    );
+                }
+                if (effect.operation !== undefined && !LIST_OPERATIONS.has(effect.operation)) {
+                    throw new Error(
+                        `realization.effects entry has operation ${JSON.stringify(effect.operation)}, which is not one of: ${[...LIST_OPERATIONS].join(', ')}.`,
+                    );
+                }
+            }
             const capability = store.addCapability({
                 name: capabilityName,
                 kind: args.capability_kind,
@@ -1812,7 +2048,9 @@ export function apply(ctx, config) {
             // composition as its own record. The behaviour is created as `composite` when the
             // vocabulary does not have it, because a behaviour with steps is a composite by
             // definition — the schema's own word for it.
-            const behaviourName = typeof args.capability_behaviour === 'string' ? args.capability_behaviour.trim() : '';
+            //
+            // (`behaviourName` is derived further up, with the realisation: the two are refused
+            // or accepted together, and the refusal has to happen before the first write.)
             let behaviour = null;
             if (behaviourName) {
                 if (!CAPABILITY_NAME_PATTERN.test(behaviourName)) {
@@ -1892,13 +2130,12 @@ export function apply(ctx, config) {
             }
 
             // --- effects ----------------------------------------------------
-            // The element registry, for the one effect check that is not about the schema: an
-            // element-shaped effect names an element, and a name no state declares is dropped at
-            // commit (`element_target_does_not_resolve`). The model writes semantic paths here
-            // because that is what a path-like target usually is — `login.email` reads like a
-            // field of the login capability — and losing the effect means losing the whole
-            // content of a form-fill step from the graph.
-            const known = registryFrom(store.states(), []);
+            // `known` is the element registry, for the checks that ask whether a name a step uses
+            // is one this run has declared: an element-shaped effect that does not resolve is
+            // dropped at commit (`element_target_does_not_resolve`), and a realisation step that
+            // does not resolve is dropped here. The model writes semantic paths where an element is
+            // meant — `login.email` reads like a field of the login capability — and losing the
+            // effect means losing the whole content of a form-fill step from the graph.
             const effects = Array.isArray(args.effects) ? args.effects : [];
             for (const effect of effects) {
                 const type = effect?.type;
@@ -2014,6 +2251,55 @@ export function apply(ctx, config) {
                 ));
             }
 
+            // --- the realisation, written against the edge it is made of -----
+            // After the transition, because a step names the edge it came from and an edge id is
+            // minted by `recordTransition`; a step naming an edge the log does not have would be the
+            // same dangling reference the commit refuses everywhere else. A step of a behaviour is a
+            // step *of that behaviour*, so it is filed under the behaviour (`capability_behaviour`),
+            // not under the capability of this edge — `composed_of` already says the behaviour
+            // contains this capability, and repeating it here would say the same thing in ids where
+            // the point is to say it in verbs.
+            //
+            // A failure here is REPORTED rather than thrown, which is the one place in this tool
+            // where a store failure is not fatal, and it is deliberate. The browser action happened
+            // and its edge is recorded; the realisation is a second statement about an edge that
+            // already exists, and throwing would tell the model that the step it just took was lost
+            // when it was not. The store's own rule is that a store failure never breaks the action
+            // it is recording — and by the time this line runs, the action's record is safe.
+            let realization = null;
+            if (realizationStep) {
+                const step = store.addRealizationStep(behaviour.id, realizationStep, {
+                    transitionId: recorded.id,
+                    // The position of this edge in the walk. It is what orders a behaviour's steps,
+                    // and it is read from the store rather than counted here because a repeated edge
+                    // reuses its id and moves to the end of the walk.
+                    walkIndex: store.walkLength() - 1,
+                });
+                realization = step
+                    ? {
+                        behaviour: { capability_id: behaviour.id, name: behaviourName },
+                        step: step.record,
+                        repeated: step.repeated,
+                        position: step.record.walk_index,
+                        note: step.repeated
+                            ? 'This edge was already a step of this behaviour, so the step was re-recorded at its new walk position: '
+                                + 'a behaviour\'s steps are performed in the order they were performed, and the newest position is where '
+                                + 'the walk is now.'
+                            : 'Recorded as this step of the behaviour — the verb, the element and the value the browser used, beside the '
+                                + 'composition that says which capabilities the behaviour contains.',
+                    }
+                    : {
+                        behaviour: { capability_id: behaviour.id, name: behaviourName },
+                        step: null,
+                        repeated: false,
+                        position: null,
+                        note: `The step was recorded, but its realisation was NOT — ${(store.writeProblem() ?? { path: store.capabilitiesPath }).path} `
+                            + 'could not be written. The behaviour therefore has no verb for this edge, and a generator expanding it will '
+                            + 'replay nothing for this step. The page has already moved, so there is nothing to re-attempt: say so in the '
+                            + 'run, or record the walk again once the workspace is writable.',
+                    };
+            }
+
             return {
                 transition: {
                     transition_id: recorded.id,
@@ -2074,6 +2360,10 @@ export function apply(ctx, config) {
                         },
                     }
                     : {}),
+                // The realisation is reported even when it failed, and `realization.step === null`
+                // is that failure — a model that only saw `recorded: true` and no realisation would
+                // conclude the behaviour is performable when nothing says how.
+                ...(realization ? { realization } : {}),
                 ...(featureName ? { feature: featureName } : {}),
                 chain_break: recorded.chain_break,
                 chain_break_note: recorded.chain_break
@@ -2171,6 +2461,12 @@ export function apply(ctx, config) {
                 counts: {
                     states: report.states,
                     capabilities: report.capabilities.committed,
+                    // The vocabulary is not the only thing in `capabilities.jsonl` any more, and a
+                    // model finishing a run has to be able to tell "the run never said how this
+                    // behaviour is performed" from "it said, and the steps are in the graph". Both
+                    // numbers, because `recorded` counts the log and `projected` counts what
+                    // reached the document, and the interesting case is the two disagreeing.
+                    realization: report.capabilities.realization,
                     transitions: report.transitions,
                     observations: report.observations.records,
                     elements: report.elements,

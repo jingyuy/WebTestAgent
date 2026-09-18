@@ -305,14 +305,37 @@ export function modelFromCandidates({
     edgesByCapability.set(capability, [...(edgesByCapability.get(capability) ?? []), edge]);
   }
 
-  // --- actors: the variants the run distinguished, and nothing invented -----------------------
-  // An actor carries no metadata: `application.actors[]` allows an id, a description and a
-  // credentials_ref and nothing else, so "this was derived" has to be said in the description.
+  // --- actors: the declared vocabulary first, then the variants the run used and nobody declared -
+  // `application.actors[]` is the one part of the document the evidence cannot supply. A page shows
+  // which variant it was read as; it never shows that `authenticated` is a role somebody can sign in
+  // as, nor which credential they sign in with. So a declared entry is carried through as declared —
+  // id, description, credentials_ref — and the projection says nothing about it beyond copying it,
+  // except for the one thing it can check: whether any state or journey of this run actually used
+  // that id (P6's `untraceable_actor`).
+  //
+  // A variant the run used and the declaration does not name is *also* carried, with the derived
+  // description, because every `state.identity.variant` and `journey.actor` is a reference to one of
+  // these ids and dropping the row would break the reference rather than report the omission. The
+  // omission is reported where the graph is built (`commit.js` warns when a used variant is
+  // undeclared); here the row has to exist for the document to hold together at all. A run that
+  // declares nothing therefore projects exactly as it did before this registry existed: the union is
+  // the old behaviour, and a declaration only adds rows and metadata the run could not have derived.
+  const declaredActors = Array.isArray(application?.actors) ? application.actors.filter((actor) => actor?.id) : [];
+  const declaredIds = new Set(declaredActors.map((actor) => actor.id));
   const variantRows = distinct(states.map((state) => state.identity?.variant));
-  const actors = variantRows.map((id) => ({
-    id,
-    description: `Observed as the surface variant "${id}"; the projection cannot say what it means.`,
-  }));
+  const actors = [
+    ...declaredActors.map((actor) => prune({
+      id: actor.id,
+      description: actor.description ?? `Declared as the actor "${actor.id}"; nothing this run recorded says what it means.`,
+      credentials_ref: actor.credentials_ref,
+    })),
+    ...variantRows
+      .filter((id) => !declaredIds.has(id))
+      .map((id) => ({
+        id,
+        description: `Observed as the surface variant "${id}"; the projection cannot say what it means.`,
+      })),
+  ];
 
   // --- state variables: every dimension a state identity distinguishes, with its detection ----
   const variables = new Map();

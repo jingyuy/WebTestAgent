@@ -56,12 +56,14 @@ import {
   EFFECT_KEYS,
   EFFECT_REQUIRED,
   EFFECT_TYPES,
+  ELEMENT_ID_PATTERN,
   ELEMENT_PURPOSE_PATTERN,
   EVIDENCE_ROLES,
   NOTE_SEVERITY,
   PAGE_TYPE_PATTERN,
   purposeOf,
   SEVERITIES,
+  STEP_ACTIONS,
   TRANSITION_DECISIONS,
   UNKNOWN_NOTE_SEVERITY,
 } from './schema.js';
@@ -91,6 +93,46 @@ function readJsonl(path, sink) {
   }
   if (sink) sink.push(...rows);
   return rows;
+}
+
+/**
+ * One recorded realisation step, as `capability.schema.json#/$defs/capabilityStep`, or `null`
+ * when the record is not one.
+ *
+ * The recorded record is `behavior.schema.json#/$defs/behaviorStep`, which is a documented
+ * *superset* of the graph's step: it adds `purpose` and `effects`. So this is a projection and
+ * not a copy, and the two keys it leaves behind are not an oversight — `capabilityStep` sets
+ * `additionalProperties: false`, so a step that carried them would be a `graph.json` the graph's
+ * own validator rejects. A step that arrives without its prose is a worse document than a step
+ * with it; a document that cannot be validated is not a document. Nothing is lost either way,
+ * because the log keeps the whole record and the projection reads the log.
+ *
+ * `action` is required by both schemas and is the only key without which there is no step at
+ * all: everything else can be absent and `{action: "assert"}` is still a real step of a real
+ * behaviour. Every other key is checked where it is present, too, rather than dropped — a step
+ * whose element is not an element id was not *that* step as recorded, and quietly writing the
+ * fill without its target would be the exact failure this whole layer exists to prevent.
+ *
+ * Returning `null` rather than throwing is deliberate: the tool refuses an unknown verb at the
+ * call, but what arrives here is a file, and the file is judged rather than trusted.
+ */
+function projectStep(record) {
+  if (!STEP_ACTIONS.has(record.action)) return null;
+  if (record.element !== undefined && !(typeof record.element === 'string' && ELEMENT_ID_PATTERN.test(record.element))) return null;
+  if (record.value !== undefined && typeof record.value !== 'string') return null;
+  if (record.arguments !== undefined && !(record.arguments && typeof record.arguments === 'object' && !Array.isArray(record.arguments))) return null;
+  if (record.optional !== undefined && typeof record.optional !== 'boolean') return null;
+  if (record.description !== undefined && typeof record.description !== 'string') return null;
+  if (record.timeout_ms !== undefined && !(Number.isInteger(record.timeout_ms) && record.timeout_ms >= 0)) return null;
+  return {
+    action: record.action,
+    ...(record.element !== undefined ? { element: record.element } : {}),
+    ...(record.value !== undefined ? { value: record.value } : {}),
+    ...(record.arguments !== undefined ? { arguments: record.arguments } : {}),
+    ...(record.optional !== undefined ? { optional: record.optional } : {}),
+    ...(record.description !== undefined ? { description: record.description } : {}),
+    ...(record.timeout_ms !== undefined ? { timeout_ms: record.timeout_ms } : {}),
+  };
 }
 
 /**
@@ -1651,7 +1693,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   // which steps a behaviour contains is usually only visible after they have been walked, so the
   // composition often arrives in a call after the one that named it. Two records, one object:
   // the commit is where they are read together.
-  const canonicalCapabilities = capabilities.filter((record) => record.kind !== 'capability_composition');
+  const canonicalCapabilities = capabilities.filter((record) => record.kind !== 'capability_composition' && record.kind !== 'realization_step');
   const compositionsByCapability = new Map();
   for (const record of capabilities) {
     if (record.kind !== 'capability_composition') continue;
@@ -1660,6 +1702,40 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     const list = compositionsByCapability.get(id) ?? [];
     list.push(record);
     compositionsByCapability.set(id, list);
+  }
+
+  // --- realisation: which step of a behaviour each edge is ------------------
+  // The third kind of record in `capabilities.jsonl`. A composition says what a behaviour is
+  // made of and is a claim about capabilities; a realisation says what a browser does and is a
+  // claim about the page. They are written in the same file because they are read together —
+  // but a realisation is not a capability, and the filter above is what keeps one from being
+  // committed as one.
+  //
+  // A step of a behaviour is a step *of that behaviour*, so one edge is one step however many
+  // times it was walked: the key is the pair, exactly as `recordTransition` keys an edge by its
+  // endpoints. The log is append-only, so a re-walked step has more than one record and the
+  // newest stands — the walk is where the run is now, and a behaviour's edge is its last step's
+  // destination (D12). A record with no `walk_index` cannot be ordered against the others, so it
+  // sorts before all of them rather than after: guessing last would claim that an unordered step
+  // ends a behaviour, which is the one position a step cannot be guessed into.
+  const realizationByKey = new Map();
+  for (const record of capabilities) {
+    if (record.kind !== 'realization_step') continue;
+    const id = record.capability_id ?? record.id;
+    if (!id) continue;
+    const key = JSON.stringify([id, record.transition_id ?? null]);
+    const previous = realizationByKey.get(key);
+    if (previous && (previous.walk_index ?? -1) > (record.walk_index ?? -1)) continue;
+    realizationByKey.set(key, record);
+  }
+  const realizationsByCapability = new Map();
+  for (const record of realizationByKey.values()) {
+    const list = realizationsByCapability.get(record.capability_id) ?? [];
+    list.push(record);
+    realizationsByCapability.set(record.capability_id, list);
+  }
+  for (const list of realizationsByCapability.values()) {
+    list.sort((left, right) => (left.walk_index ?? -1) - (right.walk_index ?? -1));
   }
 
   // --- APIs: the requests the machinery watched, as entities ---------------
@@ -2632,6 +2708,21 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     }
     return [...seen.values()];
   };
+  // A realisation that names a behaviour the run never committed is a step of nothing, and it is
+  // invisible rather than merely unresolved: the loop below attaches steps per capability, so a
+  // record whose capability is not there has no iteration to be attached on. Reported here, once
+  // per orphan, because a silent drop is the one outcome this layer must never produce.
+  for (const record of realizationByKey.values()) {
+    if (ctx.capabilityIds.has(record.capability_id)) continue;
+    findings.push({
+      scope: record.capability_id ?? 'realization',
+      code: 'realization_does_not_resolve',
+      severity: 'warning',
+      basis: 'reference_check',
+      detail: `a step is recorded as part of ${JSON.stringify(record.capability_id ?? null)}, which no committed behaviour has (invariant 2), so it belongs to nothing and was dropped. A step is a step *of* a behaviour: if that behaviour was meant to exist, the call that would have named it never recorded a name.`,
+    });
+  }
+
   const capabilityRecords = canonicalCapabilities.map((record) => {
     const id = record.capability_id ?? record.id;
     const attempts = attemptsByCapability.get(id) ?? [];
@@ -2690,6 +2781,41 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         detail: `${id} is built from ${steps.join(', ')} and its kind is ${JSON.stringify(kind ?? null)}, not \`composite\`. The composition is carried, because the run declared it, but a generator reading \`kind\` will treat this as one action rather than as the steps it is made of.`,
       });
     }
+    // --- the realisation: how the behaviour is performed --------------------
+    // `capability.schema.json` already has the home for this — `steps[]`, "how to realise the
+    // capability in the UI. Ordered, deterministic" — so folding the recorded steps into it is a
+    // translation rather than a new field of our own, exactly as `actors` is. It matters more
+    // here than there: a `composed_of` names the behaviours a composite contains, which a
+    // generator can expand only if it already knows how each of them is performed, and a `steps[]`
+    // is the answer. Without it the graph is a vocabulary with no verbs, and the only way to
+    // perform one is to replay the run.
+    //
+    // Order is the recording order, and the recording order is the walk. A behaviour's steps are
+    // performed in the order they were performed, so this is the one array in the graph whose
+    // order is load-bearing rather than incidental. A step whose edge the run never walked cannot
+    // exist here (the tool records the step against the edge it just wrote) but a step whose
+    // behaviour does cannot either, and both are reported rather than carried.
+    const recordedRealization = realizationsByCapability.get(id) ?? [];
+    const realizationSteps = [];
+    const droppedRealization = [];
+    for (const record of recordedRealization) {
+      const step = projectStep(record);
+      if (step) realizationSteps.push(step);
+      else droppedRealization.push(record);
+    }
+    if (droppedRealization.length) {
+      findings.push({
+        scope: id,
+        code: 'realization_step_not_a_step',
+        severity: 'warning',
+        basis: 'schema_invariant',
+        detail: `${id} has ${droppedRealization.length} recorded step(s) that are not steps \`capability.schema.json\` can hold: `
+          + `${droppedRealization.map((record) => JSON.stringify(record.action ?? null)).join(', ')}. A step needs a browser `
+          + `action from the schema's own list (${[...STEP_ACTIONS].join(', ')}), and any other key it carries has to be the `
+          + 'type the schema gives it. Each one was dropped, so the graph does not describe a behaviour by a step that is '
+          + 'not one — read `capabilities.jsonl` for what was recorded.',
+      });
+    }
     return {
       id,
       name: record.name,
@@ -2698,6 +2824,11 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       ...(input ? { input } : {}),
       ...(output ? { output } : {}),
       ...(steps.length ? { composed_of: steps } : {}),
+      // `steps` here is the schema's key and `realizationSteps` is the run's record. The two local
+      // names above (`steps` for the composition, `declaredSteps` for what it was declared from)
+      // are the run's; only the keys are the schema's, and confusing the two is the mistake D13
+      // is about.
+      ...(realizationSteps.length ? { steps: realizationSteps } : {}),
       ...(Array.isArray(record.aliases) && record.aliases.length ? { aliases: record.aliases.filter((alias) => typeof alias === 'string') } : {}),
       ...(evidenceByCapability.get(id)?.length
         ? { evidence: dedupeEvidence(evidenceByCapability.get(id)) }
@@ -2718,6 +2849,10 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
           // not have to reverse a slug to see what a composite is made of.
           composed_of_names: steps.map((value) => (canonicalCapabilities.find((candidate) => (candidate.capability_id ?? candidate.id) === value)?.name ?? null)),
           ...(declaredSteps.length !== steps.length ? { composed_of_dropped: declaredSteps.filter((value) => !steps.includes(value)) } : {}),
+          // The projection carries only what `capability.schema.json` has room for, so a reader
+          // who wants the verb's prose (`purpose`) or the step that did the work (`effects`) is
+          // sent to the log rather than left to conclude they were never recorded.
+          ...(droppedRealization.length ? { realization_dropped: droppedRealization.map((entry) => ({ action: entry.action ?? null, transition_id: entry.transition_id ?? null })) } : {}),
           kind_recorded_by_a_later_composition: kindWasUpgraded,
           minted_by: 'graph_transition (first use of the name)',
         },
@@ -3167,6 +3302,32 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     );
   }
 
+  // --- actors: the declared vocabulary, plus every role the walk actually used ----
+  // `application.actors[]` is declared in config because the vocabulary is a property of the
+  // application rather than of one walk: a role exists because somebody can sign in as it,
+  // whether or not this run ever did. But the reference runs the other way too —
+  // `state.identity.variant` and `journey.actor` name an actor id, and an id that only ever
+  // came from a state would otherwise be a dangling reference the moment the declaration is
+  // silent. So the committed list is the union, in a fixed order: what was declared, then what
+  // was used and not declared. A used-but-undeclared id is kept rather than dropped, because
+  // dropping it would break every reference that already points at it, and it is reported so
+  // the omission is visible instead of sealed into the graph as if it were a decision.
+  const declaredActors = Array.isArray(run.application?.actors) ? run.application.actors : [];
+  const usedVariants = distinct([
+    ...stateRecords.map((state) => state.identity?.variant),
+    ...journeys.map((journey) => journey.actor),
+  ].filter((id) => typeof id === 'string' && id));
+  const undeclaredActors = usedVariants.filter((id) => !declaredActors.some((actor) => actor?.id === id));
+  const actorRecords = [
+    ...declaredActors,
+    ...undeclaredActors.map((id) => ({ id })),
+  ];
+  if (undeclaredActors.length) {
+    graphWarnings.push(
+      `actors: ${undeclaredActors.map((id) => JSON.stringify(id)).join(', ')} ${undeclaredActors.length === 1 ? 'is' : 'are'} used by a committed state or journey and declared by no \`application.actors[]\` entry. ${undeclaredActors.length === 1 ? 'It was' : 'They were'} carried into the graph so the references resolve, but a role nobody declared — with no \`description\` and no \`credentials_ref\` — is a name the walk invented rather than a role the application has. Declare it in the plugin config (\`application: { actors: [{ id: ... }] }\`) beside the ones that are already there.`,
+    );
+  }
+
   const graph = {
     schema_version: '0.1',
     generated_at: generatedAt,
@@ -3185,6 +3346,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         // application's version with what the observations claim if the version is in the graph.
         ...(run.application.version ? { version: run.application.version } : {}),
         ...(typeof run.start_url === 'string' && run.start_url ? { base_url: run.start_url } : {}),
+        ...(actorRecords.length ? { actors: actorRecords } : {}),
         metadata: commitMetadata({
           status: 'verified',
           producer: 'manual',
@@ -3238,11 +3400,35 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     graphWarnings.unshift(`${blocker.severity}: ${blocker.code} — ${blocker.detail}`);
   }
   report.gates = gates;
+  // What the run's readings said their surfaces OFFER and the walk did not take. Read off every
+  // record rather than off `canonicalStates` alone: a sighting is a reading too, and the surface it
+  // read offered exactly as much as the first one did. `state_id` is the record's own, which for a
+  // sighting is the state it was deduplicated onto — which is the surface the claim is about.
+  const recordedAffordances = [...canonicalStates, ...sightings]
+    .flatMap((record) => (Array.isArray(record.affordances) ? record.affordances : [])
+      .map((affordance) => ({ state_id: record.state_id ?? null, element: affordance?.element ?? null })))
+    .filter((affordance) => typeof affordance.element === 'string');
   report.states = {
     candidates: states.length,
     committed: stateRecords.length,
     deduplicated: sightings.length,
     readings: observationsByState.size,
+    // The one claim the log holds that this document has no room for. 0.1's `state.schema.json`
+    // closes `state` to its declared keys and has no `affordances`, so what a surface OFFERS is
+    // recorded in the log and carried by the application model, not by `graph.json` — counted and
+    // graded here so its absence from the document is a stated fact rather than a silent drop, for
+    // the same reason `report.capabilities.realization` is counted.
+    //
+    // `retired` is the clause that makes the claim falsifiable rather than decorative: an
+    // affordance says nobody performed this, so a committed step that performed it refutes the
+    // claim, and the walk — not the model's memory of the surface — is what settles it.
+    affordances: {
+      recorded: recordedAffordances.length,
+      surfaces: distinct(recordedAffordances.map((affordance) => affordance.state_id).filter(Boolean)).length,
+      retired: recordedAffordances.filter((affordance) => committedEdges.some((edge) => edge.from_state === affordance.state_id
+        && (edge.action?.target === affordance.element
+          || (edge.effects ?? []).some((effect) => ELEMENT_TARGET_EFFECTS.has(effect?.type) && effect.target === affordance.element)))).length,
+    },
   };
   report.capabilities = {
     candidates: canonicalCapabilities.length,
@@ -3252,6 +3438,14 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     // head when the raw log is inspected.
     compositions: [...compositionsByCapability.values()].reduce((total, list) => total + list.length, 0),
     composites: capabilityRecords.filter((record) => record.kind === 'composite').length,
+    // The realisation is the third kind of record in `capabilities.jsonl` and is counted so a
+    // reader can tell "the run never said how this behaviour is performed" from "it said, and the
+    // steps are in the graph" without diffing the log against the document. `projects` is what
+    // reached `capabilities[].steps[]`; `recorded` is what the log holds.
+    realization: {
+      recorded: realizationByKey.size,
+      projected: capabilityRecords.reduce((total, record) => total + (record.steps?.length ?? 0), 0),
+    },
     attempts: Object.fromEntries(attemptsByCapability),
   };
   report.transitions = {
@@ -3443,6 +3637,14 @@ export function invariantsOf(graph) {
     // built from a behaviour the graph does not have is a generator's dead end.
     for (const step of capability.composed_of ?? []) {
       if (!capabilities.some((candidate) => candidate.id === step)) dangling.push(`${capability.id}.composed_of → ${step}`);
+    }
+    // A step names an element the same way a transition names its target, and is checked the same
+    // way for the same reason: an element id no committed state declares is a selector nothing can
+    // resolve, so a generator handed this step can only guess at the control. Absent is not
+    // dangling — `goto` and `wait` act on the page rather than on a control, and both schemas make
+    // `element` optional for exactly those steps.
+    for (const [index, step] of (capability.steps ?? []).entries()) {
+      if (step?.element && !elementIds.has(step.element)) dangling.push(`${capability.id}.steps[${index}].element → ${step.element}`);
     }
   }
   // A journey is a new set of references and gets checked like every other one: a journey naming an

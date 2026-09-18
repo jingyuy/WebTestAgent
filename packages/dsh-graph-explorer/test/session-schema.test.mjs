@@ -2,7 +2,7 @@ import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRun } from '../lib/session.js';
-import { normalizeApplication, vocabularyNotes, EFFECT_REQUIRED, CAPABILITY_NAME_PATTERN } from '../lib/schema.js';
+import { normalizeApplication, normalizeActors, vocabularyNotes, EFFECT_REQUIRED, CAPABILITY_NAME_PATTERN } from '../lib/schema.js';
 
 let fails = 0;
 const check = (label, actual, expected) => {
@@ -132,13 +132,66 @@ refuses('an unrecognized key is refused, not dropped',
   () => normalizeApplication({ id: 'app_x', name: 'Acme', baseUrl: 'http://x/' }), 'no key');
 refuses('a non-mapping is refused', () => normalizeApplication('app_x'), 'must be a mapping');
 
+// --- the declared actor vocabulary ---------------------------------------
+// `application.schema.json` declares `actors` in both document versions and nothing ever populated
+// it: the id was inferred from the variant a state happened to carry, which is the graph deriving
+// an identity rather than reporting one. A variant says what a *reading* was taken as; a declared
+// actor says which roles the application can be exercised as, whether or not this run used them —
+// and it is the only place a `credentials_ref` can come from, because no page states which
+// credential a role signs in with.
+//
+// The entries below are refused one at a time so that each message names its own mistake. Every one
+// of them is a value that would otherwise have been written into run.json and read back out of the
+// committed graph as though someone had declared it.
+check('no actors declared is an empty list, not a placeholder role',
+  [normalizeApplication({ id: 'app_x', name: 'X' }).actors ?? [], normalizeActors(undefined)], [[], []]);
+check('and the key is omitted rather than written empty, because the schema requires at least one',
+  Object.keys(normalizeApplication({ id: 'app_x', name: 'X' })), ['id', 'name']);
+check('a declared vocabulary is carried with its references',
+  normalizeActors([
+    { id: 'anonymous' },
+    { id: 'authenticated', description: 'Signed in as the seeded test user.', credentials_ref: 'TEST_USER' },
+  ]),
+  [
+    { id: 'anonymous' },
+    { id: 'authenticated', description: 'Signed in as the seeded test user.', credentials_ref: 'TEST_USER' },
+  ]);
+check('a declared vocabulary reaches application',
+  normalizeApplication({ id: 'app_x', name: 'X', actors: [{ id: 'admin' }] }).actors, [{ id: 'admin' }]);
+refuses('a non-array actors is refused',
+  () => normalizeApplication({ id: 'app_x', name: 'X', actors: { id: 'admin' } }), 'must be an array');
+refuses('an entry with no id is refused',
+  () => normalizeApplication({ id: 'app_x', name: 'X', actors: [{ description: 'someone' }] }), 'id must be a non-empty string');
+refuses('a blank id is refused',
+  () => normalizeApplication({ id: 'app_x', name: 'X', actors: [{ id: '  ' }] }), 'id must be a non-empty string');
+// Two entries, one id: every `state.identity.variant` and `journey.actor` that names it would then
+// point at two roles, and nothing downstream could say which one a walk was. Refused rather than
+// deduplicated, because dropping the second would lose a `credentials_ref` silently.
+refuses('the same id twice is refused, not deduplicated',
+  () => normalizeApplication({ id: 'app_x', name: 'X', actors: [{ id: 'admin' }, { id: 'admin', credentials_ref: 'ADMIN_USER' }] }),
+  'twice');
+refuses('a misspelled credential key is refused, not read as absent',
+  () => normalizeApplication({ id: 'app_x', name: 'X', actors: [{ id: 'admin', credential_ref: 'ADMIN_USER' }] }), 'no key');
+refuses('a credential carried as a value is refused: the field names one',
+  () => normalizeApplication({ id: 'app_x', name: 'X', actors: [{ id: 'admin', credentials_ref: { user: 'a', password: 'b' } }] }),
+  'must be a string naming a credential entry');
+refuses('a non-string description is refused',
+  () => normalizeApplication({ id: 'app_x', name: 'X', actors: [{ id: 'admin', description: 7 }] }), 'description must be a string');
+
 const declaredDir = mkdtempSync(join(tmpdir(), 'gx-app-'));
 const declared = createRun({
   cwd: declaredDir,
-  provenance: { application: normalizeApplication({ id: 'app_acme', name: 'Acme' }) },
+  provenance: {
+    application: normalizeApplication({
+      id: 'app_acme',
+      name: 'Acme',
+      actors: [{ id: 'anonymous' }, { id: 'authenticated', credentials_ref: 'TEST_USER' }],
+    }),
+  },
 });
 check('the declared application reaches run.json',
-  JSON.parse(readFileSync(join(declared.dir, 'run.json'), 'utf8')).application, { id: 'app_acme', name: 'Acme' });
+  JSON.parse(readFileSync(join(declared.dir, 'run.json'), 'utf8')).application,
+  { id: 'app_acme', name: 'Acme', actors: [{ id: 'anonymous' }, { id: 'authenticated', credentials_ref: 'TEST_USER' }] });
 check('an undeclared application is written as null, so the commit can refuse',
   JSON.parse(readFileSync(join(run.dir, 'run.json'), 'utf8')).application, null);
 

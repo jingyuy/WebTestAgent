@@ -201,6 +201,56 @@ console.log('\n# projection');
   const { model } = projected();
   check('actors are the variants the run distinguished',
     model.application.actors.map((actor) => actor.id), ['anonymous', 'authenticated']);
+  // The variant is all a run can witness, so with nothing declared that is all the projection may
+  // name — and it says so in the description rather than letting a derived id read as a decided
+  // role. `application.actors[]` cannot carry metadata, so the description is the only place the
+  // document has to admit the row was derived.
+  check('and each one admits it was derived, because an actor has no metadata to say it in',
+    model.application.actors.map((actor) => actor.description),
+    ['Observed as the surface variant "anonymous"; the projection cannot say what it means.',
+      'Observed as the surface variant "authenticated"; the projection cannot say what it means.']);
+
+  // --- a declared vocabulary -------------------------------------------------------------------
+  // The declaration is the one input the evidence cannot supply, so this is the one place the
+  // projection has something to copy rather than something to name: a role the run never used is
+  // still a role the application can be exercised as, and `credentials_ref` names a credential no
+  // page ever shows. What is *not* copied is a role the walk used and nobody declared — that id is
+  // a reference every state variant already makes, so dropping it would break the document rather
+  // than report the omission.
+  const vocabulary = projected({
+    application: {
+      id: 'app_acme-demo', name: 'Acme Demo App', base_url: 'http://127.0.0.1:4173/',
+      actors: [
+        { id: 'anonymous', description: 'Nobody is signed in.' },
+        { id: 'authenticated', description: 'Signed in as the seeded test user.', credentials_ref: 'TEST_USER' },
+        { id: 'admin', description: 'A role this run never exercised.' },
+      ],
+    },
+  });
+  check('a declared vocabulary is carried as declared, in the order it was declared',
+    vocabulary.model.application.actors,
+    [
+      { id: 'anonymous', description: 'Nobody is signed in.' },
+      { id: 'authenticated', description: 'Signed in as the seeded test user.', credentials_ref: 'TEST_USER' },
+      { id: 'admin', description: 'A role this run never exercised.' },
+    ]);
+  check('a declared role the walk read no state as is kept, and named as the declaration named it',
+    vocabulary.model.application.actors.find((actor) => actor.id === 'admin').description,
+    'A role this run never exercised.');
+  const partial = projected({
+    application: { id: 'app_acme-demo', name: 'Acme Demo App', actors: [{ id: 'anonymous', description: 'Nobody is signed in.' }] },
+  });
+  check('a used role the declaration omits is carried with the derived wording, after the declared ones',
+    partial.model.application.actors,
+    [
+      { id: 'anonymous', description: 'Nobody is signed in.' },
+      { id: 'authenticated', description: 'Observed as the surface variant "authenticated"; the projection cannot say what it means.' },
+    ]);
+  // A declaration is not a repair: it adds rows, and it must not make a document that says more
+  // than the walk did. The states, behaviours and transitions are the evidence's, unchanged.
+  check('and a declaration adds actors without touching anything the run recorded',
+    [vocabulary.model.states.length, vocabulary.model.behaviors.length, vocabulary.model.transitions.length],
+    [model.states.length, model.behaviors.length, model.transitions.length]);
   check('one behaviour per committed capability, in document order',
     model.behaviors.map((behavior) => behavior.id),
     ['behavior_fill_login_email', 'behavior_fill_login_password', 'behavior_submit_login', 'behavior_login']);

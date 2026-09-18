@@ -73,14 +73,18 @@ const request = (method, url, extra = {}) => ({ method, url, duration_ms: 12, ..
 const loginCall = (status) => request('POST', 'http://127.0.0.1:4173/api/login', { status });
 const projectsCall = request('GET', 'http://127.0.0.1:4173/api/projects', { status: 200 });
 
-const buildFixture = () => {
+// The application is a parameter so that the actor registry can be exercised with a vocabulary
+// declared and without one, from the same walk: the second fixture differs from the first in the
+// config alone, which is the point — a declaration adds rows the run could not have derived and
+// changes nothing about what the walk recorded.
+const buildFixture = (application = { id: 'app_synth', name: 'Synth', version: 'git:abc1234' }) => {
   const cwd = mkdtempSync(join(tmpdir(), 'gx-commit-'));
   const run = createRun({
     cwd,
     provenance: {
       startUrl: 'http://127.0.0.1:4173/login',
       instruction: 'Log in and check the dashboard.',
-      application: { id: 'app_synth', name: 'Synth', version: 'git:abc1234' },
+      application,
       plugin: { name: '@webtestagent/dsh-graph-explorer', version: '0.0.0-test' },
       model: 'test-model',
       provider: 'test-provider',
@@ -453,6 +457,58 @@ check('the declared application is the identity', [graph.application.id, graph.a
 check('the recorded build is carried into the graph', graph.application.version, 'git:abc1234');
 check('the start URL becomes the base_url, not the id', graph.application.base_url, 'http://127.0.0.1:4173/login');
 check('what was never walked is admitted', graph.coverage.unmodelled_routes, []);
+
+// --- actors: the declared vocabulary, and the roles the walk actually used ---
+// `application.schema.json` has declared `actors` in both document versions and nothing ever filled
+// it in. It could not be derived: a page says which variant a reading was taken as, and nothing
+// says which roles the application can be exercised as — least of all which credential a role signs
+// in with. So it is declared in config, and what lands in the graph is the union of the declaration
+// and the ids the walk actually referenced. The reference runs the other way from the declaration:
+// `state.identity.variant` and `journey.actor` name an actor id, so dropping a used-but-undeclared id
+// would break a reference rather than report an omission. It is carried and the omission is said out
+// loud, which is the difference between a gap the graph admits to and one sealed into it.
+check('a role the walk used and nobody declared is carried, so its references resolve',
+  graph.application.actors,
+  // A bare id, with no description: the graph may not write prose nobody wrote, and the derived
+  // wording ("observed as the surface variant …") is the projection's, one layer down.
+  [{ id: 'authenticated' }]);
+check('and the graph says the declaration was missing rather than implying a role was decided',
+  graph.warnings.filter((warning) => warning.startsWith('actors:')).map((warning) => [
+    warning.includes('"authenticated"'),
+    warning.includes('declared by no'),
+    warning.includes('application: { actors: [{ id: ... }] }'),
+  ]),
+  [[true, true, true]]);
+
+// The same walk, with the vocabulary declared. Nothing else about the fixture changes, so every
+// difference between the two graphs is the declaration and its consequences — which is the check
+// this section is for: a declaration is not an instruction to the walk, it is the one input the
+// evidence cannot supply.
+const declaredFixture = buildFixture({
+  id: 'app_synth',
+  name: 'Synth',
+  actors: [
+    { id: 'anonymous', description: 'Nobody is signed in.' },
+    { id: 'authenticated', description: 'Signed in as the seeded test user.', credentials_ref: 'TEST_USER' },
+  ],
+});
+const declaredCommit = commitRun({ dir: declaredFixture.dir, command: 'test' });
+const declaredGraph = declaredCommit.graph;
+check('a declared role is carried as declared, description and reference together',
+  declaredGraph.application.actors,
+  [
+    { id: 'anonymous', description: 'Nobody is signed in.' },
+    { id: 'authenticated', description: 'Signed in as the seeded test user.', credentials_ref: 'TEST_USER' },
+  ]);
+check('a declared role the walk never used is kept: the vocabulary outlives the walk',
+  declaredGraph.application.actors.some((actor) => actor.id === 'anonymous'), true);
+check('and the used one is not added a second time beside the declared one',
+  declaredGraph.application.actors.filter((actor) => actor.id === 'authenticated').length, 1);
+check('a declaration means there is nothing to warn about',
+  declaredGraph.warnings.filter((warning) => warning.startsWith('actors:')), []);
+check('the declaration changes the actors and nothing else the walk produced',
+  [declaredCommit.report.states.committed, declaredGraph.states.map((state) => state.id).sort(), declaredGraph.transitions.length],
+  [report.states.committed, graph.states.map((state) => state.id).sort(), graph.transitions.length]);
 
 // ---------------------------------------------------------------------------
 // Rules, one at a time, through `reconcile`

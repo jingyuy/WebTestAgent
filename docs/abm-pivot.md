@@ -1,6 +1,8 @@
 # Pivot: generate an Application Behavior Model beside the graph
 
-Status: **Phase 0a and 0b DONE, Phase 1 next.** Baseline: plugin `0.1.22`, branch
+Status: **Phase 0a and 0b DONE. Phase 1 DONE (stages A, B and C); Phase 2 next — the commit
+writes both documents.**
+Baseline: plugin `0.1.22`, branch
 `fix/graph-explorer-lossless-and-state-entered` (`8738f52`), deployed to the `graph` and
 `web` profiles. Work happens on **`feat/application-behavior-model`**, branched off `8738f52`
 (not `main`, which is three commits behind on `commit.js`/`generate.js`).
@@ -30,6 +32,20 @@ this: it makes the ABM a consumer of its own document, which is the point. |
 | **D11** | **An object's level is the minimum of the claims it carries.** One `metadata` block covers several claims — a behaviour's *name* and its *edge*, a state's *identity* and its *reading* — and D9 says those are different claims, so the level of the record is the weakest of them. Derived from `producer` + `composed_of` on the fly; no second field, no `metadata.extra.levels`. | §3: **P14/P15** are the enforcement. The consequence is accepted here rather than discovered later: the three 0.1.22 edges become `inferred`, which makes **P10 reachable on walks that look clean today** — an `inferred` behaviour cannot back a `criticality: critical` journey, so a walk that used to report nothing now reports a warning. That is the rule working, not a regression. |
 | **D12** | **The collapse keys on the behaviour's last realisation step.** A behaviour's edge is `(the state it began in, the behaviour, the state its **last** step arrived in)`. The steps before it are `realization[]`, not edges — so a sign-in that types twice and submits is one edge, and a behaviour that really does end where it started is a self-loop by the same rule, with no special case and no second identity for a thing that already has one. | §3: **P12a/P12b gain the sequence form** — a behaviour with no steps of its own (a genuine composite) is accounted for by its members' edges in `composed_of` order. §5 Phase 2: the assembly groups an invocation's calls into **one** edge, the one that ends where the last step landed, instead of one edge per call; `journeys[].steps[]` naming a behaviour therefore means the behaviour completed. §1: what fills that layer in is the **run** — `capabilities[].steps[]`, the field ABG 0.1 already declares as "how to realise the capability in the UI" and 0.2 calls `realization[]`, empty in every run recorded so far. |
 | **D13** | **The projection reports the run's vocabulary; the demotion belongs where the realisation was recorded.** A capability the model declared a step of a behaviour is not a behaviour — but only a run that *recorded* the step can say so, and the gate is that record (`capabilities[].steps[]`, which the commit fills in from the `realization_step` log), never `composed_of` alone. On 0.1.22 there is no recorded realisation, so 0b demotes nothing and the baseline keeps its four behaviours. | §5 Phase 1/2: `behaviors[]` holds `login` and not the three step capabilities, so the acceptance clause holds as written. The demotion lands **with** the collapse, because demoting without it makes an existing rule fire (measured: `P12/duplicate_transition`). §3: **P1 keeps its authority over the names that are left** — a mechanism name among the behaviours is still refused; it simply stops being a count of the protocol's output. §7: Phase 3's measure moves to the log (capabilities recorded with no behaviour attached), because that is the number the protocol moves and a projection cannot. |
+| **D14** | **`steps[]` and `composed_of` are two claims in 0.1 and one claim in 0.2, so Phase 1 records the realisation *beside* the composition and Phase 2 owes the demotion.** In 0.1 a `capabilityStep` cannot name a capability (`additionalProperties: false`), so a step says *what was done, on what, with what value* and never *whose step it is*: the step-of relation stays `composed_of`. The two fields are therefore not two answers to one question in `graph.json`, and the "beside" clause is forced rather than cautious. In 0.2 they are one question: `behavior.realization[]` carries `purpose` and lives *inside* the behaviour, so containment already says whose step it is — and 0.2's own schema prose calls a non-empty `realization[]` beside a non-empty `composed_of` "two answers to one question". | §5 Phase 2: `behaviors[].realization[]` is folded from `capability.steps[]`, and the behaviour's `composed_of` is then **dropped** (D3's demotion), kept only where the behaviour is genuinely built from other behaviours. A behaviour with both is the one shape P3's restatement was written to stop. Phase 1 does not pre-empt this: `graph.json` is a faithful reading of what the run recorded, and it is Phase 2's assembly that knows the relation has become containment. |
+| **D15** | **An affordance is refuted by the walk, so it is checked against the surface it was read from and counted where `graph.json` has no room for it.** The claim names an element by **ID**, and the element has to be one *this state's own readings* declare — not one some other state declared, which is a claim about a different surface. `affordances` is refused without `page_type`, because a claim with no surface outlives the page that supports it and nothing can refute it after that. And because 0.1's `state.schema.json` is `additionalProperties: false`, the claim stays in the log and the commit reports `states.affordances: {recorded, surfaces, retired}`, where `retired` counts the ones a committed step performed — the walk, not the model's memory of the surface, is what settles whether "nobody did this" is true. | §5 Phase 1 (Stage C): `graph_observe` gains `affordances`, `normalizeAffordance` fixes the keys to the schema's own, and the reading is the only moment the claim can be made. §5 Phase 2: the ABM's `state.affordances[]` is assembled from these claims, and P13 compares the two. Rejected and named: checking against the whole element registry (lets a claim about the wrong surface through), accepting the claim without a state (unrefutable), and carrying the claims into `graph.json`'s `metadata.extra` (the document has no field for them, and a claim smuggled into metadata is one the document does not describe). |
+
+**Why D14 is a decision and not a detail.** Phase 1's plan says the realisation is recorded "beside
+the composition rather than in place of it", and 0.2's `behavior.realization` doc says a behaviour
+with both "has two answers to one question" — read together those two lines look like a contradiction,
+and the temptation is to demote in Phase 1 or to narrow the clause. Neither is needed, because the
+fields are not the same size. A `capabilityStep` is closed: `action`, `element`, `value`, `arguments`,
+`optional`, `description`, `timeout_ms`, and no capability among them. So `cap_login.steps[]` says
+*type the email, then click submit* and cannot say that those are steps **of** `login`; that is
+`composed_of`, and it is the only place the relation is written down. 0.2 changes the shape by putting
+the steps **inside** the behaviour, at which point containment carries what `composed_of` used to and
+carrying both would genuinely be two answers. The demotion is therefore not "we now know better than
+the pair" — it is the same statement, moved from a reference to a nesting.
 
 **Why D5 is not just a preference — P12 could not hold without it.** The current §3 made a walk step a
 *behaviour* (`login`) while P12 demanded "every committed transition appears as exactly one
@@ -687,12 +703,14 @@ ajv on this machine (ESM `import()` ignores `NODE_PATH`, which is why the schema
 
 `lib/index.js`, `graph_transition` (index.js:1482).
 
-- New arguments: `behavior` (the behaviour this step belongs to) and `realization` (the step
-  shape: `{action, element, value}` — the same object ABG 0.1's `capabilityStep` declares, so this is
-  a translation and not a new vocabulary).
-- Rule: when `behavior` is given, the call **also** appends a realization step to that behaviour
-  (via a new `store.addRealizationStep`) **and** keeps minting the step capability as it does
-  today, so `graph.json` stays faithful (D1). One call, both documents.
+- New argument: `realization` (the step shape: `{action, element, value}` — plus `purpose` and
+  `effects`, which are the behaviour model's and stay in the log — so this is a translation of ABG
+  0.1's `capabilityStep` and not a new vocabulary). There is no new `behavior` argument: the
+  behaviour this step belongs to is named by **`capability_behaviour`**, which 0.1.21 already has and
+  which the call already uses to write `composed_of`. One argument doing one job.
+- Rule: when `capability_behaviour` is given, the call **also** appends a realization step to that
+  behaviour (via a new `store.addRealizationStep`) **and** keeps minting the step capability as it
+  does today, so `graph.json` stays faithful (D1). One call, both documents.
 - **D12 shapes what these records have to make derivable.** The assembly has to be able to see *one
   invocation* of a behaviour — which calls were its steps, and in what order — because the behaviour's
   edge is its last step's destination. So a realization record carries the behaviour, its position,
@@ -703,23 +721,50 @@ ajv on this machine (ESM `import()` ignores `NODE_PATH`, which is why the schema
   records the link the ABM reads — `capability.steps`, folded at commit from the `realization_step`
   records — beside the composition rather than in place of it, so `graph.json` keeps the composition
   it has always had.
-- `graph_observe` (index.js:1197) gains `actor`, validated against the run's actor registry, and
-  `affordances` — the elements the reading offers and the walk is not exercising (D6). The reading
-  is the only moment an affordance can be recorded, because it is a fact about the surface.
+- `graph_observe` (index.js:1197) gains `affordances` — the elements the reading offers and the walk
+  is not exercising (D6). The reading is the only moment an affordance can be recorded, because it is
+  a fact about the surface. **Stage C: implemented.** `normalizeAffordance` accepts exactly the keys
+  `state.schema.json#/$defs/affordance` declares, minus `evidence` (the reading that made the claim,
+  which the commit writes) and `metadata` (bookkeeping — `confidence` in particular is not the
+  model's to set: an affordance is a claim about a behaviour nobody performed, so there is nothing
+  for the claim to be confident about). The element is refused unless **this state's own readings**
+  declare it — a near miss tells the model which state does, because the repair is not the same — and
+  `affordances` without `page_type` is refused, because the claim would outlive the page that
+  supports it. The claims are appended to `states.jsonl` on the reading, which is the one place the
+  counter is honest: a reading of a state already seen is a *sighting*, and a sighting's affordance is
+  a claim about the same surface made later. `graph.json` cannot carry them (D15), so the reading's
+  digest reports the ones it recorded and `report.states.affordances` counts them, `retired` among
+  them.
 - Actors come from **config** beside `application:` in `cordis.patch.yml` — the actor vocabulary
   is a property of the application, not of a walk, and config is where `application` already lives.
-- `lib/session.js`: `addRealizationStep(capabilityId, step)`, `actors()`, and append-only records
+  0.1's `application.schema.json` **already declares `actors[]`**, so this is not a new field either:
+  Phase 1 populates a field the graph has always had and no run has ever filled in. The reading does
+  **not** take an `actor` argument — an earlier draft of this plan had it doing so, and the reason it
+  does not is D13's reason in miniature: a per-reading actor answers a question nobody asked, while the
+  registry is what a journey's `actor` ("must equal", 0.2) and a state's variant both resolve against.
+- `lib/session.js`: `addRealizationStep(capabilityId, step)`, and append-only records
   (`kind: 'realization_step'`), consistent with "a reading appends a new state or a sighting" — and
   **the commit folds those records into `capabilities[].steps[]`**, which is the field the ABM reads
   (`stepsOfCapability`). That fold is what makes the second half of the acceptance below reachable
   without `reconcile()` or `modelFromCandidates()` learning a new concept, and it is an *added* key
   per record, which the D8 key-path clause already allows for.
-- Early refusals matching P1/P4/P5/P7/P13 while the page is still on screen.
+- Early refusals matching P1/P4/P5/P7/P13 while the page is still on screen, and all of them before
+  the first write: an unknown verb, an element that is not an ID this run declared, an unknown key, a
+  step effect that does not resolve, `realization` with no behaviour to belong to — and, for Stage C,
+  an affordance naming an element this state's own readings did not declare, or given without a
+  `page_type` to belong to. The `realization` one is the one that keeps the acceptance honest — a step
+  with no behaviour is refused rather than recorded as a step of nothing.
 
 **Acceptance:** a scripted walk on `demo-app` produces, from one set of calls, a `graph.json`
 whose `capabilities[]` matches 0.1.22's shape **and** an ABM whose `behaviors[]` contains `login`
-with three `realization[]` entries and no top-level step capability. Covered by
-`test/tools.test.mjs`; revert-proven in `test/prove-abm.py`.
+with three `realization[]` entries and no top-level step capability. The document half is covered by
+`test/realization.test.mjs` (the committed graph is validated against the vendored 0.1 schema, so the
+`steps[]` fold is checked in the schema's own terms, and the same suite drives Stage C: the affordance
+on the login reading, the refusals it earns, and the assertion that `graph.json` does not contain it);
+the ABM half waits on Phase 2's assembly.
+Revert-proven in `test/prove-abm.py` — written, 11 mutations, all 11 refused (`python3 test/prove-abm.py`),
+and it is the Phase-1 half of the protocol below: the fold, the two spellings, the four affordance
+rules and the actor registry.
 
 **The clause has a second reading, and D13 decides it: the projection does, on a recorded
 realisation.** A capability the model declared a step of a behaviour is not a behaviour, so
@@ -770,8 +815,9 @@ three honest (D8):
    findings lists are identical. "Sharing one definition so they cannot drift" is an intention until
    something runs both; this is the same doctrine 0b was built on.
 
-Note that this criterion is a function of a Phase-1 artifact that does not exist yet: it is evaluated
-against the walk `test/prove-abm.py` produces, not against anything 0b can currently write.
+Note that this criterion is a function of a Phase-1 artifact: it is evaluated against the walk
+`test/realization.test.mjs` records — a scripted three-step walk through the real tools, committed
+through the real commit — and not against anything 0b can currently write.
 
 ### Phase 3 — the protocol
 
@@ -852,12 +898,14 @@ and lowers `confidence`, which is what the schema's `effect.observed` already me
 
 Each of these is load-bearing, not ceremony:
 
-1. `npm test` — currently **10** suites (0a/0b added `test/abm.test.mjs`); every phase adds a suite
+1. `npm test` — currently **11** suites (0a/0b added `test/abm.test.mjs`, Phase 1 added
+   `test/realization.test.mjs`); every phase adds a suite
    or a case, never only a claim.
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
-   the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template;
-   add `test/prove-abm.py`. Break the *rule*, not a clause the code already treats as equivalent
+   the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
+   `test/prove-abm.py` is the Phase-1 instance (11 mutations, all 11 refused); break the *rule*, not a
+   clause the code already treats as equivalent
    (removing `cutParameter &&` proved nothing — behaviourally identical).
    **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded
    one `journeys[].steps[]` entry per committed transition, and §3 made a step a behaviour: the
