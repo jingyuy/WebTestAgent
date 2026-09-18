@@ -29,6 +29,7 @@ this: it makes the ABM a consumer of its own document, which is the point. |
 | **D10** | **The generator reads the ABM, and that is the milestone.** An integration test written from the semantic model, with `graph.json` not consulted as the semantic source. | §5: Phase 4 is in the MVP, not deferred. A model nothing downstream reads cannot be wrong in a way that matters. |
 | **D11** | **An object's level is the minimum of the claims it carries.** One `metadata` block covers several claims — a behaviour's *name* and its *edge*, a state's *identity* and its *reading* — and D9 says those are different claims, so the level of the record is the weakest of them. Derived from `producer` + `composed_of` on the fly; no second field, no `metadata.extra.levels`. | §3: **P14/P15** are the enforcement. The consequence is accepted here rather than discovered later: the three 0.1.22 edges become `inferred`, which makes **P10 reachable on walks that look clean today** — an `inferred` behaviour cannot back a `criticality: critical` journey, so a walk that used to report nothing now reports a warning. That is the rule working, not a regression. |
 | **D12** | **The collapse keys on the behaviour's last realisation step.** A behaviour's edge is `(the state it began in, the behaviour, the state its **last** step arrived in)`. The steps before it are `realization[]`, not edges — so a sign-in that types twice and submits is one edge, and a behaviour that really does end where it started is a self-loop by the same rule, with no special case and no second identity for a thing that already has one. | §3: **P12a/P12b gain the sequence form** — a behaviour with no steps of its own (a genuine composite) is accounted for by its members' edges in `composed_of` order. §5 Phase 2: the assembly groups an invocation's calls into **one** edge, the one that ends where the last step landed, instead of one edge per call; `journeys[].steps[]` naming a behaviour therefore means the behaviour completed. §1: what fills that layer in is the **run** — `capabilities[].steps[]`, the field ABG 0.1 already declares as "how to realise the capability in the UI" and 0.2 calls `realization[]`, empty in every run recorded so far. |
+| **D13** | **The projection reports the run's vocabulary; the demotion belongs where the realisation was recorded.** A capability the model declared a step of a behaviour is not a behaviour — but only a run that *recorded* the step can say so, and the gate is that record (`capabilities[].steps[]`, which the commit fills in from the `realization_step` log), never `composed_of` alone. On 0.1.22 there is no recorded realisation, so 0b demotes nothing and the baseline keeps its four behaviours. | §5 Phase 1/2: `behaviors[]` holds `login` and not the three step capabilities, so the acceptance clause holds as written. The demotion lands **with** the collapse, because demoting without it makes an existing rule fire (measured: `P12/duplicate_transition`). §3: **P1 keeps its authority over the names that are left** — a mechanism name among the behaviours is still refused; it simply stops being a count of the protocol's output. §7: Phase 3's measure moves to the log (capabilities recorded with no behaviour attached), because that is the number the protocol moves and a projection cannot. |
 
 **Why D5 is not just a preference — P12 could not hold without it.** The current §3 made a walk step a
 *behaviour* (`login`) while P12 demanded "every committed transition appears as exactly one
@@ -93,12 +94,61 @@ real run does not carry is any *content* in that field: measured on the 0.1.22 w
 committed capabilities have `steps: []`, because the commit puts steps on the **edge** and never
 populates the body — and `capability_behaviour` (0.1.21) records the step-of relation as
 `composed_of` instead. So Phase 1 does not need a new concept; it needs a field the vendored schema
-already declares and the projection already reads to be **filled in**. Because the commit writes
-`graph.json` from the same candidates it hands the ABM, the behaviour layer then reaches the model
-through the graph, and neither `reconcile()` nor `modelFromCandidates()` has to learn anything new.
-Until a run records realization, 0b keeps reporting one behaviour per committed capability — that is
-what those runs recorded, and P1's three findings are a fact about the walk, not about the
-projection.
+already declares and the projection already reads to be **filled in**. One thing that fold cannot
+carry, though, and it corrects an earlier draft of this note: `capabilityStep` has no field that
+names a capability (`additionalProperties: false`; its fields are `action`, `element`, `value`,
+`arguments`, `optional`, `description`, `timeout_ms`). A step in `graph.json` can therefore say what
+was done and where, and cannot say *whose step it is* — the relation stays `composed_of` on the
+capability, which is how 0.1.21 already records it and which the projection already translates to
+behaviour ids. So the fold gives the ABM the **steps**; the **step-of relation** was never missing,
+and never needed a new field. Until a run records realization, 0b keeps reporting one behaviour per
+committed capability — that is what those runs recorded, and P1's three findings are a fact about the
+walk, not about the projection. Whether the projection may *act* on that relation is D13.
+
+**Why the projection may not demote on today's document, and where it may (D13).** Phase 1's
+acceptance has two halves — `login` with three ordered `realization[]` steps, **and** no top-level
+step capability — and on a Phase-1 walk the second half has to mean `behaviors[]` does not contain
+`fill_login_email`, which the first half does not produce by itself: the projection makes one
+behaviour per committed capability, and D1 keeps the step capability committed so `graph.json` stays
+faithful. The tempting fix is to demote it — `cap_login.composed_of` names all three, so a capability
+another capability names is a step, not a behaviour — and the tempting part is exactly the problem.
+**In 0b the demotion cannot be done without inventing, and that was measured rather than assumed.** A
+0.2 `realization[]` step needs an `action` from ABG's enum (`fill`, `click`, …) and an `element`. The
+committed 0.1.22 transition carries `action: {capability, arguments, target}` and
+`effects: [value_changed]`: the **element is recoverable** (`transition.action.target`), and the
+**verb exists nowhere** — the only place it appears is the capability's own name, `fill_login_email`
+→ `fill`. A 0b that demoted would take the mechanics from the name P1 refuses, and `stepsOfCapability`
+would be carrying a document whose realisation was derived from the defect it reports. A profile that
+reads a run's claim and then repairs the run's document is not a profile.
+
+Two further consequences, and the first was measured rather than argued:
+
+- **Demoting without collapsing is refused, by a rule that already exists — so D13 lands with D12,
+  which is Phase 2's assembly.** The probe: take 0b's projection of the real 0.1.22 document, apply
+  D13's demotion to it by hand (drop the three step behaviours, give `login` the three steps, point
+  every edge at `login`), and profile it. **`P12/duplicate_transition` fires** —
+  `state_login_anonymous → state_login_anonymous via "behavior_login" is already
+  transition_fill_login_email` — because one behaviour applied from one state to the same state is
+  one edge (D5) and two edges for one move are two claims about the same walk. The same probe says
+  something worth keeping: **P12a stays silent.** The two typing calls are accounted for by the
+  `carriedAsStep` clause — a `realization[]` step on the element the call targeted, in a behaviour
+  whose own edge starts where the call started — so the collapse needs **no new coverage rule**.
+  Those clauses are ordinary 0b code rather than something D12 added; what D12 did was name the
+  relation they were always checking.
+- **Demoting is not what makes the ABM right — recording is.** Once a run records `action` and
+  `element` per step, reading the relation is reading a fact, and the rule needs not even the gate on
+  where the document came from: a capability the model declared a step of a behaviour is not a
+  behaviour. `capabilities[].steps[]` is the gate only because it is where the commit *puts* that
+  record, and on 0.1.22 it is empty on all four capabilities for the measured reason in the paragraph
+  above — the commit writes steps on the edge and never fills the body in. So the gate excludes the
+  old document automatically, which is what keeps 0b's baseline a baseline.
+
+**And P1 keeps its authority over the names that are left.** After the demotion the ABM's behaviours
+are `login` and whatever else a run named as a behaviour, and P1 still refuses a mechanism name among
+them. What changes is that it stops being a *measure of the protocol's output*, because the three
+capabilities it used to fire on never become behaviours. The protocol's job is to make the run attach
+steps to behaviours, and the number that measures it is how many capabilities the run recorded with
+**no** behaviour attached — visible in the log, and unmovable by any projection.
 
 ## 1. Two documents, one evidence log
 
@@ -671,18 +721,18 @@ whose `capabilities[]` matches 0.1.22's shape **and** an ABM whose `behaviors[]`
 with three `realization[]` entries and no top-level step capability. Covered by
 `test/tools.test.mjs`; revert-proven in `test/prove-abm.py`.
 
-**One thing that acceptance does not say yet, and it is the next decision (D13).** "No top-level
-step capability" is ambiguous between two readings of the same 0.1.22 shape. If the step capability
-is still minted — so `graph.json` keeps its four capabilities and three transitions (D1) — then the
-ABM's `behaviors[]` holds **both** `login` and `fill_login_email`, because the projection makes one
-behaviour per committed capability, and P1 refuses the three step names exactly as it does today.
-The projection has the information to demote them instead: `cap_login.composed_of` names all three,
-so a capability that another capability names as a step is a step and not a behaviour. That reading
-would silence P1's three findings on the real walk **without the walk changing**, which is the shape
-§6's last risk row warns about — so it is a decision, not an obvious improvement. Either P1 keeps
-firing until the *protocol* stops naming per-element capabilities (Phase 3), or the projection
-demotes what a run has already asserted is a step, and P1 becomes a rule about the names a run gives
-to the things it calls behaviours.
+**The clause has a second reading, and D13 decides it: the projection does, on a recorded
+realisation.** A capability the model declared a step of a behaviour is not a behaviour, so
+`behaviors[]` holds `login` with its three steps and **not** the three step capabilities. The
+condition is that the run recorded the realisation — an appended `realization_step` naming the
+behaviour, carrying the `action` and `element` the run observed, which the commit folds into
+`capabilities[].steps[]`. On 0.1.22 that field is empty on all four capabilities, so 0b keeps its
+four behaviours and P1's three findings, and **the demotion cannot be earned by recording less**:
+remove the records and the step capabilities come back. Two clauses of this acceptance therefore move
+together with Phase 2's assembly, and the probe under §0 D13 says why — demoting without D12's
+collapse fires `P12/duplicate_transition` on the second typing self-loop. The failure mode worth
+stating: if either clause is dropped, the acceptance is met by a projection that never saw a
+realisation.
 
 ### Phase 2 — the commit writes both documents
 
@@ -742,7 +792,11 @@ is actually *made*, because no tool schema can force a behaviour-first reading.
 - Keep every existing refusal sentence verbatim — they encode failure modes found in live runs.
 
 **Acceptance:** a live run names behaviours, not elements, without the protocol being re-read
-mid-run. Measure: P1 violations = 0 in the committed ABM.
+mid-run. Measure: **every capability the run records has a behaviour attached** — a log-level count
+(`capability_behaviour` absent), not P1's count in the finished ABM. P1 cannot measure this phase: by
+D13 the projection demotes the step capabilities, so they never become behaviours and the ABM's P1
+findings are about the names that *are* behaviours. The log is where the protocol's output is visible,
+and a projection cannot move it.
 
 ### Phase 4 — the model generates the test (D10)
 
