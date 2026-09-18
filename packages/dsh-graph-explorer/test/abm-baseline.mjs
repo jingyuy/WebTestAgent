@@ -19,15 +19,21 @@
  * SKIPs with a reason instead of failing.
  *
  * Usage:
- *   node test/abm-baseline.mjs [run-dir] [--out <path>] [--quiet]
+ *   node test/abm-baseline.mjs [run-dir] [--out <path>] [--out-dir <dir>] [--quiet]
  *   ABM_RUN_DIR=/path/to/graph-run npm run profile:abm
  *
  * With no directory the first of these that exists is used, and a refusal to guess is printed if
  * none of them do:
  *   $ABM_RUN_DIR, ~/tmp/live-graph/graph-run, <repo>/artifacts/graph-spike
+ *
+ * `--out` writes the projected document. `--out-dir` writes the three things a person reading the
+ * profile wants: `application-model.json` (what the profile read), `findings.json` (what it said,
+ * one entry per refusal) and — when the projection refuses, which is a real answer — `refused.json`
+ * instead. Findings are the output here; with neither flag the only place they exist is the
+ * terminal, and a result you cannot open is a result you cannot argue with.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { loadAjv } from './ajv.mjs';
 import {
@@ -46,9 +52,11 @@ const REPO = resolve(HERE, '..', '..');
 const argv = process.argv.slice(2);
 const quiet = argv.includes('--quiet');
 let out = null;
+let outDir = null;
 const targets = [];
 for (let index = 0; index < argv.length; index++) {
   if (argv[index] === '--out') { out = argv[++index]; continue; }
+  if (argv[index] === '--out-dir') { outDir = argv[++index]; continue; }
   if (argv[index].startsWith('--')) continue;
   targets.push(argv[index]);
 }
@@ -68,6 +76,14 @@ const verdict = (label, passed, detail = '') => {
 };
 let failures = 0;
 const assert = (label, passed, detail) => { if (!verdict(label, passed, detail)) failures++; };
+
+const writeOut = (name, value) => {
+  if (!outDir) return;
+  mkdirSync(outDir, { recursive: true });
+  const path = join(outDir, name);
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+  say(`written    ${path}`);
+};
 
 if (!runDir || !existsSync(join(runDir, 'run.json'))) {
   console.log('SKIP  no run directory to profile.');
@@ -113,6 +129,7 @@ if (refusal) {
   console.log('');
   const gates = candidates.notes ?? [];
   for (const note of gates) console.log(`      ${note}`);
+  writeOut('refused.json', { run: runDir, source: candidates.source, refused: true, message: refusal.message, gates });
   assert('the refusal is the commit\'s own gate, quoted', gates.some((note) => note.includes('application_not_declared')), gates.join('\n      '));
   assert('profiling the run did not write to it', fingerprint(runDir) === before);
   console.log('');
@@ -130,6 +147,11 @@ if (out) {
   writeFileSync(out, `${JSON.stringify(model, null, 2)}\n`);
   say(`written    ${out}`);
 }
+
+// The findings are the profile's output; the model is what it read to get them. Both are written,
+// so a finding can be checked against the sentence it is about without re-running anything.
+writeOut('application-model.json', model);
+writeOut('findings.json', { run: runDir, source: candidates.source, summary, findings });
 
 if (findings.length && !quiet) {
   say('');
