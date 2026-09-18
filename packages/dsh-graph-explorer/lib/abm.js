@@ -44,7 +44,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, readRun, readJsonl, reconcile } from './commit.js';
-import { EVIDENCE_ROLES } from './schema.js';
+import { EVIDENCE_ROLES, templateParameter } from './schema.js';
 import { slugify } from './session.js';
 
 /** The schema generation this module emits. `schemas/abm/0.2/` is the only reader of it. */
@@ -170,7 +170,10 @@ const isElementId = (value) => typeof value === 'string' && /^element[-_][A-Za-z
 const isStorageKey = (value) => typeof value === 'string'
   && /^(localStorage|sessionStorage|cookie)[.:]/i.test(value);
 
-const isPlaceholder = (value) => typeof value === 'string' && /^\{\{\s*[^}]+\s*\}\}$/.test(value.trim());
+// A value that is entirely a `{{param}}` template is a reference, not a literal: the schema
+// states the form (`templateParameter`, which the generator reads the same way) and the
+// projection is the caller that has to check the parameter is declared.
+const isPlaceholder = (value) => templateParameter(value) !== null;
 
 /** Drop the keys a document must not carry. `null` is not a value here: 0a measured that. */
 const prune = (object) => {
@@ -1028,6 +1031,139 @@ function journeySteps(journey, transitionById) {
   return rows(journey.transitions)
     .filter((id) => typeof id === 'string')
     .map((id) => prune({ transition: id, arguments: transitionById.get(id)?.action?.arguments }));
+}
+
+/**
+ * The behaviour model in the shape its generator reads, so that the model can be what a spec is
+ * written from without a second generator existing.
+ *
+ * Phase 4's acceptance sentence is that *"a spec is generated with `graph.json` absent from the run
+ * directory, and every action in the spec traces to a `realization[]` step"*. The generator's input
+ * contract is the committed graph's shape — `states[].elements[]`, `transitions[].action.{target,
+ * capability}`, `journeys[].transitions[]` — and the model is a projection of precisely those
+ * things, so the honest way to meet that sentence is to present the model in the shape the one
+ * generator already reads rather than to write a second renderer that would drift from the first.
+ *
+ * Three decisions, and each of them is a fact about the model rather than a convenience:
+ *
+ *   - **A turn becomes the calls it was made of.** A turn of a journey is a move (D5); a move is an
+ *     invocation; and the calls an invocation was made of are the behaviour's own `realization[]`,
+ *     which the document carries. So a turn *expands* into one transition per realization step,
+ *     whose own `element` is the control that call acted on and whose own `effects` are the reading
+ *     the capture made of it. That expansion is what makes the acceptance sentence true by
+ *     construction: every action of the spec is one realization step, or there is no transition and
+ *     no action. It is also the inverse of D5, and deliberately so — the model holds the move, the
+ *     log held the calls, and a spec is a sequence of calls.
+ *
+ *   - **The value stays on the realization and is not copied into `arguments`.** A `realization`
+ *     step's `value` is the spelling the protocol asks a walk for (a `value` on the step, or a
+ *     `{{param}}` template); the graph's transition has `arguments` and no `value`, which is the
+ *     lossy half of the pair. Copying the value across so the old reader would find it would invent
+ *     an argument the walk never wrote, and it would hide the difference this adapter exists to be
+ *     measured on. The transition therefore carries a `realization` reference and no synthesized
+ *     `arguments`, and the generator prefers the realization (see `argumentFor` in `generate.js`).
+ *
+ *   - **Composition is not consulted.** A behaviour is *what it is* and its realization is *how it
+ *     was performed*; the model keeps both, and the generator's composite checks exist for 0.1's
+ *     `composed_of`, a document where composition doubled as execution. Presenting a model's
+ *     behaviour as a composite would set those checks against `composed_of` entries that 0.2
+ *     deliberately demoted to steps (`D13`), and they would fire on a walk that is perfectly
+ *     described. So a behaviour is offered as an atomic capability: from a model, the realization
+ *     is the account of how the move was performed, and there is nothing left for the composition
+ *     to be checked against.
+ *
+ * The one thing the model cannot yet say, and does not pretend to here: `realization[]` is one list
+ * per behaviour, so two invocations of one behaviour share it even when the log gave them different
+ * values. A caller that needs to know cares about `metadata.extra.collapsed.invocations`, and
+ * `generateTest` reports it rather than rendering a second walk's values as the first walk's.
+ */
+export function graphShapeOf(model) {
+  const behaviorById = new Map(rows(model?.behaviors)
+    .filter((behavior) => typeof behavior?.id === 'string')
+    .map((behavior) => [behavior.id, behavior]));
+  const callsOfEdge = new Map();
+  const projected = [];
+  for (const edge of rows(model?.transitions)) {
+    if (typeof edge?.id !== 'string') continue;
+    const realization = rows(behaviorById.get(edge.behavior)?.realization)
+      .filter((step) => step && typeof step.action === 'string');
+    if (!realization.length) {
+      // A behaviour with no realization is a move nobody recorded the steps of. It is offered as one
+      // call — the edge's own control, with no `realization` reference — and in the shape the
+      // generator reads, because that is what makes the refusal a fact about the *model* rather than
+      // about the shape it arrived in: the generator names `action_has_no_realization` for it, where
+      // a document handed over untranslated would be read as a step with no element at all and
+      // reported as `step_targets_no_element`.
+      const { behavior, target, ...rest } = edge;
+      callsOfEdge.set(edge.id, [edge.id]);
+      projected.push(prune({ ...rest, action: prune({ capability: behavior, target }) }));
+      continue;
+    }
+    // The collapsed edge names the calls it absorbed in walk order, and the realization is the same
+    // calls in the same order, so the log's own ids are used as the expanded steps' ids when the
+    // two lists are the same length. They are a *name* and not the provenance: the provenance is the
+    // `realization` reference on each step, and a mismatch falls back to a synthesized id rather
+    // than pairing a call with a step it may not be.
+    const callIds = rows(edge.metadata?.extra?.collapsed?.calls);
+    const ids = realization.map((step, index) => (
+      callIds.length === realization.length && typeof callIds[index] === 'string'
+        ? callIds[index]
+        : `${edge.id}::${index + 1}`
+    ));
+    callsOfEdge.set(edge.id, ids);
+    for (const [index, step] of realization.entries()) {
+      const last = index === realization.length - 1;
+      const element = typeof step.element === 'string' ? step.element : null;
+      projected.push(prune({
+        id: ids[index],
+        description: last ? edge.description : undefined,
+        // The move starts where the invocation started and lands where the behaviour's own edge
+        // lands; the calls in between neither arrive anywhere nor leave, so a spec cannot be made to
+        // assert an arrival in the middle of one move (§D5, and the same rule the collapse obeys).
+        from_state: edge.from_state,
+        to_state: last ? edge.to_state : edge.from_state,
+        action: prune({
+          // The behaviour is named once, on the call that ended the move, so a claim about the
+          // behaviour is made once and the intermediate calls are what they are: calls.
+          capability: last ? edge.behavior : undefined,
+          target: element,
+        }),
+        effects: rows(step.effects),
+        assertions: last ? rows(edge.assertions) : [],
+        metadata: last ? edge.metadata : undefined,
+        realization: prune({
+          behavior: edge.behavior,
+          action: step.action,
+          element,
+          value: step.value,
+          purpose: step.purpose,
+          index,
+          of: edge.id,
+        }),
+      }));
+    }
+  }
+  return {
+    ...model,
+    // The three keys whose shape differs, replaced rather than extended. `states` are carried as
+    // they are: `elementsById` and `statesById` in the generator read `states[].elements[]` and
+    // `states[].detection` off them, which the model's own surfaces already carry.
+    capabilities: rows(model?.behaviors).map((behavior) => prune({
+      id: behavior.id,
+      name: behavior.name,
+      kind: 'atomic',
+      description: behavior.description,
+    })),
+    transitions: projected,
+    journeys: rows(model?.journeys).map((journey) => prune({
+      ...journey,
+      transitions: rows(journey.steps)
+        .map((step) => step?.transition)
+        .filter((id) => typeof id === 'string')
+        .flatMap((id) => callsOfEdge.get(id) ?? [id]),
+    })),
+    source: 'application-model.json',
+  };
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -121,6 +121,31 @@ export const CAPABILITY_STEP_KEYS = new Set([
 export const BEHAVIOR_STEP_KEYS = new Set([...CAPABILITY_STEP_KEYS, 'purpose', 'effects']);
 
 /**
+ * The parameter a `{{param}}` value refers to, or `null` when the value is a literal.
+ *
+ * A step's `value` is a string, and the schema says which two things a string can be: *"a
+ * literal the step types, or a `{{param}}` template bound to the behaviour's `input`"*
+ * ({@link normalizeRealizationStep} refuses anything else, and its own example is
+ * `{action: "fill", element: "element_email_field", value: "{{email}}"}`). So the form is
+ * the schema's, and the function that reads it is the schema's too: the projection uses it
+ * to check that a bound parameter is one the behaviour declares (P5), and the generator uses
+ * it to know that a value is a reference rather than something to type. One function read by
+ * both, because a template the model calls a parameter and the generator calls a literal is a
+ * spec that fills a password box with the six characters `{{password}}` — a test that fails
+ * for a reason that has nothing to do with the application. A live 0.1.32 run did exactly
+ * that.
+ *
+ * The whole value, not a substring: `"user-{{n}}@example.com"` is a string with braces in it,
+ * and the schema's substitution has one argument, so only a value that *is* the template is
+ * a reference.
+ */
+export const templateParameter = (value) => {
+  if (typeof value !== 'string') return null;
+  const match = /^\{\{\s*([^{}]+?)\s*\}\}$/.exec(value.trim());
+  return match ? match[1] : null;
+};
+
+/**
  * A realisation step, checked against the schema's own vocabulary, or thrown.
  *
  * Enforced beside the schema rather than at the config for the reason

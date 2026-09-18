@@ -27,6 +27,7 @@ import {
   candidatesFromRun,
   claimLevel,
   claimsOf,
+  graphShapeOf,
   modelFromCandidates,
   profileFindings,
   summarizeFindings,
@@ -655,6 +656,144 @@ console.log('\n# one move is one turn of the walk');
       model.journeys[0].steps.map((step) => step.transition)],
     [['transition_submit_login_again'], 2, ['transition_submit_login_again', 'transition_submit_login_again']]);
 }
+// --- the model in the shape the generator reads ----------------------------------------------
+// Phase 4's adapter, and its three decisions are three facts about the document it returns:
+// a turn expands into the calls it was made of, the value stays on the realization rather than
+// being copied into a synthesized `arguments`, and composition is not consulted because a model's
+// behaviour already says how it was performed (D13). What makes it worth a section of its own is
+// the fourth fact, the one the live walk found: the *journey* expands through the same map, so a
+// spec written from a model performs one move once — which is the sentence the whole pivot is
+// measured on, stated here as something a test can fail.
+
+console.log('\n# the model in the shape the generator reads');
+{
+  const realized = () => {
+    const source = candidates();
+    source.capabilities.find((entry) => entry.id === 'cap_login').steps = [
+      { action: 'fill', element: 'element_email_input', value: 'test@example.com' },
+      { action: 'fill', element: 'element_password_input', value: '[set]' },
+      { action: 'click', element: 'element_login_button' },
+    ];
+    // A model's own edge carries no assertions — an arrival is a claim about the journey, and the
+    // projection puts it on `journey.assertions` — so a candidate's `assertions` never reaches the
+    // model and there is nothing to break here. The rule is pinned on the model instead, below.
+    return source;
+  };
+  const model = modelFromCandidates(realized());
+  // One assertion, on the move, by hand: it belongs to the move, so it lands on the call that ended
+  // the move and on no other, and no spec can be made to assert a half-performed behaviour.
+  model.transitions.find((edge) => edge.id === 'transition_submit_login').assertions = [
+    { type: 'url', operator: 'matches', expected: '/' },
+  ];
+  const graph = graphShapeOf(model);
+  check('one move becomes the calls it was made of, named by the ids the log gave them',
+    graph.transitions.map((edge) => [edge.id, edge.action.target]),
+    [['transition_fill_login_email', 'element_email_input'],
+      ['transition_fill_login_password', 'element_password_input'],
+      ['transition_submit_login', 'element_login_button']]);
+  // The move starts where the invocation started and lands where the behaviour lands: the calls in
+  // between neither arrive anywhere nor leave, so nothing can be made to assert an arrival in the
+  // middle of one move — the same rule the collapse obeys.
+  check('and each call says where the move it belongs to started, and only the last where it arrived',
+    graph.transitions.map((edge) => [edge.from_state, edge.to_state]),
+    [['state_login_anonymous', 'state_login_anonymous'],
+      ['state_login_anonymous', 'state_login_anonymous'],
+      ['state_login_anonymous', 'state_project_list_authenticated_projects_populated']]);
+  // The behaviour is named once, on the call that ended the move: a claim about a behaviour is one
+  // claim, and the calls before it are what they are — calls.
+  check('the behaviour is named on the call that ended it, and not on the ones it was made of',
+    graph.transitions.map((edge) => edge.action.capability ?? null),
+    [null, null, 'behavior_login']);
+  // A model's own edge carries no assertions, because arriving somewhere is a claim about the
+  // journey rather than about the call that reached it. The adapter is given one by hand here: the
+  // rule is that an assertion belongs to the move, so it lands on the call that ended the move and
+  // on no other, and a spec cannot be made to assert a half-performed behaviour.
+  check('an assertion on the move lands on the call that ended it, and on no other',
+    [graph.transitions.map((edge) => (edge.assertions ?? []).length),
+      graph.transitions.map((edge) => edge.metadata !== undefined),
+      graph.transitions[2].metadata.extra.collapsed.invocations],
+    [[0, 0, 1], [false, false, true], 1]);
+  // Every action a spec can perform is a realization step or there is no transition at all, which
+  // is what makes "every action traces to a realization[] step" true by construction rather than by
+  // review. The reference is on the step, and it names the behaviour, the index and the edge.
+  check('every call is a reference into the behaviour\'s own realization, not a copy of it',
+    graph.transitions.map((edge) => [edge.realization.behavior, edge.realization.index, edge.realization.of]),
+    [['behavior_login', 0, 'transition_submit_login'],
+      ['behavior_login', 1, 'transition_submit_login'],
+      ['behavior_login', 2, 'transition_submit_login']]);
+  check('and it keeps the value the step recorded, without the edge translating it',
+    [graph.transitions[0].realization.value, graph.transitions[1].realization.value, graph.transitions[2].realization.value],
+    ['test@example.com', '[set]', null]);
+  check('the journey expands through the same map, so the walk names the calls it performs',
+    graph.journeys[0].transitions, graph.transitions.map((edge) => edge.id));
+}
+{
+  // The value is the lossy half of the pair and the adapter exists to be measured on the
+  // difference, so it is deliberately not copied into `arguments`: a synthesized argument is an
+  // argument the walk never wrote, and it would hide the very reading `argumentFor` is being asked
+  // to prefer. The old reader finds no arguments, and that is the report.
+  const source = candidates();
+  source.capabilities.find((entry) => entry.id === 'cap_login').steps = [
+    { action: 'fill', element: 'element_email_input', value: 'test@example.com' },
+  ];
+  const graph = graphShapeOf(modelFromCandidates(source));
+  ok('no argument is invented for the generator to read, so the realization is the only place the value is',
+    !('arguments' in graph.transitions[0]) && graph.transitions[0].realization.value === 'test@example.com',
+    JSON.stringify(graph.transitions[0]));
+}
+{
+  // A behaviour nobody recorded the steps of is a move with no account of how it was performed. It
+  // is carried as itself and without a realization reference, so `generateTest` refuses it by name
+  // rather than writing an action no reading stands behind.
+  const graph = graphShapeOf(modelFromCandidates(candidates()));
+  check('a move with no recorded realization is carried as itself',
+    graph.transitions.map((edge) => [edge.id, edge.realization === undefined, edge.action.target]),
+    [['transition_fill_login_email', true, 'element_email_input'],
+      ['transition_fill_login_password', true, 'element_password_input'],
+      ['transition_submit_login', true, 'element_login_button']]);
+  // A model's behaviour is atomic by D13 — its members are its realization steps, so there is no
+  // composition left to check a move against — and this is the adapter saying so rather than
+  // handing the generator a composite whose members are the calls it would then look for twice.
+  ok('and no behaviour is offered as a composite, because from a model there is nothing to check it against',
+    graph.capabilities.every((entry) => entry.kind === 'atomic' && !('composed_of' in entry)),
+    JSON.stringify(graph.capabilities));
+  check('the document says which file it was read from', graph.source, 'application-model.json');
+}
+{
+  // Two invocations of one behaviour are two moves, so they expand to two runs of calls: the fix
+  // from the previous window arrived at the projection, and this is the same fact one layer up —
+  // the adapter reads the journey, so a journey that named a move twice performs it twice.
+  const twice = candidates();
+  twice.capabilities.find((entry) => entry.id === 'cap_login').steps = [
+    { action: 'fill', element: 'element_email_input', value: 'test@example.com' },
+    { action: 'fill', element: 'element_password_input', value: '[set]' },
+    { action: 'click', element: 'element_login_button' },
+  ];
+  const walk = ['transition_fill_email', 'transition_fill_password', 'transition_submit_login',
+    'transition_fill_email_again', 'transition_fill_password_again', 'transition_submit_login_again'];
+  twice.transitions = walk.map((id) => ({
+    id,
+    from_state: 'state_login_anonymous',
+    to_state: id.includes('submit') ? 'state_project_list_authenticated_projects_populated' : 'state_login_anonymous',
+    action: { capability: id.includes('submit') ? 'cap_submit_login' : (id.includes('password') ? 'cap_fill_login_password' : 'cap_fill_login_email'), target: 'element_email_input' },
+    effects: [], evidence: THREE_ROLES,
+    metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
+  }));
+  twice.journeys[0].transitions = walk;
+  const graph = graphShapeOf(modelFromCandidates(twice));
+  // Two invocations of one behaviour between two states are one edge (D5) that says so —
+  // `collapsed.invocations` is 2 — and the journey names it twice, so the walk performs the same
+  // three calls twice. That is also the known limit stated as an assertion: one `realization[]` per
+  // behaviour cannot tell the two invocations' values apart, and the second run of calls is the
+  // first run's, which is why a caller is told rather than shown.
+  check('two invocations are two turns of the journey, and each turn is the three calls it was made of',
+    [graph.transitions.length, graph.transitions[2].metadata.extra.collapsed.invocations, graph.journeys[0].transitions.length],
+    [3, 2, 6]);
+  ok('and both turns name the same calls, which is the difference the model cannot yet draw',
+    graph.journeys[0].transitions.slice(0, 3).join() === graph.journeys[0].transitions.slice(3).join(),
+    JSON.stringify(graph.journeys[0].transitions));
+}
+
 {
   const { model, source } = projected();
   model.transitions = model.transitions.filter((entry) => entry.id !== 'transition_fill_login_password');

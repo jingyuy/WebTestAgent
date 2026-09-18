@@ -571,6 +571,193 @@ check('and a composite whose parts act on other elements is reported as a mismat
     return [gap.severity, gap.detail.includes('element_sign_in_button'), gap.detail.includes('the walk is missing the step')];
   })(), ['warning', true, true]);
 
+// --- when the document came from the model ---------------------------------
+// Phase 4's two rules, and they are the whole difference between the two renderings. A spec written
+// from a behaviour model is written from `realization[]`: the value is the one the step recorded as
+// typed, on the step's own control, and an action with no realization step under it is refused
+// rather than written. A graph transition is a step the commit judged and keeps its `arguments`;
+// these cases are about the document that says it came from the model, so the fixture says so.
+//
+// The transition carries **no** arguments here, because that is the shape the adapter produces: the
+// value is on the realization and deliberately not copied into `arguments`, so a case that left the
+// arguments in place would pass whether the rule worked or not.
+const fromModel = (over = () => {}) => {
+  const model = base();
+  model.source = 'application-model.json';
+  model.transitions[0].action.arguments = {};
+  model.transitions[0].realization = {
+    behavior: 'behavior_fill_login_email', action: 'fill', element: 'element_email_input',
+    value: 'test@example.com', purpose: 'email_input', index: 0, of: 'transition_fill_login_email',
+  };
+  model.transitions[1].action.arguments = {};
+  model.transitions[1].realization = {
+    behavior: 'behavior_fill_login_password', action: 'fill', element: 'element_password_input',
+    value: REDACTED, purpose: 'password_input', index: 0, of: 'transition_fill_login_password',
+  };
+  // The click is a realization step too — a call with no value — because that is what a walk
+  // records and what the adapter emits for every call of a move. Leaving it out would make this
+  // fixture a walk that performed a behaviour nobody recorded, which is the refusal tested below.
+  model.transitions[2].realization = {
+    behavior: 'behavior_login', action: 'click', element: 'element_sign_in_button',
+    index: 2, of: 'transition_login',
+  };
+  over(model);
+  return model;
+};
+const modelResult = generateTest(fromModel(), { journey: 'journey_login' });
+check('a model step types the value its own realization recorded, with no argument to read',
+  [modelResult.spec.includes('.fill("test@example.com")'), modelResult.spec.includes('process.env.TEST_PASSWORD!')],
+  [true, true]);
+check('and says so by naming the step of the behaviour the value came from',
+  modelResult.steps[0].value_of,
+  'the value this step recorded as typed into element_email_input (realization[0] of behavior_fill_login_email)');
+// The file says what it is. Both headers are true of the document they were written from, and the
+// word is the one the refusal uses — so a reader holding a spec knows whether an action with no
+// reading under it could ever have been written into it, and the answer is no for exactly one of the
+// two.
+check('the spec names the document it was written from, and not the other one',
+  [modelResult.spec.includes('Generated from a committed behaviour model'),
+    modelResult.spec.includes('committed graph'),
+    modelResult.spec.includes('the model supports')],
+  [true, false, true]);
+check('and the graph reading of the same walk still says graph, on every line that names it',
+  [result.spec.includes('Generated from a committed graph'),
+    result.spec.includes('committed behaviour model'),
+    result.spec.includes('the graph supports')],
+  [true, false, true]);
+check('a model document renders the same walk as a graph does, with the value the graph had lost',
+  [modelResult.counts, gapCodes(modelResult), modelResult.ok],
+  [{ transitions: 3, actions: 3, assertions: 4, gaps: 2, blocking_gaps: 0 },
+    ['arguments_ignored_for_this_interaction', 'persistence_evidence_not_asserted'], true]);
+// The refusal, and it is the acceptance sentence read as a rule: from a model, an action is a
+// realization step or it is not written. A graph transition is a step the commit already judged, so
+// this is a fact about the document that arrived and not a stricter generator.
+const withoutRealization = generateTest(fromModel((model) => { delete model.transitions[1].realization; }), { journey: 'journey_login' });
+check('a model step with no realization is refused, and no line is written for it',
+  [withoutRealization.ok, withoutRealization.counts.actions, withoutRealization.steps[1].interaction ?? null,
+    withoutRealization.spec.includes('"Password"')],
+  [false, 2, null, false]);
+check('and the gap names the behaviour and says what to record',
+  (() => {
+    const gap = withoutRealization.gaps.find((entry) => entry.code === 'action_has_no_realization');
+    return [gap.severity, gap.transition, gap.element, gap.detail.includes('no realization step'), gap.detail.includes('realization_step')];
+  })(),
+  ['error', 'transition_fill_login_password', 'element_password_input', true, true]);
+// The same document without the marker is a graph, and a graph step with an empty `arguments` is the
+// older refusal — the two are not the same report, which is what makes `source` worth declaring.
+check('the same step in a graph is reported as a step with nothing to type, not as an unrealized one',
+  (() => {
+    const codes = gapCodes(mutate((graph) => { graph.transitions[1].action.arguments = {}; }));
+    return [codes.includes('step_has_no_value_to_type'), codes.includes('action_has_no_realization')];
+  })(), [true, false]);
+// The one thing the model cannot yet say, reported once per edge rather than once per call: the
+// expanded calls of one move all carry the same edge's `collapsed` record, and three warnings for
+// one fact would read as three problems. All three calls are given the same record here — which is
+// what the adapter hands over for a move that was walked twice — because the rule is about the
+// second call, and a test that only marked the first one would stay green with the dedupe gone.
+check('a behaviour the walk performed twice is reported once, on the edge rather than on each call',
+  (() => {
+    const outcome = generateTest(fromModel((model) => {
+      for (const transition of model.transitions.filter((entry) => entry.realization)) {
+        transition.metadata = { extra: { collapsed: { invocations: 2 } } };
+        transition.realization.of = 'transition_login';
+      }
+    }), { journey: 'journey_login' });
+    const shared = outcome.gaps.filter((gap) => gap.code === 'invocation_values_not_distinguished');
+    return [shared.length, shared[0].severity, shared[0].detail.includes('was walked 2 times'), outcome.ok];
+  })(),
+  [1, 'warning', true, true]);
+check('and a value the run withheld is still the environment, not the word the model used for it',
+  [modelResult.requires.map((entry) => entry.env), requiresInstruction(modelResult.requires).includes('Set TEST_PASSWORD before running it')],
+  [['TEST_PASSWORD'], true]);
+
+// --- a value that is a reference, in either spelling -------------------------
+// `[set]` is the capture's word for "a value was typed and not kept" and `{{param}}` is the schema's
+// (a step's `value` is *"a literal the step types, or a `{{param}}` template bound to the behaviour's
+// `input`"* — `normalizeRealizationStep` refuses anything else). They are the same fact recorded by
+// two parties, so they get the same rendering, and this is the block that says so.
+//
+// A live 0.1.32 run is why it exists. That walk recorded the password step as
+// `{action: "fill", element: "element_password_input", value: "{{password}}"}` — the machinery's own
+// `realization_step` record, with `password` declared on the capability — and the generator quoted it
+// and wrote `.fill("{{password}}")` into the spec. The fixture below had been written with `[set]`,
+// which is the spelling the earlier runs happened to produce, so the rule looked tested and the other
+// half of the vocabulary was never exercised. **Both spellings are now a case, because the value the
+// document records has two forms in the schema and one of them had no test under it.**
+const templateModel = (value) => fromModel((model) => { model.transitions[1].realization.value = value; });
+const templateResult = generateTest(templateModel('{{password}}'), { journey: 'journey_login' });
+check('a model step whose value is a template is read from the environment, not typed as the placeholder',
+  [templateResult.spec.includes('process.env.TEST_PASSWORD!'), templateResult.spec.includes('"{{password}}"'),
+    templateResult.ok, templateResult.counts.blocking_gaps],
+  [true, false, true, 0]);
+check('and the instruction names the variable and the element, the same way the withheld value does',
+  [templateResult.requires.map((entry) => entry.env),
+    templateResult.requires.map((entry) => entry.purpose),
+    templateResult.requires[0].element,
+    templateResult.requires[0].reason.includes('"{{password}}"'),
+    templateResult.requires[0].reason.includes('"password" input the behaviour declares'),
+    requiresInstruction(templateResult.requires).includes('Set TEST_PASSWORD before running it')],
+  [['TEST_PASSWORD'], ['password'], 'element_password_input', true, true, true]);
+// The name is the parameter's, and the *same* name comes out of the other spelling: a value the store
+// redacted for the same element is named after the element's purpose, `password_input`, which is the
+// same variable. A reader who switches between the two readings of one run must not have to export
+// two secrets for one field.
+check('the two spellings of one reference name one variable, so either reading needs one export',
+  [templateResult.requires[0].env, envVarFor('password'), envVarFor('password_input')],
+  ['TEST_PASSWORD', 'TEST_PASSWORD', 'TEST_PASSWORD']);
+// It is one rule and not a mode: the graph reading carries the same template in `arguments` and
+// resolves it the same way. A rule that only held for the model would mean the older document was
+// less safe than the newer one, which is the one thing the pivot must not do to `graph.json`.
+check('the rule is asked of the value, not of the document it arrived in — a graph argument is read the same way',
+  (() => {
+    const outcome = mutate((graph) => {
+      graph.transitions[1].action.arguments = { password: '{{password}}' };
+    });
+    return [outcome.spec.includes('process.env.TEST_PASSWORD!'), outcome.spec.includes('"{{password}}"'),
+      outcome.requires.map((entry) => entry.env), outcome.ok];
+  })(),
+  [true, false, ['TEST_PASSWORD'], true]);
+// Only the whole value is a template. The schema's substitution has one argument and `{{n}}` inside a
+// longer string is not it, so a partial one stays a quoted literal rather than becoming an env var
+// named after a fragment — inventing a variable nobody can supply is worse than typing what was
+// written down.
+check('a value that merely contains braces is still a value',
+  (() => {
+    const outcome = generateTest(templateModel('user-{{n}}@example.com'), { journey: 'journey_login' });
+    return [outcome.spec.includes('"user-{{n}}@example.com"'), outcome.requires, outcome.ok];
+  })(),
+  [true, [], true]);
+// The two spellings of one fact must not read as a disagreement. A step whose realization binds
+// `{{password}}` *and* whose own reading says the value was withheld has said the same thing twice,
+// in the schema's words and in the capture's — and a warning calling that a disagreement would tell a
+// reader their document is wrong when it is the document that is right. Both spellings are in this
+// case because the point is that *neither* is the odd one out.
+check('a template and a withheld reading are the same claim, so neither is reported against the other',
+  (() => {
+    const outcome = generateTest(fromModel((model) => {
+      model.transitions[1].realization.value = '{{password}}';
+      model.transitions[1].effects = [{ type: 'value_changed', target: 'element_password_input', to: REDACTED }];
+    }), { journey: 'journey_login' });
+    return [gapCodes(outcome).includes('argument_disagrees_with_the_reading'),
+      outcome.spec.includes('process.env.TEST_PASSWORD!'),
+      outcome.requires.map((entry) => entry.env),
+      outcome.ok];
+  })(),
+  [false, true, ['TEST_PASSWORD'], true]);
+// The warning is not gone, it is narrowed: a literal the reading contradicts is still the case it was
+// written for, and the spec is still built from the reading rather than from the literal.
+check('and a literal the reading contradicts is still the disagreement it was written for',
+  (() => {
+    const outcome = generateTest(fromModel((model) => {
+      model.transitions[1].realization.value = 'hunter2';
+      model.transitions[1].effects = [{ type: 'value_changed', target: 'element_password_input', to: REDACTED }];
+    }), { journey: 'journey_login' });
+    return [gapCodes(outcome).includes('argument_disagrees_with_the_reading'),
+      outcome.spec.includes('process.env.TEST_PASSWORD!'),
+      outcome.spec.includes('"hunter2"')];
+  })(),
+  [true, true, false]);
+
 // --- the result has to survive being returned ---------------------------------
 // `graph_test` declares `{type: 'json'}` as its output and the framework rejects a value that does
 // not survive a round trip, naming no field. Asserting it here means the tool cannot fail that way.

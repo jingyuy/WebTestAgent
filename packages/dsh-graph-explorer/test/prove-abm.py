@@ -19,6 +19,13 @@ sentence that asks for it and checks that `test/protocol.test.mjs` notices, incl
 puts the previous version's clause *back*: a rewrite that leaves the old instruction available has
 not rewritten anything.
 
+Phase 4's artifact is the model read back into the shape the generator reads. The model keeps D5 —
+one edge per move — and the generator acts on controls, one call at a time, so the adapter hands it
+the calls the move was made of. Every mutation in that group leaves a document that still parses,
+still validates against the schema, and is still wrong: the earlier calls claiming the move's
+arrival, the behaviour claimed three times for one performance, the recorded value copied into an
+argument the walk never wrote.
+
 Same protocol as `test/prove-generate.py`: break the rule, not a clause the code already treats as
 equivalent. Restores every file it touches, including on the exception path, and leaves the tree
 byte-identical.
@@ -493,6 +500,64 @@ CASES = [
         'file': 'lib/abm.js',
         'old': "        const key = `${ownerId}|${invocation[0].id}`;\n",
         'new': "        const key = `${ownerId}`;\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    # --- Phase 4: the model read in the shape the generator reads ----------------------------------
+    # `graphShapeOf` is D5 read backwards. D5 says one move is one turn of the walk, and the model
+    # keeps it that way — one edge per move, one `realization[]` saying how it was performed. The
+    # generator cannot act on a move, though: it acts on a control, one call at a time, so the
+    # adapter hands it the calls the move was made of and names the behaviour once, on the call that
+    # ended it. These five mutations are the five ways that translation can be got wrong, and every
+    # one of them produces a document that still parses, still validates and is still wrong.
+    {
+        # A move starts where the invocation started and lands where the behaviour lands. The calls in
+        # between neither arrive nor leave, so a call that claims the move's arrival can have an
+        # arrival asserted in the middle of a half-performed behaviour.
+        'rule': 'only the call that ended a move says where the move arrived',
+        'file': 'lib/abm.js',
+        'old': "        to_state: last ? edge.to_state : edge.from_state,\n",
+        'new': "        to_state: edge.to_state,\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The behaviour is one claim, so it is named once. Naming it on every call would let a spec
+        # assert a behaviour three times for one performance, which is the same over-count the
+        # journey fix was for, one layer down.
+        'rule': 'the behaviour is named on the call that ended the move, and on no earlier one',
+        'file': 'lib/abm.js',
+        'old': "          capability: last ? edge.behavior : undefined,\n",
+        'new': "          capability: edge.behavior,\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The value is the lossy half of the pair, and the adapter exists to be measured on the
+        # difference, so it is deliberately not copied into `arguments` — a synthesized argument is
+        # an argument the walk never wrote, and it would hide the reading `argumentFor` must prefer.
+        'rule': 'the recorded value stays on the realization and is not copied into an argument',
+        'file': 'lib/abm.js',
+        'old': "        effects: rows(step.effects),\n        assertions: last ? rows(edge.assertions) : [],\n",
+        'new': "        effects: rows(step.effects),\n        arguments: { [String(step.action)]: step.value },\n        assertions: last ? rows(edge.assertions) : [],\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # A move nobody recorded the steps of is offered as one call in the shape the generator
+        # reads, so `generateTest` refuses it by the name of the *rule* — `action_has_no_realization`
+        # — rather than reporting the step as one with no element, which would be a complaint about
+        # the document's shape instead of about the model's missing reading.
+        'rule': 'a move with no realization is carried as one call, in the shape the generator reads',
+        'file': 'lib/abm.js',
+        'old': "      projected.push(prune({ ...rest, action: prune({ capability: behavior, target }) }));\n",
+        'new': "      projected.push(edge);\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The journey expands through the same map the edges did. A journey that named a move twice
+        # performed it twice, and a journey left naming the edges it did not perform would send a
+        # spec at steps whose ids the document does not contain.
+        'rule': 'the journey expands through the same map, so a turn is the calls it was made of',
+        'file': 'lib/abm.js',
+        'old': "        .flatMap((id) => callsOfEdge.get(id) ?? [id]),\n",
+        'new': "        .flatMap((id) => [id]),\n",
         'suite': 'test/abm.test.mjs',
     },
 ]

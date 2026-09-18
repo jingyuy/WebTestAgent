@@ -38,6 +38,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { graphShapeOf } from './abm.js';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from './capture.js';
 import { assertionSurvival, commitRun, CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, observedApis, persistenceVariablesOf, routeOf, semanticVariablesOf, stateVariablesOf, surfaceIsDisjoint, surfaceOf, unrecordedStateVariables } from './commit.js';
 import { generateTest, requiresInstruction } from './generate.js';
@@ -2602,40 +2603,57 @@ export function apply(ctx, config) {
     }));
 
     // ---------------------------------------------------------------------
-    // Seam 4 — the generator, where the graph becomes a program
+    // Seam 4 — the generator, where the model becomes a program
     // ---------------------------------------------------------------------
     // Everything before this point is an account: the walk recorded what it saw, and the
     // commit decided what of it holds. This is where the account is spent — a spec a person
     // can run without reading any of the rest.
     //
-    // It reads the committed graph and nothing else, which is deliberate on two counts. A
-    // generated spec is then reproducible from `graph.json` alone, by anyone, at any later
-    // date, without the raw logs — and the generator cannot quietly disagree with the graph
-    // it came from, because the graph is its only input. It writes one file and never edits
-    // the graph: a test is a claim about the application, and the graph is the record of
-    // what the application was found to do.
+    // It reads the behaviour model first and the committed graph after it, and the order is
+    // the pivot: the model is the document that keeps what a step was *walked with*, and the
+    // graph's transition shape is a projection that carries `arguments` and no `value`. A
+    // live 0.1.30 run is the measurement behind that ordering — its model recorded the email
+    // on the step and its graph could not hold it, so a generator reading the graph wrote a
+    // "sign in" test that never typed the email. Both documents are still readable here,
+    // which is what makes the two renderings comparable on one run.
     //
-    // Refusing is a normal outcome. A journey the graph does not name, a step whose target
-    // has no usable locator, a value the run recorded as `[set]` but never kept — each one
-    // stops that line of the spec and comes back as a gap with its own code, because the
-    // alternative is a spec that looks complete and passes for the wrong reason.
+    // The guarantee that replaces "the graph is its only input" is stronger and is checked:
+    // the model's journey turns are expanded into the calls its `realization[]` recorded, and
+    // an action no realization step stands behind is refused rather than written. It writes
+    // one file and never edits its input: a test is a claim about the application, and both
+    // documents are the record of what the application was found to do.
+    //
+    // Refusing is a normal outcome. A journey the document does not name, a step whose target
+    // has no usable locator, a value the run recorded as `[set]` but never kept, an action
+    // with no reading under it — each one stops that line of the spec and comes back as a gap
+    // with its own code, because the alternative is a spec that looks complete and passes for
+    // the wrong reason.
     ctx.tools.register(defineTool({
         name: generateTool,
-        description: 'Generate a Playwright spec from the committed graph, for one journey. This is the LAST step, '
-            + 'after the commit: it reads graph.json and writes a runnable .spec.ts beside it, plus a list of the '
-            + 'steps it refused to turn into code. Read the spec, then the gaps — a gap names what the graph would '
-            + 'have to say for the generated test to check it.',
+        description: 'Generate a Playwright spec for one journey, from the run\'s behaviour model. This is the LAST '
+            + 'step, after the commit: it reads application-model.json (or graph.json when the run has no model) and '
+            + 'writes a runnable .spec.ts beside it, plus a list of the steps it refused to turn into code. Every '
+            + 'action traces to a realization[] step — the reading the machinery took — and a step with no reading '
+            + 'under it is refused. Read the spec, then the gaps — a gap names what the document would have to say for '
+            + 'the generated test to check it.',
         parameters: {
             journey: {
                 type: 'string',
                 description: 'Which journey to generate a test for, by id, by name, or by distinctive words from either '
-                    + '("sign in to the demo app"). Omit when the graph has exactly one journey. A near-miss is refused '
+                    + '("sign in to the demo app"). Omit when the run has exactly one journey. A near-miss is refused '
                     + 'rather than guessed at, and the candidates come back with it.',
             },
             run_dir: {
                 type: 'string',
-                description: 'Directory holding the committed graph.json, relative to the workspace root. Omit to use the '
-                    + 'run this session committed.',
+                description: 'Directory holding the committed application-model.json, relative to the workspace root. '
+                    + 'Omit to use the run this session committed.',
+            },
+            source: {
+                type: 'string',
+                description: 'Which document to write the spec from: "model" (the default when the run has one) or '
+                    + '"graph". The model keeps the values a step was walked with, so a fill can be generated from it; '
+                    + 'the graph is the projection that drops them, and is kept readable so the two can be compared on '
+                    + 'one run.',
             },
             name: {
                 type: 'string',
@@ -2676,8 +2694,41 @@ export function apply(ctx, config) {
             const dir = args.run_dir
                 ? (isAbsolute(args.run_dir) ? args.run_dir : resolve(cwd, args.run_dir))
                 : (run?.dir ?? join(cwd, runDirName));
+            // The pivot, and the one line that makes it real: the spec is written from the behaviour
+            // *model*, and `graph.json` is no longer its only possible input.
+            //
+            // It used to read the graph and nothing else, and that was argued for here on two
+            // grounds — a spec reproducible from `graph.json` alone, and a generator that cannot
+            // quietly disagree with the graph because the graph is its only input. Both were good
+            // arguments and both are spent deliberately. A live 0.1.30 run is what spent them: the
+            // model recorded the email as the step's `value`, the graph's transition shape carries
+            // `arguments` and has no `value`, so the generated spec dropped the sign-in step with a
+            // blocking `step_has_no_value_to_type` and produced a "sign in" test that never signs
+            // in. A document the model writes and the generator cannot read is the pivot *described*
+            // rather than performed.
+            //
+            // What replaces the old guarantee is a stronger one, and it is checked rather than
+            // asserted: the model is handed to the generator through `graphShapeOf`, each journey
+            // turn is expanded into the calls the behaviour's `realization[]` recorded, and the
+            // generator *refuses* an action no realization step stands behind. So a spec is
+            // reproducible from `application-model.json`, and every line of it traces to a reading
+            // the machinery took. `graph.json` is still read when a run has no model, and
+            // `source: "graph"` forces it — which is what makes the two renderings comparable on one
+            // run instead of on two.
+            const modelPath = join(dir, 'application-model.json');
             const graphPath = join(dir, 'graph.json');
-            if (!existsSync(graphPath)) {
+            const source = args.source ?? (existsSync(modelPath) ? 'model' : 'graph');
+            if (source === 'model' && !existsSync(modelPath)) {
+                throw new Error(
+                    `${dir} has no application-model.json, so there is no behaviour model to generate a test from. `
+                    + (existsSync(graphPath)
+                        ? `The graph is there: pass source: "graph" to generate from it, or re-commit the run to write `
+                            + 'the model — the model is what keeps the values a step was walked with.'
+                        : `Pass run_dir to generate from a run recorded earlier (the default is ${runDirName} under the `
+                            + 'workspace root), or walk the application first.'),
+                );
+            }
+            if (source === 'graph' && !existsSync(graphPath)) {
                 throw new Error(
                     `${dir} has no graph.json, so there is no graph to generate a test from. `
                     + (existsSync(join(dir, 'run.json'))
@@ -2688,7 +2739,9 @@ export function apply(ctx, config) {
                             + 'workspace root), or walk the application first.'),
                 );
             }
-            const graph = JSON.parse(readFileSync(graphPath, 'utf8'));
+            const documentPath = source === 'model' ? modelPath : graphPath;
+            const read = JSON.parse(readFileSync(documentPath, 'utf8'));
+            const graph = source === 'model' ? graphShapeOf(read) : read;
             const result = generateTest(graph, {
                 journey: args.journey,
                 name: args.name,
@@ -2711,7 +2764,9 @@ export function apply(ctx, config) {
                     ok: false,
                     error: result.error,
                     candidates: result.candidates ?? [],
-                    graph_path: graphPath,
+                    source,
+                    document_path: documentPath,
+                    graph_path: existsSync(graphPath) ? graphPath : null,
                     run_dir: dir,
                     spec_path: null,
                     next: `Nothing was written. ${result.candidates?.length
@@ -2733,7 +2788,12 @@ export function apply(ctx, config) {
                 ok: result.ok,
                 error: null,
                 run_dir: dir,
-                graph_path: graphPath,
+                // Which document the spec was written from, and where it is. The spec is
+                // reproducible from that one file — and where both exist, generating from each in
+                // turn is how the two readings are compared rather than assumed equal.
+                source,
+                document_path: documentPath,
+                graph_path: existsSync(graphPath) ? graphPath : null,
                 spec_path: specPath,
                 filename: result.filename,
                 test_name: result.test_name,
@@ -2756,7 +2816,7 @@ export function apply(ctx, config) {
                     + `${result.counts.blocking_gaps} of them blocking. `
                     + (result.ok
                         ? ''
-                        : 'This spec is not ok: it drops the step(s) the graph could not turn into an action, so it '
+                        : 'This spec is not ok: it drops the step(s) the document could not turn into an action, so it '
                             + 'would pass without performing them. Read the gaps, fix what they name, and generate '
                             + 'again before treating it as a test. ')
                     + (result.requires.length

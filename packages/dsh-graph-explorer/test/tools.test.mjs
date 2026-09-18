@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
@@ -296,11 +296,13 @@ check('but the instruction is on both strands anyway, so it can be attributed by
 check('forcing does not make the verdict a pass', forced.committed, false);
 
 // --- the generator, through the same seam ---------------------------------
-// The graph on disk is the generator's only input, which is what makes a generated spec
+// The document on disk is the generator's only input, which is what makes a generated spec
 // reproducible: the same file gives the same spec, today or a year from now, with no raw evidence
-// and no model. This is the end-to-end shape of the tool — read the graph the commit wrote, turn
-// one journey into code, write it beside the graph — and the walk above is a real run, so the
-// journeys in it are the ones the commit derived rather than ones a fixture declared.
+// and no browser. Which document that is, is the subject of the section after this one: the model
+// when the run has one, and the graph when it does not. This section is the graph path — read the
+// document the commit wrote, turn one journey into code, write it beside it — and the walk above is
+// a real run, so the journeys in it are the ones the commit derived rather than ones a fixture
+// declared.
 //
 // Nothing is named first, because a graph the walk produced has more than one journey in it: an
 // unasked-for choice between them is the one thing this tool must not make.
@@ -345,6 +347,92 @@ check('a journey the graph does not have is refused, with the ones that exist',
   [false, null, written.journeys.length]);
 await refuses('and a directory with no committed graph is not silently generated from',
   () => generate({ run_dir: 'no-such-run' }), 'has no graph.json');
+
+// --- the model is what a spec is written from ------------------------------
+// Phase 4's seam: which file the tool opens. This run is blocked
+// (`application_not_declared`), so the commit wrote no model — which makes it the honest fixture
+// for the fallback: a run with a graph and no model generates from the graph, and asking for the
+// model names the file that is missing rather than quietly reading the other one.
+await refuses('a run whose model was never written is told which file is missing, not quietly given the graph',
+  () => generate({ source: 'model' }), 'has no application-model.json');
+// Two documents of one walk, in a directory of their own: the same state, the same move, and the one
+// difference the pivot is about — the graph's step carries the value as an argument, the model's as
+// the value its own realisation recorded. Both are written here because the question is not what a
+// walk projects to (that is `abm.test.mjs`) but *which file the tool opens*, and a difference that
+// shows up in the generated spec is the only way to tell the two apart from outside.
+const bothDir = join(cwd, 'both-run');
+mkdirSync(bothDir, { recursive: true });
+// The parts both documents agree on: one surface, one control on it, one capability, one move.
+const shared = {
+  application: { id: 'app_demo', name: 'Demo App', base_url: 'http://127.0.0.1:4173/' },
+  states: [{
+    id: 'state_login',
+    name: 'Login',
+    identity: { route: '/' },
+    detection: [{ type: 'element_state', element: 'element_email_input', operator: 'equals', expected: 'visible' }],
+    elements: [{
+      id: 'element_email_input',
+      role: 'textbox',
+      name: 'Email',
+      locator: { strategy: 'css', value: '#email' },
+      semantic: { purpose: 'email_input' },
+    }],
+  }],
+};
+// A join a reader should note, and this test earned it the hard way: the two documents name the walk
+// differently — a graph lists the edges it stepped through (`journeys[].transitions[]`), a model
+// lists the *moves* it made (`journeys[].steps[]`) — and the adapter is the one place that
+// translation happens. Writing the graph's word into the model's file generates nothing at all.
+writeFileSync(join(bothDir, 'graph.json'), JSON.stringify({
+  ...shared,
+  capabilities: [{ id: 'behavior_fill_login_email', name: 'fill_login_email', kind: 'atomic' }],
+  transitions: [{
+    id: 'transition_fill_login_email',
+    from_state: 'state_login',
+    to_state: 'state_login',
+    action: {
+      capability: 'behavior_fill_login_email',
+      target: 'element_email_input',
+      arguments: { email: 'typed-per-the-graph' },
+    },
+    effects: [],
+  }],
+  journeys: [{ id: 'journey_login', name: 'Sign in', start_state: 'state_login', transitions: ['transition_fill_login_email'] }],
+}, null, 2));
+// The model's own vocabulary: a move is a `transition` naming a `behavior` and a `target`, and the
+// value it typed lives on the behaviour's `realization[]` — not copied onto the edge as an
+// `arguments` entry, because a recorded value is not a declaration about the application.
+writeFileSync(join(bothDir, 'application-model.json'), JSON.stringify({
+  ...shared,
+  behaviors: [{
+    id: 'behavior_fill_login_email',
+    name: 'fill_login_email',
+    realization: [{ action: 'fill', element: 'element_email_input', value: 'typed-per-the-model' }],
+  }],
+  transitions: [{
+    id: 'transition_fill_login_email',
+    from_state: 'state_login',
+    to_state: 'state_login',
+    behavior: 'behavior_fill_login_email',
+    target: 'element_email_input',
+    effects: [],
+  }],
+  journeys: [{ id: 'journey_login', name: 'Sign in', start_state: 'state_login', steps: [{ transition: 'transition_fill_login_email' }] }],
+}, null, 2));
+const fromModel = await generate({ run_dir: 'both-run', journey: 'journey_login' });
+const fromGraph = await generate({ run_dir: 'both-run', journey: 'journey_login', source: 'graph' });
+check('a run with a model beside its graph generates from the model, and says so',
+  [fromModel.source, fromModel.document_path, fromModel.graph_path, fromModel.spec.includes('typed-per-the-model')],
+  ['model', join(bothDir, 'application-model.json'), join(bothDir, 'graph.json'), true]);
+check('and naming the graph is what makes the other reading available, on the same run',
+  [fromGraph.source, fromGraph.document_path, fromGraph.spec.includes('typed-per-the-graph'),
+    fromGraph.spec.includes('typed-per-the-model')],
+  ['graph', join(bothDir, 'graph.json'), true, false]);
+check('the walk is the same walk either way, so only the value differs',
+  [fromModel.counts.transitions, fromModel.counts.actions, fromGraph.counts.transitions,
+    fromModel.spec.split('\n').length === fromGraph.spec.split('\n').length],
+  [1, 1, 1, true]);
+rmSync(bothDir, { recursive: true, force: true });
 // What the captures recorded about each state is a field of the document, beside the identity the
 // model wrote: it is the half of a state identity that is not a judgement, so it survives to disk
 // where a reader — or the next rule — can compare two states without re-reading the run.

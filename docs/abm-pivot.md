@@ -1,7 +1,8 @@
 # Pivot: generate an Application Behavior Model beside the graph
 
-Status: **Phase 0a, 0b, 1, 2 and 3 DONE; Phase 4 next — the model generates the test, which is the
-milestone.**
+Status: **Phase 0a, 0b, 1, 2, 3 and 4 DONE — the pivot is load-bearing: a spec is generated with
+`graph.json` absent from the run directory, and every action in it traces to a `realization[]` step.
+Phase 5 next.**
 Baseline: plugin `0.1.22`, branch
 `fix/graph-explorer-lossless-and-state-entered` (`8738f52`), deployed to the `graph` and
 `web` profiles. Work happens on **`feat/application-behavior-model`**, branched off `8738f52`
@@ -587,10 +588,12 @@ Most of the system, and it should not be re-litigated:
   live-proven; the ABM makes it *more* load-bearing, so it must not be weakened.
 - **The commitment model.** "Exploration is allowed to be wrong; the commit decides what becomes
   knowledge." The ABM is a second thing to commit, not a second relationship to evidence.
-- **`graph_test` and the generated spec, until Phase 4.** It reads `graph.json`, which is
-  unchanged, so the spec path keeps working on day one and reverting Phase 4 costs nothing — the
-  fallback doing its job (D1). From Phase 4 the generator reads the ABM (D10), because a model
-  nothing downstream reads cannot be wrong in a way that matters.
+- **`graph_test` and the generated spec — the *reading* changed, the shape did not.** It read
+  `graph.json` while Phase 4 was being built, so the spec path kept working on day one and reverting
+  Phase 4 cost nothing — the fallback doing its job (D1). It now reads the ABM (D10), through the one
+  adapter that hands the generator the shape it reads, and the graph is still a single `source`
+  argument away: two readings of one run, both available, both reproducible from the committed
+  document alone.
 - **The `features[]` layer (D7).** `features[]` stays a `graph.json` property. The `feature`
   protocol argument keeps feeding it and `feature_closure` keeps checking it; the ABM ignores it.
   A consumer that needs product grouping reads the fallback — which is what a fallback is for.
@@ -1103,37 +1106,132 @@ What the two artifacts hold down, and why the measure is where it is:
   argument added to a recording tool, and — the case that matters most after a rewrite — **the old
   composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
   **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
-  is not the rule, and counting it would let a badly written case look like a proof); all **45 cases
+  is not the rule, and counting it would let a badly written case look like a proof); all **50 cases
   are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 14/14.
 
-### Phase 4 — the model generates the test (D10)
+### Phase 4 — the model generates the test (D10) — **DONE**
 
-`generate.js` (`graph_test`). Today it matches `composed_of` against committed transitions
-(`generate.js:570`), which means the semantic layer cannot reach the artifact. This phase reads
-`realization[]` for the steps and `journeys[].steps[]` for the walk.
+`generate.js` (`graph_test`), `lib/abm.js` (`graphShapeOf`) and `lib/index.js` (which document the
+tool opens). Before this phase the generator matched `composed_of` against committed transitions
+(`generate.js:570`) and the semantic layer could not reach the artifact at all.
 
 **Acceptance — the MVP milestone, and it is the same sentence as the one at the top:** a spec is
 generated with `graph.json` **absent from the run directory**, and every action in the spec traces
 to a `realization[]` step. Two documents read from one log, and the test written from the second.
 
-**And the 0.1.30 live run is the argument for this phase, in one line of `graph.json`.** That walk
-was the first to have its model **written and valid on a live run** — the seventh and tenth fixes
-together — and its generated spec then dropped its first step with a blocking gap,
-`step_has_no_value_to_type`. The reason is visible in the document: `transition_fill_email`'s action
-is `{"capability": "cap_fill_email", "target": "element_email_input"}` and **the email is not in it
+**Met, and met twice.** On the 0.1.30 live walk, read in memory from its own model: 3 steps of 3
+became actions, 0 blocking gaps, the email typed from `realization[0].value`. And on a fixture with
+**`graph.json` deleted** (`~/tmp/accept-031`, the live-030 run minus the graph, minus the model,
+re-projected from the logs alone): `source: logs | caps: 4 | transitions: 3`, one journey turn, the
+realization `[["fill","element_email_input","test@example.com"],["fill","element_password_input",
+"[set]"],["click","element_sign_in_button",null]]`, **3 of 3 actions, 0 blocking gaps**, and only
+`dimension_could_be_more_than_one_element` left as a gap — the run's own known limit, reported by
+the model's own rules rather than by the graph's. The acceptance sentence is therefore a fact about
+a directory, not about a session.
+
+**Met a third time, and the third is the one that counts — against the *packed, deployed* build, not
+the source tree.** `~/tmp/live-032/probe-acceptance.mjs` imports `commitRun`, `candidatesFromRun`,
+`modelFromCandidates`, `graphShapeOf` and `generateTest` from the files installed in a profile and
+runs the 0.1.32 walk's log directory two ways:
+
+| Leg | What it reads | Result |
+| --- | --- | --- |
+| A/full | the logs, **and** `commitRun` writes both documents | `ok: true`, no blockers, model written and valid, graph written |
+| A/full → model | `source: application-model.json` | actions **3/3**, assertions 3, **blocking gaps 0**, each step naming its `realization[]` step |
+| A/full → graph | `source: undefined`, the fallback | actions **2/3**, blocking gaps 1, `step_has_no_value_to_type` — the email is in the model's `value` and not in the graph's `arguments` |
+| B/logs | the logs alone, graph **deleted** from the directory | `caps 4`, `transitions 3`, actions **3/3**, blocking gaps 0 |
+
+`graph.json absent from the run directory: true` on leg B, and the model reading satisfies the
+sentence on both legs while the graph reading reports exactly what it lost. That is D10 measured on
+the artifact a deployed profile hands a user, and it is also D1 stated as a *difference*: the graph
+reading is not broken, it is lossy and says where.
+
+**The adapter is the whole of it, and it is D5 read backwards.** The model keeps one edge per move;
+the generator acts on controls, one call at a time. `graphShapeOf(model)` hands the generator the
+calls the move was made of — ids from `collapsed.calls` when the two lists are the same length,
+otherwise synthesized — starting each call where the invocation started and landing the arrival
+**only on the last one** (the calls in between neither arrive nor leave, so no spec can be made to
+assert an arrival in the middle of a half-performed behaviour), naming the behaviour **once**, on
+that last call, and carrying the recorded `value` on the step's `realization` rather than copying it
+into an `arguments` entry the walk never wrote. The journey expands through the same map, which is
+the previous window's fix reached from the other side: a journey that named a move twice performs
+its three calls twice, and one `realization[]` per behaviour cannot tell the two apart — reported as
+`invocation_values_not_distinguished`, **once per edge**, with the `walk_index` to go and read the
+other walk in the log.
+
+**Two defects, both found by writing the tests rather than by reading the code.** The first is in
+the adapter's no-realization branch: it pushed the *model-shaped* edge where the generator reads
+`transition.action.target`, so a behaviour nobody recorded the steps of would have been reported as
+a step with no element instead of as an action with no reading under it — the wrong report about the
+right fact, and the entire reason that branch exists is which report a reader gets. In the same
+commit as the test, per D8. The second is in the artifact's own first line: a spec generated from
+the model still said *"Generated from a committed graph"* — the one claim inside the file that
+nothing downstream can check, and the claim a reader uses to reason about the rest of it (a spec
+from the model cannot contain an action with no reading under it; one from the graph can). The
+header now names the document and the words match the refusal's.
+
+**One mutation survived, and the test was what was wrong.** The once-per-edge report had a case
+that marked **one** call of the move, so the dedupe was never exercised and removing it left the
+suite green. The test now gives all three calls the same `collapsed` record — what the adapter
+actually hands over — and the mutation is refused. A survivor is not a case to delete: it is a test
+that was not testing what it said it was.
+
+**And the readings are two calls, not two code paths.** `graph_test` takes `source` (`model` by
+default when the run has a model, `graph` to force the other reading), refuses by name when the
+document asked for is missing — the graph reader does not quietly answer for the model — and returns
+`source`, `document_path` and `graph_path` so a comparison of the two readings of one run is a diff
+of two results rather than a guess about what was read. A graph-shaped document and a model-shaped
+document are each offered to the one generator in *its* shape; that translation is the adapter's
+entire job, and it is the reason a test that wrote a model's journey as `transitions[]` generated
+nothing at all — the adapter maps `journeys[].steps[]`, because that is what a model has.
+
+**Why it mattered at all, in one line of the 0.1.30 run.** That walk was the first to have its model
+written and valid on a live run, and its generated spec then dropped its first step with a blocking
+gap, `step_has_no_value_to_type`: `transition_fill_email`'s action is
+`{"capability": "cap_fill_email", "target": "element_email_input"}` and the email is **not in it
 anywhere**, while the next step's `{"password": "[set]"}` is. The walk had recorded the email as the
 step's `value` — the spelling the section's own `realization.value` bullet asks for, *"the literal
 the page was given"* — and the graph's transition shape carries `arguments` and has no `value` key,
-so the value went into the graph and came out of it gone. The generator did the right thing with what
-it had (it refuses to invent a value, and the gap names the fix: record it as an argument), and that
-is exactly the point: **a document the model writes and the generator cannot read is the pivot
-described but not performed.** `realization[]` keeps the `value`; the graph drops it. Phase 4 is
-where the spec starts being written from the document that has it.
+so the value went into the graph and came out of it gone. The generator did the right thing with
+what it had; the point is that **a document the model writes and the generator cannot read is the
+pivot described rather than performed.**
+
+**And the 0.1.32 live run found the third defect, in the one place the acceptance sentence does not
+reach.** The sentence asks that every action in the spec trace to a `realization[]` step — and on
+that run every action *did*, while the spec was still wrong:
+
+```ts
+await page.getByRole("textbox", { name: "Password" }).fill("{{password}}");
+```
+
+The walk recorded the password step as `{action: "fill", element: "element_password_input",
+value: "{{password}}"}` with `password` declared on the capability — the spelling the protocol's own
+bullet offers — and the generator read that `value` as *the* value and quoted it. `[set]` and
+`{{param}}` are one fact recorded by two parties, and only the first had a rule: `valueExpression`
+knew `REDACTED`, the schema's second spelling was recognised only by a private predicate inside
+`abm.js` that the generator never consulted, and the fixture had been written with `[set]` — the
+spelling the earlier runs happened to produce. **The rule looked tested because the fixture only ever
+spoke one of the two vocabularies the schema allows**, which is the same failure mode as the 0.1.31
+survivor one level up: not a test that missed a branch, but a vocabulary that only ever got exercised
+in one direction. Fixed in 0.1.33, and the fix is a *place* rather than a patch — `templateParameter`
+is exported from `schema.js`, the module both layers already import, so the projection reads it for
+P5, the generator reads it to know a `value` is a reference, and `isReference` (`REDACTED`, or a whole
+value that is a template) narrows `argument_disagrees_with_the_reading`, so a step that binds the
+parameter *and* carries a withheld reading is not reported as disagreeing with itself.
+
+Three properties of the fix are the ones the new cases hold down: the rule is asked of the **value**,
+not of the document it arrived in (a graph's `arguments` holding a template resolves the same way, so
+neither reading is the less safe one); only a **whole** value is a reference (the substitution takes
+one argument, so `"user-{{n}}@example.com"` is a string with braces in it, and naming an environment
+variable after a fragment would be a secret nobody can supply); and the two spellings **name one
+variable** (`{{password}}` and `[set]` on the same element both become `process.env.TEST_PASSWORD!`,
+which is why the test asserts the three env names are *equal* rather than merely present).
 
 The point is not that the ABM is nicer. It is that **a model nothing downstream reads cannot be
-wrong in a way that matters**: if the spec comes from the graph, P1–P15 are an opinion about a
-file, and the pivot added a description instead of replacing one. Phase 4 is where the pivot
-becomes load-bearing, which is why it is inside the MVP rather than after it.
+wrong in a way that matters**: while the spec came from the graph, P1–P15 were an opinion about a
+file, and the pivot had added a description instead of replacing one. From here they are load-bearing
+— and the two readings of one run are still both available, which is what makes the claim checkable
+rather than merely stated.
 
 ### Phase 5 — actors become schema-native
 
@@ -1182,14 +1280,19 @@ Each of these is load-bearing, not ceremony:
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (45 mutations, all 45 refused; 17 through Phase 2, 9
-   more for Phase 3, and 19 for the defects the deploy and the live runs found — four from the two
+   `test/prove-abm.py` is the running instance (50 mutations, all 50 refused; 17 through Phase 2, 9
+   more for Phase 3, and 24 for the defects the deploy and the live runs found — four from the two
    early deploys, three from the recorder defect, one from the instruction sentence, five from the
    value template the walk was never told how to declare, three from the arguments placement the
-   walk was never told the rule of, one from the two readings of one log, and two from the turn of a
-   journey that was counted per call rather than per invocation); break the
-   *rule*, not a clause the code already treats as equivalent
-   (removing `cutParameter &&` proved nothing — behaviourally identical).
+   walk was never told the rule of, one from the two readings of one log, two from the turn of a
+   journey that was counted per call rather than per invocation, and five from the model read back
+   into the shape the generator reads); break the *rule*, not a clause the code already treats as
+   equivalent (removing `cutParameter &&` proved nothing — behaviourally identical).
+   **The template has grown with the instance and now has a total of its own**: 16 generate cases
+   (9 from the generator's first suite, 4 from Phase 4, and 3 for the 0.1.32 live run's references —
+   one per spelling of the rule plus one for the guard that reads it in the disagreement check),
+   every one refused, and the count is the thing to keep honest: a rule with no case under it is a
+   rule whose fixture happened to speak the other vocabulary.
    **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded
    one `journeys[].steps[]` entry per committed transition, and §3 made a step a behaviour: the
    real 0.1.22 run has **3 committed transitions and 1 behaviour-level step**, so a naive test

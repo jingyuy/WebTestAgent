@@ -4,6 +4,12 @@
 Each case: an exact string in a source file, the edit that removes the rule, and the suite that has
 to fail. A rule whose removal leaves the suite green is a rule nobody is testing.
 
+The last four cases are Phase 4's, and they are two rules with one warning between them: the
+generator reading a model rather than a graph takes a step's value from the `realization[]` step it
+was recorded on, refuses a step that has none — because otherwise "every action traces to a
+realization step" would be true of the model and false of the specs written from it — and says in
+the file which of the two documents it was written from.
+
 Restores every file it touches, including on the exception path, and leaves the tree byte-identical.
 """
 import pathlib
@@ -75,6 +81,86 @@ CASES = [
         'old': "  while (cutParameter && words.length > 1 && TRAILING_CONNECTORS.has(words[words.length - 1].toLowerCase())) {",
         'new': "  const LOOSE = new Set(['in', 'as', 'via', 'at', 'with', 'and', 'then', 'to', 'for', 'on', 'by', 'from', 'into']);\n  while (words.length > 1 && LOOSE.has(words[words.length - 1].toLowerCase())) {",
         'suite': 'test/commit.test.mjs',
+    },
+    # --- Phase 4: the generator reading a model rather than a graph --------------------------------
+    # Two rules, and they are the two halves of the pivot's acceptance sentence. The first says where
+    # a model's values come from: a `realization[]` step carries the control it acted on and the
+    # value it was walked with, recorded by the machinery, so it beats the model's own account of the
+    # same thing *by name* — and a graph transition, which has no realization, is unaffected.
+    {
+        'rule': 'a realization step beats the step\'s transcribed arguments, because it cannot be wrong about its own element',
+        'file': 'lib/generate.js',
+        'old': "  const realized = transition?.realization;\n",
+        'new': "  const realized = undefined;\n",
+        'suite': 'test/generate.test.mjs',
+    },
+    {
+        # The second half: a model edge with no realization is refused by name. Without it the
+        # generator writes an action no reading stands behind, and the acceptance sentence — every
+        # action in the spec traces to a `realization[]` step — stops being true of the specs it
+        # writes while every other test stays green.
+        'rule': 'a model step with no realization behind it is refused rather than written',
+        'file': 'lib/generate.js',
+        'old': "      if (fromModel && !transition.realization) {\n",
+        'new': "      if (false) {\n",
+        'suite': 'test/generate.test.mjs',
+    },
+    {
+        # Asked once per edge, because the report is about the edge: the expanded calls of one move
+        # all carry the same `collapsed` record, and three warnings for one fact read as three
+        # problems. The known limit is stated as this report, so a reader who saw it three times
+        # would be told the walk had three problems instead of one that nobody can fix yet.
+        'rule': 'the shared-values report is made once per edge, not once per call',
+        'file': 'lib/generate.js',
+        'old': "  if (ctx.notedShared.has(edge)) return false;\n",
+        'new': "  if (false) return false;\n",
+        'suite': 'test/generate.test.mjs',
+    },
+    {
+        # The file says what it is, on the one line of the artifact nothing downstream can check. A
+        # spec written from the model and headed "Generated from a committed graph" is a claim its
+        # own generator could contradict: the model is read for its `realization[]`, which is why an
+        # action with no reading under it is refused, and the graph is the reading where that rule
+        # does not apply.
+        'rule': 'the header names the document the spec was actually written from',
+        'file': 'lib/generate.js',
+        'old': "    fromModel\n      ? ' * Generated from a committed behaviour model — not written by hand.'\n      : ' * Generated from a committed graph — not written by hand.',\n",
+        'new': "    ' * Generated from a committed graph — not written by hand.',\n",
+        'suite': 'test/generate.test.mjs',
+    },
+    {
+        # The value the document recorded has two forms and one of them had no test under it until a
+        # live 0.1.32 run walked the other one. `[set]` is the capture's word for a value that was
+        # typed and not kept; `{{param}}` is the schema's word for the same thing said by the model,
+        # and `realization.value` may be either. A generator that quotes the second writes
+        # `.fill("{{password}}")` — a spec whose own document says the parameter is declared, failing
+        # for a reason that has nothing to do with the application.
+        'rule': 'a value that is a template is a reference and is read from the environment',
+        'file': 'lib/generate.js',
+        'old': '  const parameter = templateParameter(raw);\n',
+        'new': '  const parameter = null;\n',
+        'suite': 'test/generate.test.mjs',
+    },
+    {
+        # Only the whole value. The schema's substitution has one argument, so `"user-{{n}}@example.com"`
+        # is a string with braces in it and not a reference; a rule that read it as one would invent an
+        # environment variable named after a fragment, which nobody can supply.
+        'rule': 'only a value that *is* the template is a reference, not one that contains braces',
+        'file': 'lib/schema.js',
+        'old': '  const match = /^\\{\\{\\s*([^{}]+?)\\s*\\}\\}$/.exec(value.trim());\n',
+        'new': '  const match = /\\{\\{\\s*([^{}]+?)\\s*\\}\\}/.exec(value);\n',
+        'suite': 'test/generate.test.mjs',
+    },
+    {
+        # The same rule read in the one other place the two are compared. A step that binds
+        # `{{password}}` *and* whose reading says the value was withheld has said one thing twice; if
+        # only the capture's spelling counted, the generator would warn a reader that their document
+        # contradicts itself when both halves of it say exactly the same thing.
+        'rule': 'a template is a reference where the reading is compared too, not only where it is rendered',
+        'file': 'lib/generate.js',
+        'old': "const isReference = (value) => value === REDACTED || templateParameter(value) !== null;\n",
+        'new': "const isReference = (value) => value === REDACTED;\n",
+        'suite': 'test/generate.test.mjs',
     },
 ]
 

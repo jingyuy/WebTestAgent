@@ -15,11 +15,21 @@
  *
  *   - the action comes from the transition (what the walk did, and where),
  *   - the interaction comes from the element's role (what a user can do to it),
- *   - the values come from the transition's arguments (what was typed, or that it was *not* kept),
+ *   - the values come from the step's `realization` when the document has one — the control and the
+ *     value the machinery recorded as one object, matched to no name — and otherwise from the
+ *     transition's arguments (what was typed, or that it was *not* kept),
  *   - the checks come from the transition's assertions and the commit's candidates,
  *   - and anything that cannot be rendered is reported rather than approximated.
  *
- * Three deliberate refusals, because each one is a way a generated test lies:
+ * Two shapes of input, one generator. `graph_test` reads `application-model.json` and hands it here
+ * through `graphShapeOf` (`lib/abm.js`), which presents the model in the graph's shape and expands
+ * a journey turn into the calls the behaviour's `realization[]` recorded. That is why the values
+ * above have two sources and why they are read in that order: from a model, a step with no
+ * realization is **refused** — a spec written from the model acts on what a reading recorded, and
+ * an action with no reading under it is a claim nobody can trace. From a graph the argument is the
+ * only spelling there is, and `graph.json` is still read when a run has no model.
+ *
+ * Four deliberate refusals, because each one is a way a generated test lies:
  *
  *   1. **A storage key is never asserted.** The commit's `STATE_VARIABLE_EFFECTS` files a
  *      `storage_changed` under `persistence`, and this is the reason that distinction exists: a
@@ -32,6 +42,9 @@
  *   3. **A value the run did not keep is not invented.** The store writes `[set]` where a value was
  *      typed and withheld, and that becomes `process.env.TEST_<THING>` plus a `requires` entry —
  *      the spec says out loud what it needs supplied rather than inventing a password.
+ *   4. **An action with no realization step is not written.** This is the one refusal that exists
+ *      only for a spec written from the behaviour model, and it is what "every action in the spec
+ *      traces to a `realization[]` step" means as a rule rather than as an intention.
  *
  * Locators are chosen the way Playwright's own guidance ranks them: the user-facing locator first
  * (a role and an accessible name, which is what a screen reader and a user both use, and what the
@@ -43,6 +56,7 @@
  * @module dsh-graph-explorer/generate
  */
 import { CONTROL_ROLES, sameCollectionName } from './commit.js';
+import { templateParameter } from './schema.js';
 import { slugify } from './session.js';
 
 /** Quote a value into the spec, so a value with quotes or newlines cannot break the file. */
@@ -304,12 +318,40 @@ export function selectJourney(graph, wanted) {
 }
 
 /**
+ * Whether a value is a *reference* rather than a value: the two spellings `valueExpression`
+ * renders as the environment.
+ *
+ * Asked in the one other place the two are compared — `withheldByEvidence`, where the question is
+ * whether the model's value disagrees with the reading. It does not when the model wrote the
+ * parameter: `{{password}}` and `[set]` are the same claim about the same field made by the two
+ * parties, and a warning that called that a disagreement would be the generator telling a reader
+ * their document is wrong when it is the document that is right. Only a *literal* where the reading
+ * says "withheld" is a disagreement.
+ */
+const isReference = (value) => value === REDACTED || templateParameter(value) !== null;
+
+/**
  * The value a step supplies, as an expression, or why it cannot be written.
  *
- * A value the run recorded as `[set]` is a value the store deliberately withheld. It becomes
- * `process.env.TEST_<PURPOSE>!` and a `requires` entry, which is the whole difference between a spec
- * that says what it needs and one that contains an invented password. Every other value is carried
- * through as written, quoted, so a value containing a quote cannot break the file.
+ * **A value that is a reference is read from the environment; a value that is a value is
+ * quoted.** Two values are references, and they are the same fact recorded by two parties: a
+ * value the *capture* withheld, which arrives as `[set]` because the store redacted it, and a
+ * `{{param}}` *template* — the schema's own spelling for "this step was walked with the
+ * behaviour's parameter, which is not a value the run may keep". Both become
+ * `process.env.TEST_<PURPOSE>!` plus a `requires` entry, which is the whole difference between
+ * a spec that says what it needs and one that contains an invented password.
+ *
+ * The template case is one rule and not a mode, which is why it lives here rather than in the
+ * projection: the realization is the *only* place a model-shaped value comes from and the last
+ * place a graph-shaped one may (`arguments`), and both arrive at this function. A live 0.1.32
+ * run is why: the walk recorded `{{password}}` on the password step — the machinery's own
+ * `realization_step` record, with the parameter declared on the capability — and the generator
+ * quoted it, writing `await page.getByRole('textbox', {name: 'Password'}).fill("{{password}}")`.
+ * The document was right and the spec was wrong, which is the one thing this generator exists
+ * not to do.
+ *
+ * Every other value is carried through as written, quoted, so a value containing a quote cannot
+ * break the file.
  */
 function valueExpression(raw, element, ctx) {
   const purpose = element?.semantic?.purpose ?? element?.id ?? null;
@@ -320,6 +362,17 @@ function valueExpression(raw, element, ctx) {
       element: element?.id ?? null,
       purpose,
       reason: `the run recorded that a value was typed into ${element?.id ?? 'this element'} but not what it was (the store writes ${quote(REDACTED)}), so the spec reads it from the environment instead of inventing one`,
+    });
+    return `process.env.${name}!`;
+  }
+  const parameter = templateParameter(raw);
+  if (parameter !== null) {
+    const name = envVarFor(parameter);
+    ctx.requires.set(name, {
+      env: name,
+      element: element?.id ?? null,
+      purpose: parameter,
+      reason: `the walk recorded ${quote(raw)} as the value for ${element?.id ?? 'this element'}, which is a reference to the ${quote(parameter)} input the behaviour declares rather than the value itself, so the spec reads it from the environment instead of typing the placeholder`,
     });
     return `process.env.${name}!`;
   }
@@ -375,6 +428,23 @@ function withheldByEvidence(transition, element) {
 }
 
 /**
+ * Whether this step is the first to report that a behaviour was walked more than once.
+ *
+ * Asked once per *edge* rather than once per step, because the report is about the edge: the
+ * expanded calls of one move all carry the same edge's `collapsed` record, and three warnings for
+ * one fact would read as three problems. The answer is remembered in `ctx`, which is the per-run
+ * state the caller already passes down.
+ */
+function reportsSharedValues(transition, ctx) {
+  const invocations = transition?.metadata?.extra?.collapsed?.invocations;
+  const edge = transition?.realization?.of;
+  if (typeof edge !== 'string' || typeof invocations !== 'number' || invocations <= 1) return false;
+  if (ctx.notedShared.has(edge)) return false;
+  ctx.notedShared.add(edge);
+  return true;
+}
+
+/**
  * Which argument of a step is the value it typed, and why.
  *
  * A capability declares its inputs and the transition carries the arguments it was called with.
@@ -382,8 +452,24 @@ function withheldByEvidence(transition, element) {
  * argument whose name belongs to the element is taken (`email` for `email_input`), and if none does,
  * the step is written with the first and the choice is reported: picking a value for the wrong field
  * is a test that types a password into an email box and fails for a reason nobody can read.
+ *
+ * **The realization beats the transcription**, and it is read first because it is the one that
+ * cannot be wrong about its own element. A `realization[]` step carries the control it acted on and
+ * the `value` it was walked with, both recorded by the machinery — so the value, the control and the
+ * step are one object and there is nothing to match up. `arguments` is the model's account of the
+ * same thing *by name*, and a name has to be matched against an element to be used: that step
+ * (`sameCollectionName` below, and the ambiguity warning when nothing matches) is exactly the
+ * judgement the realization makes unnecessary. A graph transition has no realization and is
+ * unaffected by this — the rule is one rule, not a mode.
  */
 function argumentFor(transition, element, declared) {
+  const realized = transition?.realization;
+  if (realized && realized.value !== undefined) {
+    return {
+      value: realized.value,
+      of: `the value this step recorded as typed into ${realized.element ?? 'the control'} (realization[${realized.index}] of ${realized.behavior})`,
+    };
+  }
   const entries = Object.entries(transition?.action?.arguments ?? {});
   if (entries.length === 0) return { value: undefined, of: null };
   if (entries.length === 1) return { value: entries[0][1], of: `the only argument the step carried (${entries[0][0]})` };
@@ -418,7 +504,12 @@ function argumentFor(transition, element, declared) {
 export function generateTest(graph, options = {}) {
   const gaps = [];
   const note = (gap) => { gaps.push(gap); };
-  const ctx = { requires: new Map() };
+  const ctx = { requires: new Map(), notedShared: new Set() };
+  // Which document this is. A spec written from the behaviour model is written from
+  // `realization[]` — that is Phase 4's acceptance sentence, and it is enforced below rather than
+  // assumed — so the document says where it came from and the generator holds it to it. A graph is
+  // a document whose steps were already judged by the commit, and it is held to nothing new.
+  const fromModel = graph?.source === 'application-model.json';
   const states = statesById(graph);
   const elements = elementsById(graph);
   const transitions = transitionsById(graph);
@@ -509,14 +600,45 @@ export function generateTest(graph, options = {}) {
       });
     } else if (element && locator) {
       action.code = method;
+      if (fromModel && !transition.realization) {
+        // Phase 4's acceptance sentence, in code. A spec written from the behaviour model is written
+        // from `realization[]`, and an action no realization step stands behind is a line nobody can
+        // trace back to a reading — so it is refused rather than written. This is the one place the
+        // two renderings must genuinely differ, and it is the difference the pivot is *for*: a graph
+        // transition is a step the commit judged, and a realization step is a reading the machinery
+        // took, and only the second one can say what was typed.
+        note({
+          code: 'action_has_no_realization',
+          severity: 'error',
+          detail: `step ${index + 1} (${transitionId}) names ${transition.behavior ?? 'a behaviour'} and the model records no realization step for it, so the spec has nothing to write the action from. The action was left out: a spec written from the model acts on what a reading recorded, and this step is a claim with no reading under it. Record the step's element and action in the walk (\`realization_step\`) and re-commit.`,
+          transition: transitionId,
+          element: element.id,
+        });
+        action.code = null;
+      } else if (fromModel && reportsSharedValues(transition, ctx)) {
+        // The one thing `realization[]` cannot say yet, reported rather than papered over. The model
+        // keeps one realization per behaviour, so a behaviour the walk performed twice has one list
+        // of values and both turns of the journey are rendered from it — which is right when the two
+        // walks typed the same things and wrong when they did not. Nothing is invented to fill the
+        // gap: the count is named, and the reader can go and look at the log.
+        note({
+          code: 'invocation_values_not_distinguished',
+          severity: 'warning',
+          detail: `${transition.realization.of} was walked ${transition.metadata.extra.collapsed.invocations} times and the model keeps one \`realization[]\` per behaviour, so every turn of the journey is rendered with the values of the walk the log kept. Where the two walks typed different things, the spec types the later value both times. The values of the earlier walk are in the run's log (\`realization_step\` records, by \`walk_index\`).`,
+          transition: transitionId,
+          element: element.id,
+        });
+      }
       if (method === 'fill' || method === 'selectOption') {
         let chosen = argumentFor(transition, element, capability);
         // The reading beats the transcription. A step whose own effect says the value was withheld
         // was a value the run never kept, whatever the argument says it was (see
         // `withheldByEvidence`), so the withheld value is what the spec is built from — and the
         // fact that the two disagree is a warning, because the graph is the artifact that is wrong.
+        // They do not disagree when the model's value is a reference too (`isReference`): a step
+        // that binds `{{password}}` has said the same thing the reading says, in the schema's words.
         const withheld = withheldByEvidence(transition, element);
-        if (withheld && !(typeof chosen.value === 'string' && chosen.value === REDACTED)) {
+        if (withheld && !isReference(chosen.value)) {
           note({
             code: 'argument_disagrees_with_the_reading',
             severity: 'warning',
@@ -757,15 +879,22 @@ export function generateTest(graph, options = {}) {
 
   const header = [
     '/**',
-    ' * Generated from a committed graph — not written by hand.',
+    // The file says what it is. A spec written from the model is not a spec written from the graph:
+    // it acts on what a reading recorded, which is why an action with no realization is refused, and
+    // a header claiming the other document would be the one claim in the artifact that nothing
+    // downstream could check. The two lines read differently, and the word is the same word the
+    // refusal uses.
+    fromModel
+      ? ' * Generated from a committed behaviour model — not written by hand.'
+      : ' * Generated from a committed graph — not written by hand.',
     ' *',
     ` * Application: ${graph?.application?.name ?? 'unknown'}${graph?.application?.id ? ` (${graph.application.id})` : ''}`,
     ` * Journey:     ${journey.id}${journey.goal ? ` — ${JSON.stringify(journey.goal)}` : ''}`,
-    ` * Graph:       generated ${graph?.generated_at ?? 'at an unrecorded time'} by ${graph?.generator?.name ?? 'an unknown generator'} ${graph?.generator?.version ?? ''}`.trimEnd(),
+    ` * ${fromModel ? 'Model' : 'Graph'}:       generated ${graph?.generated_at ?? 'at an unrecorded time'} by ${graph?.generator?.name ?? 'an unknown generator'} ${graph?.generator?.version ?? ''}`.trimEnd(),
     ` * Base URL:    ${baseUrl ?? 'not recorded'} — the spec navigates by route, so set \`use.baseURL\` to this.`,
     ` * Readings:    ${[...new Set(steps.flatMap((step) => step.readings.map((reading) => reading.observation)))].join(', ') || 'none'}`,
     ' *',
-    ` * ${steps.filter((step) => step.interaction).length} of ${transitionIds.length} step(s) became an action; ${assertions.filter((entry) => !entry.omitted_from_spec).length} check(s) were written, from ${assertions.length} the graph supports.`,
+    ` * ${steps.filter((step) => step.interaction).length} of ${transitionIds.length} step(s) became an action; ${assertions.filter((entry) => !entry.omitted_from_spec).length} check(s) were written, from ${assertions.length} the ${fromModel ? 'model' : 'graph'} supports.`,
     ...(gaps.length ? [` * ${gaps.length} gap(s) were reported by the generator: see the tool result, not this file.`] : []),
     ' */',
   ];

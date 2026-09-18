@@ -10,8 +10,9 @@ whole run into a `graph.json` that validates against the target JSON Schemas, be
 a `commit_report.json` that says what it committed, what it refused and why, and
 reads the same run a *second* time as an `application-model.json`: what the
 application can be asked to do, in the words a person would ask for it (see
-[The two documents](#the-two-documents)). `graph_test` turns that graph into a
-Playwright spec for one of its journeys. See
+[The two documents](#the-two-documents)). `graph_test` turns that document into a
+Playwright spec for one of its journeys, reading the model by default and the graph
+when the other reading is asked for `source: "graph"`. See
 [The commit](#the-commit),
 [Generating a test](#generating-a-test) and
 [What this proves, and what it does not](#what-this-proves-and-what-it-does-not).
@@ -43,7 +44,7 @@ One page, one owner. Never mount both.
 | Semantic tools | `ctx.tools.register(defineTool({...}))` | `graph_observe` and `graph_transition` — the only paths by which a state or an edge reaches the candidate graph |
 | Protocol | `ctx.systemPrompt.section({...})` | The behaviour-first loop the model follows: understand the application, name its actors and behaviours, then walk it — and record each action as a step of the behaviour it serves |
 | Reconciliation | `ctx.tools.register(defineTool({...}))` | `graph_commit` — the only path from candidate records to a committed graph |
-| Generation | `ctx.tools.register(defineTool({...}))` | `graph_test` — the graph is its only input, so a spec is reproducible from `graph.json` alone |
+| Generation | `ctx.tools.register(defineTool({...}))` | `graph_test` — the committed document is its only input, so a spec is reproducible from `application-model.json` (or from `graph.json`, when the other reading is named) |
 
 `tools/execute` is an around-waterfall. The wrapper only ever reads `exec` and
 returns the real result — a wrapper that changed or dropped a result would
@@ -72,7 +73,7 @@ graph-run/
   graph.json          # written by graph_commit, only when the rules are satisfied
   application-model.json  # the same run read as an application behaviour model
   commit_report.json  # written by graph_commit, always
-  <journey>.spec.ts   # written by graph_test, from graph.json alone
+  <journey>.spec.ts   # written by graph_test, from the committed model (or the graph)
 ```
 
 `application-model.json` is not a second format for the graph and it is not derived from
@@ -656,15 +657,25 @@ cannot see the run.
 
 ## Generating a test
 
-`graph_test` reads a committed `graph.json` and writes one Playwright spec for one of its
-journeys. The graph is its **only** input: not the logs, not the run, not this session. So
-the spec is reproducible — delete the run directory, keep `graph.json`, and the same call
-returns the same bytes — and the only thing that varies between two calls is which journey
-was named.
+`graph_test` reads a committed `application-model.json` — or a `graph.json`, if that is all
+the run has — and writes one Playwright spec for one of its journeys. The document is its
+**only** input: not the logs, not the run, not this session. So the spec is reproducible —
+delete the run directory, keep the committed document, and the same call returns the same
+bytes — and the only things that vary between two calls are which journey was named and which
+of the two readings of the run was asked for.
 
 ```jsonc
 { "journey": "Sign in to Acme Demo App", "run_dir": "graph-run" }
+{ "journey": "Sign in to Acme Demo App", "run_dir": "graph-run", "source": "graph" }
 ```
+
+`source` is `model` by default when the run has a model, and `graph` forces the other
+reading of the same run. The result always says which one it was (`source`), where the
+document came from (`document_path`) and where the other one is (`graph_path`, or `null`),
+so a comparison is two calls and a diff rather than a guess about what was read. Asking for
+a document the run does not have is refused by name — the tool that reads the graph does not
+quietly answer for the model, because *which* document a spec came from is a claim about the
+spec.
 
 `journey` takes an id, a name, or a description. With exactly one journey in the graph it
 can be omitted; with several, the tool **refuses and lists them** rather than picking one,
@@ -687,6 +698,60 @@ test("Sign in to Acme Demo App", async ({ page }) => {
   await expect(page.getByTestId("current-user")).toHaveText("test@example.com");
 });
 ```
+
+**The model is read for its `realization[]`, and that is the difference in the file.** A
+model's move carries no `arguments`: the walk recorded the value on the step it typed it on,
+and the generator reads it there — `'the value this step recorded as typed into
+element_email_input (realization[0] of behavior_fill_login_email)'` — so the typed value, the
+control it went into and the step are one object and there is nothing to match up. The
+`arguments` a graph carries are the same claim *by name*, and a name has to be matched
+against an element to be used. So the model is preferred where both exist, and the graph is
+what made the older behaviour work on day one (D1).
+
+**A value that is a reference is read from the environment; a value that is a value is
+quoted.** Two values are references, and they are one fact recorded by two parties. `[set]` is
+the *capture's* word for "a value was typed here and this run may not keep it". `{{param}}` is
+the *schema's*, and it is the only other thing a step's `value` may be: `normalizeRealizationStep`
+refuses a non-string with *"a literal the step types, or a `{{param}}` template bound to the
+behaviour's `input`"*. Both become `process.env.TEST_<PURPOSE>!` and a `requires[]` entry, and
+only a value that **is** the whole template counts — `"user-{{n}}@example.com"` is a string with
+braces in it, and naming an environment variable after a fragment would be a secret nobody can
+supply. A live 0.1.32 run is why the second spelling has a rule at all: its walk recorded
+`value: "{{password}}"` with `password` declared on the capability, and the generator quoted it.
+The rule is asked of the **value** and not of the document it arrived in, so a graph's
+`arguments` holding a template resolves the same way — the older document is never the less safe
+one. And the same test narrows `argument_disagrees_with_the_reading`: a step that binds the
+parameter *and* carries a withheld reading has said one thing twice, so neither is reported
+against the other; only a literal where the reading says "withheld" is a disagreement.
+
+**A model step with no `realization[]` behind it is refused rather than written**
+(`action_has_no_realization`, naming the behaviour and the element): a spec written from the
+model acts on what a reading recorded, so an action with no reading under it is not a line
+this tool writes. This is the one place the two renderings are allowed to differ, and it is
+the acceptance sentence of the pivot as a rule — every action in a spec written from the
+model traces to a `realization[]` step — rather than a claim a reader has to check.
+
+A model's journey names **moves** (`journeys[].steps[]`) where a graph's names the
+**calls** it stepped through (`journeys[].transitions[]`), and one move becomes the calls it
+was made of before the generator sees it: the behaviour is named once, on the call that
+ended the move, because one performance is one claim — and an arrival can only be asserted on
+that last call, since the calls in between neither arrive nor leave. Read the model and you
+are reading one edge per move; read a spec generated from it and you are reading the calls,
+which is the only shape a browser can be told to perform.
+
+**And the file says which of the two it is**, in its first line and in the line that records
+where the document came from — `Generated from a committed behaviour model` and `Model:`
+where the graph reading says `graph`. That line is the one claim in the artifact nothing
+downstream can check, and it is the claim a reader uses to reason about the rest of the file:
+a spec from the model cannot contain an action with no reading under it, and one from the graph
+can.
+
+A model cannot yet say which of two invocations of one behaviour typed which value —
+`realization[]` is one list per behaviour — so a spec generated from a walk that performed
+one move twice renders both turns with the values the log kept and reports
+`invocation_values_not_distinguished` **once per edge**, with the `walk_index` to go and read
+the other one. That is the known limit, reported where it bites rather than left for a reader
+to notice.
 
 Three things about that file are decisions rather than transcription.
 
@@ -1550,11 +1615,47 @@ performed two moves, and keying on the behaviour alone would collapse them into 
 its `journey.transitions` lists the three *calls* — which is worth saying, because the graph is
 supposed to be the lossy one.
 
+**The next live run was of the released version, and it found one more — in the one place the
+acceptance sentence does not reach.** 0.1.32 was packed, deployed to both profiles and walked against
+the demo app. The walk recorded the password step the way the orders tell it to,
+`{action: "fill", element: "element_password_input", value: "{{password}}"}` with `password` declared
+on the capability, and the generator read that `value` as *the* value and quoted it:
+
+```ts
+await page.getByRole("textbox", { name: "Password" }).fill("{{password}}");
+```
+
+Every action still traced to a `realization[]` step — the acceptance held — and the *value* was
+wrong, with the document right. `[set]` and `{{param}}` are the same fact recorded by two parties,
+and only the first had a rule under it: the fixture was written with `[set]`, which is the spelling
+the earlier runs happened to produce, so the rule looked tested and half the vocabulary was never
+exercised. **A rule whose fixture only ever spells it one of the two ways the schema allows is a rule
+tested against the runs that have already happened.** Fixed in 0.1.33, with a case for each spelling
+and three mutations to prove they bite: a value that *is* a `{{param}}` template becomes
+`process.env.TEST_<PARAM>!` plus a `requires[]` entry, in either document, and only a whole value
+counts.
+
+**And the same run read the other way is the pivot's argument, on one log.** The graph reading of that
+walk drops the email step with a blocking `step_has_no_value_to_type`: the walk put the email on the
+step's `realization` **and** on the effect the capture read back, while the graph's `arguments` never
+carried it, so the graph has no value to type and says so rather than inventing one. The model
+reading writes all three actions, from the value the walk recorded. That is D1 in the direction the
+pivot intends — the graph is the lossy projection, the model keeps what the walk recorded — and it is
+why both documents are still written on every commit.
+
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 45 mutations, all 45 refused, the tree
+the failure. `test/prove-abm.py` is that file for this work — 50 mutations, all 50 refused, the tree
 restored byte-identically and `14/14 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.
+
+**The adapter's five rules are refused the same way, and one of the five found its own gap.**
+`graphShapeOf` is the one function that must agree with two readers, so it is where a rule can be
+written correctly and tested wrongly: the case for the once-per-edge report **survived** the first
+time it was run, because the test marked one call of the move and the rule is about the second —
+the dedupe was never exercised. The test now gives all three calls the same `collapsed` record,
+which is what the adapter actually hands over, and the mutation is refused. A mutation that survives
+is not a mutation to delete; it is a test that was not testing what it said.
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
 objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, record
@@ -1601,16 +1702,21 @@ argument disagreed with the step's own reading. A graph in, a string out, and no
 anywhere in it.
 
 Every rule in that suite was checked the way the other suites' rules are — by breaking it and
-reading the failure. `test/prove-generate.py` reverts nine of them one at a time and every one makes
-the suite fail, naming the expectation that caught it: the dimension's resolution through
+reading the failure. `test/prove-generate.py` reverts sixteen of them one at a time and every one
+makes the suite fail, naming the expectation that caught it: the dimension's resolution through
 `sameCollectionName`, the role-and-name ranking, the withheld-value path, the folded negation, the
 undeclared target, the arrival state's own detection, the argument-versus-reading rule, the matching
-of a reading to the field it was read from, and `journeyNameFromGoal`'s dangling connector. The
+of a reading to the field it was read from, and `journeyNameFromGoal`'s dangling connector — plus
+Phase 4's seven: the realization beating the transcription, the model step with no realization being
+refused rather than written, the once-per-edge report, the header naming the document it was
+written from, and the three that came out of the 0.1.32 live run — a template being read from the
+environment, only a whole value being a template, and the same predicate narrowing the disagreement
+warning. The
 first attempt at that last one proved nothing and is the reason the file is worth reading: removing
 the `cutParameter &&` gate is *behaviourally* identical, because a connector can only dangle when a
 parameter was cut, so the proof breaks the rule instead — a connector set that includes the `in` of
 "sign in" — and the suite catches it. It runs on `python3`, changes nothing that survives, and
-prints `after restoring: 9/9 suites passed` when it is done.
+prints `after restoring: 14/14 suites passed` when it is done.
 
 The race between an action and the reading taken after it gets a suite that reproduces it,
 `test/settle.test.mjs`, because it is the one failure the recorder was built to catch and
