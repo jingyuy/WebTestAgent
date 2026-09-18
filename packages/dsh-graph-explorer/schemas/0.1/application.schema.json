@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/application.schema.json",
+  "title": "Application",
+  "description": "Root of the Application Behavior Graph. Describes which application, at which version, the graph was derived from.",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/appId" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "base_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Entry point for the crawler/agent, e.g. https://example.com"
+    },
+    "repository": {
+      "type": "object",
+      "description": "Code repository that source_mappings paths are relative to.",
+      "properties": {
+        "name": { "type": "string" },
+        "url": { "type": "string", "format": "uri" },
+        "default_branch": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "version": {
+      "description": "Either a free-form string (git:abc123) or a structured descriptor.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "$ref": "common.schema.json#/$defs/versionInfo" }
+      ]
+    },
+    "actors": {
+      "type": "array",
+      "description": "Roles the application can be exercised as. Referenced informally by state.identity.variant and journey.actor.",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" },
+          "credentials_ref": {
+            "type": "string",
+            "description": "Name of a secret/credential entry. Never store raw credentials in the graph."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "environments": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "base_url": { "type": "string", "format": "uri" },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "description": "Optional map of environment name -> base url, when the graph is reused across environments."
+    },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false
+}

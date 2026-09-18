@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/state.schema.json",
+  "title": "State",
+  "description": "A semantically meaningful situation the application can be in. The most important object in the graph: it owns what the user can perceive and do.",
+  "type": "object",
+  "required": ["id", "identity"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/stateId" },
+    "identity": { "$ref": "#/$defs/stateIdentity" },
+    "description": {
+      "type": "string",
+      "description": "Human/LLM readable summary, e.g. 'Checkout page for an authenticated user with items in cart'."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["page", "modal", "overlay", "drawer", "inline", "loading", "empty", "error", "terminal", "other"],
+      "default": "page"
+    },
+    "elements": {
+      "type": "array",
+      "items": { "$ref": "element.schema.json" },
+      "description": "Interactive/perceivable elements present in this state."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/capabilityId" },
+      "uniqueItems": true,
+      "description": "Capabilities available while in this state. Inverse view of transitions."
+    },
+    "outgoing_transitions": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/transitionId" },
+      "uniqueItems": true,
+      "description": "Optional denormalised index. Derived from transitions[].from_state; keep it consistent or omit it."
+    },
+    "apis": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/apiId" },
+      "uniqueItems": true,
+      "description": "APIs the application calls while in this state (initial data loads)."
+    },
+    "source_mappings": { "$ref": "common.schema.json#/$defs/sourceMappingList" },
+    "preconditions": { "$ref": "common.schema.json#/$defs/preconditionList" },
+    "detection": {
+      "$ref": "common.schema.json#/$defs/assertionList",
+      "description": "How a test proves it is in this state. Should pin route + the discriminating elements/values from identity.dimensions."
+    },
+    "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "stateIdentity": {
+      "type": "object",
+      "description": "The identity of the state. A URL is an identity SIGNAL, not the identity: /checkout with an empty cart and /checkout with a coupon applied are two states. Two states must differ in at least one of page_type / variant / dimensions.",
+      "required": ["page_type"],
+      "properties": {
+        "route": {
+          "type": "string",
+          "description": "URL path or path pattern, e.g. /checkout or /product/:slug. Absent for states that are not URL addressable (modals, overlays)."
+        },
+        "page_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Coarse semantic page kind: home, product_detail, cart, checkout, order_confirmation, login, 404."
+        },
+        "variant": {
+          "type": "string",
+          "description": "Named variant of the same page_type: authenticated, anonymous, admin, mobile, ab_test_b."
+        },
+        "dimensions": {
+          "type": "object",
+          "description": "Discriminating facts that separate sibling states sharing route+page_type+variant. Keep it small and semantic: {cart: non_empty, coupon: applied}.",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "route_params": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Concrete parameter values seen in evidence, e.g. {slug: 'blue-shirt'}."
+        },
+        "query": {
+          "type": "object",
+          "description": "Query string keys that are identity-relevant.",
+          "additionalProperties": { "type": "string" }
+        },
+        "title": {
+          "type": "string",
+          "description": "Observed document title, as a weak identity signal."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

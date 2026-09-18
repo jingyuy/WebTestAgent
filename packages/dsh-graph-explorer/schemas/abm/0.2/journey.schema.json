@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://webtestagent.local/schemas/abm/0.2/journey.schema.json",
+  "title": "Journey",
+  "description": "A goal expressed as an ordered walk over transitions, plus the assertions that prove the goal was reached. The order and the point of a walk live here and nowhere else: transitions[] is a set, and a set has neither.",
+  "type": "object",
+  "required": ["id", "name", "goal_stated", "steps"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/journeyId" },
+    "name": { "type": "string", "minLength": 1 },
+    "goal": {
+      "type": "string",
+      "description": "Business outcome in one sentence: 'Complete a purchase using a valid coupon'. NEVER the raw instruction when the instruction carried a credential: the instruction is an input to the model, not part of it, and a journey is copied into test headers and reports. Record the goal, not the sentence that produced it."
+    },
+    "goal_stated": {
+      "type": "boolean",
+      "description": "True when an actor actually asked for this outcome; false when the tools derived the walk and this is the closest honest reading of it. A derived journey is still a valid journey, but a reader must be able to tell the two apart without consulting metadata - 'we were asked to do this' and 'this is the only thing we did' are different claims."
+    },
+    "description": { "type": "string" },
+    "actor": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Role the journey is exercised as. Must equal an application.actors[].id."
+    },
+    "start_state": {
+      "$ref": "common.schema.json#/$defs/stateId",
+      "description": "State the journey assumes as a starting point. Derived from the first transition when omitted."
+    },
+    "preconditions": { "$ref": "common.schema.json#/$defs/preconditionList" },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/journeyStep" },
+      "minItems": 1,
+      "description": "The ordered walk. Steps reference top-level transitions rather than restating them, so the edge stays the single place that says what a behaviour does between two surfaces, and the walk stays the single place that says in what order and to what end."
+    },
+    "assertions": {
+      "$ref": "common.schema.json#/$defs/assertionList",
+      "description": "What must be true for the journey to count as passed."
+    },
+    "criticality": {
+      "type": "string",
+      "enum": ["smoke", "critical", "standard", "extended"],
+      "default": "standard",
+      "description": "Test selection hint: smoke/critical run on every PR, extended runs nightly."
+    },
+    "variants": {
+      "type": "array",
+      "description": "Named data variations of the same journey (valid coupon, expired coupon, coupon over threshold).",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "argument_overrides": {
+            "type": "object",
+            "description": "Step index (as a string) or transition id -> concrete argument values for this variant.",
+            "additionalProperties": { "type": "object", "additionalProperties": true }
+          },
+          "expected": {
+            "type": "string",
+            "description": "Expected outcome for this variant: a state id (state_checkout), an error code, or a message. Free-form on purpose, because a rejected variant ends somewhere the graph may not model yet."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "source_mappings": { "$ref": "common.schema.json#/$defs/sourceMappingList" },
+    "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "journeyStep": {
+      "type": "object",
+      "description": "One turn of the walk: take this edge, with these argument bindings. Deliberately thin - anything a step could restate about the edge (from_state, to_state, behaviour, effects) already lives on the edge, and a second place to say it is a second place to disagree with it.",
+      "required": ["transition"],
+      "properties": {
+        "transition": { "$ref": "common.schema.json#/$defs/transitionId" },
+        "arguments": {
+          "type": "object",
+          "description": "Argument bindings for this walk, overriding the edge's own recorded values where the walk used different ones. Keys must be the behaviour's declared input names.",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

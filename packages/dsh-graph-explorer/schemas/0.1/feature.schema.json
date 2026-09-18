@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/feature.schema.json",
+  "title": "Feature",
+  "description": "A business/user-facing capability area. The missing layer between code and user behaviour: a PR diff maps to source files, source files map to Features, and Features point at the states, transitions and journeys they affect.",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/featureId" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "user_value": {
+      "type": "string",
+      "description": "Why this exists for the user: 'Allow customers to receive promotional discounts'."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/capabilityId" },
+      "uniqueItems": true
+    },
+    "states": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/stateId" },
+      "uniqueItems": true
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/transitionId" },
+      "uniqueItems": true
+    },
+    "journeys": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/journeyId" },
+      "uniqueItems": true
+    },
+    "apis": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/apiId" },
+      "uniqueItems": true
+    },
+    "related_features": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/featureId" },
+      "uniqueItems": true,
+      "description": "Features that tend to change together or depend on this one."
+    },
+    "source_mappings": {
+      "$ref": "common.schema.json#/$defs/sourceMappingList",
+      "description": "Primary hook for PR impact analysis: changed file -> feature -> everything below it."
+    },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Code owners / teams to notify when this feature breaks."
+    },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,297 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://webtestagent.local/schemas/abm/0.2/common.schema.json",
+  "title": "ABG common definitions",
+  "description": "Shared building blocks for the Application Behavior Graph (ABG) v0.1. Nothing in this file carries application semantics; it only standardises identity, provenance and cross-entity references.",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "description": "Opaque entity identifier. Prefixed ids are the convention: app_, feature_, state_, element_, cap_, transition_, api_, journey_, obs_."
+    },
+    "appId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^app[-_][A-Za-z0-9._:-]+$"
+    },
+    "featureId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^feature[-_][A-Za-z0-9._:-]+$"
+    },
+    "stateId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^state[-_][A-Za-z0-9._:-]+$"
+    },
+    "elementId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^element[-_][A-Za-z0-9._:-]+$",
+      "description": "Element ids are globally unique inside one graph even though the element object is embedded in a state, because transitions/assertions reference them directly."
+    },
+    "capabilityId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^cap(?:ability)?[-_][A-Za-z0-9._:-]+$"
+    },
+    "transitionId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^transition[-_][A-Za-z0-9._:-]+$"
+    },
+    "apiId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^api[-_][A-Za-z0-9._:-]+$"
+    },
+    "journeyId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^journey[-_][A-Za-z0-9._:-]+$"
+    },
+    "observationId": {
+      "type": "string",
+      "$ref": "#/$defs/id",
+      "pattern": "^obs(?:ervation)?[-_][A-Za-z0-9._:-]+$"
+    },
+    "stateIdOrWildcard": {
+      "oneOf": [
+        { "$ref": "#/$defs/stateId" },
+        {
+          "type": "string",
+          "const": "*",
+          "description": "Wildcard: any state. Allowed for from_state only; to_state must be concrete so the graph stays deterministic."
+        }
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp, e.g. 2026-09-16T10:15:00Z."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "How strongly the producer believes this graph object matches reality. 1.0 = executed and verified, 0.5 = plausibly inferred from static evidence."
+    },
+    "tagList": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "description": "Free-form labels. Keep them lowercase and dash-separated."
+    },
+    "sourceMapping": {
+      "type": "object",
+      "description": "Where in the codebase this graph object comes from. This is the hook that makes PR impact analysis possible.",
+      "required": ["file"],
+      "properties": {
+        "file": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Repository-relative POSIX path, e.g. src/checkout/discount.ts."
+        },
+        "symbol": {
+          "type": "string",
+          "description": "Named symbol inside the file: component, function, hook, class or route id."
+        },
+        "lines": {
+          "type": "object",
+          "required": ["start"],
+          "properties": {
+            "start": { "type": "integer", "minimum": 1 },
+            "end": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["component", "hook", "function", "class", "module", "route", "api", "state_store", "style", "test", "config", "schema", "other"]
+        },
+        "note": { "type": "string" },
+        "commit": {
+          "type": "string",
+          "description": "Commit the lines refer to, when it differs from the application version."
+        }
+      },
+      "additionalProperties": false
+    },
+    "sourceMappingRef": {
+      "description": "Either the short form (a bare path string) or the full object.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "$ref": "#/$defs/sourceMapping" }
+      ]
+    },
+    "sourceMappingList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sourceMappingRef" },
+      "uniqueItems": true
+    },
+    "evidenceRef": {
+      "description": "A pointer to a raw Observation. The short form is the observation id.",
+      "oneOf": [
+        { "$ref": "#/$defs/observationId" },
+        {
+          "type": "object",
+          "required": ["observation"],
+          "properties": {
+            "observation": { "$ref": "#/$defs/observationId" },
+            "role": {
+              "type": "string",
+              "enum": ["identity", "element", "action", "effect", "api", "detection", "counterexample", "unknown"],
+              "description": "What this observation is evidence *for*."
+            },
+            "note": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "evidenceList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidenceRef" },
+      "uniqueItems": true
+    },
+    "argumentValueSpec": {
+      "description": "Lightweight type description. Short form is a primitive type name, long form adds constraints.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["string", "number", "integer", "boolean", "object", "array", "any"]
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["string", "number", "integer", "boolean", "object", "array", "any"]
+            },
+            "description": { "type": "string" },
+            "required": { "type": "boolean", "default": false },
+            "format": { "type": "string", "description": "Hint for test data generation: email, url, uuid, date, currency, phone." },
+            "enum": { "type": "array", "description": "Allowed values, when finite." },
+            "minimum": { "type": "number" },
+            "maximum": { "type": "number" },
+            "pattern": { "type": "string" },
+            "default": {},
+            "example": {}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "argumentMap": {
+      "type": "object",
+      "description": "Named arguments. Values are argumentValueSpec, not JSON Schema.",
+      "additionalProperties": { "$ref": "#/$defs/argumentValueSpec" }
+    },
+    "precondition": {
+      "description": "Something that must already be true. Short form is a tag or graph id (state_x, journey_y, user_authenticated).",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["description"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "description": { "type": "string", "minLength": 1 },
+            "kind": {
+              "type": "string",
+              "enum": ["auth", "data", "config", "state", "journey", "environment", "custom"]
+            },
+            "state": { "$ref": "#/$defs/stateId" },
+            "journey": { "$ref": "#/$defs/journeyId" },
+            "capability": { "$ref": "#/$defs/capabilityId" },
+            "arguments": { "type": "object", "additionalProperties": true },
+            "expression": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "preconditionList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/precondition" }
+    },
+    "assertion": {
+      "description": "A checkable statement. Short form is a well-known assertion name such as discount_applied.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "id": { "$ref": "#/$defs/id" },
+            "type": {
+              "type": "string",
+              "enum": ["state", "url", "element_state", "element_value", "value", "api", "effect", "message", "absence", "custom"],
+              "description": "state: current state is X. url: route matches. element_state: visible/enabled/... element_value: what an element shows. value: semantic value such as order.total. api: an expected request/response. effect: expected effect. message: expected user-facing message. absence: something must NOT happen."
+            },
+            "description": { "type": "string" },
+            "target": { "type": "string", "description": "Semantic path (order.total), element id, route, message selector, ..." },
+            "operator": {
+              "type": "string",
+              "enum": ["equals", "not_equals", "matches", "contains", "not_contains", "greater_than", "less_than", "one_of", "exists", "not_exists", "truthy", "falsy"]
+            },
+            "expected": {},
+            "state": { "$ref": "#/$defs/stateId" },
+            "element": { "$ref": "#/$defs/elementId" },
+            "api": { "$ref": "#/$defs/apiId" },
+            "transition": { "$ref": "#/$defs/transitionId" },
+            "severity": {
+              "type": "string",
+              "enum": ["assert", "warn", "info"],
+              "default": "assert"
+            },
+            "expression": { "type": "string", "description": "Escape hatch for a function/script-level check." }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "assertionList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/assertion" }
+    },
+    "versionInfo": {
+      "type": "object",
+      "description": "Which version of the application this graph describes. Drives PR impact analysis and staleness detection.",
+      "properties": {
+        "commit": { "type": "string" },
+        "branch": { "type": "string" },
+        "tag": { "type": "string" },
+        "environment": {
+          "type": "string",
+          "examples": ["local", "dev", "ci", "staging", "preview", "production"]
+        },
+        "app_version": { "type": "string", "description": "Product version string, when the build exposes one." },
+        "dirty": { "type": "boolean", "description": "True when built from an uncommitted working tree." }
+      },
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Provenance and bookkeeping only. Never application semantics.",
+      "properties": {
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "inferred", "verified", "stale", "deprecated"],
+          "default": "draft"
+        },
+        "producer": { "type": "string", "description": "manual | llm:<model> | importer:<tool> | playwright" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "last_verified": { "$ref": "#/$defs/timestamp" },
+        "tags": { "$ref": "#/$defs/tagList" },
+        "notes": { "type": "string" },
+        "extra": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    }
+  }
+}

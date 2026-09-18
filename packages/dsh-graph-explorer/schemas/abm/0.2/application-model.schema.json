@@ -1,0 +1,187 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://webtestagent.local/schemas/abm/0.2/application-model.schema.json",
+  "title": "Application Behavior Model",
+  "description": "Root document for the Application Behavior Model, schema 0.2. Where the 0.1 graph records what was done, this document states what the application DOES: behaviours, the states they move between, and the actors they are available to. Entities live in top-level arrays and reference each other by id. Elements are embedded inside states, and the interactions that were never performed are recorded as state.affordances[] rather than omitted - an absence is not a finding, and a model that only contains what was walked cannot report what was possible.",
+  "type": "object",
+  "required": ["schema_version", "application"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^0\\.2(?:\\.[0-9]+)?$",
+      "description": "Version of the ABM schema this document conforms to. Deliberately not 0.1: a reader must never be able to mistake a behaviour model for a walk record, because the two answer different questions and would validate against the same shape."
+    },
+    "generated_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "generator": {
+      "type": "object",
+      "description": "What produced this file.",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "command": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "application": { "$ref": "application.schema.json" },
+    "entities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entity" },
+      "default": [],
+      "description": "The things the application moves between states: session, project, cart. An entity is what makes a transition's effects meaningful - without it, 'storage_changed on localStorage.acme-demo-state' is a fact about a key, not about a session."
+    },
+    "state_variables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stateVariable" },
+      "default": [],
+      "description": "The facts that discriminate between sibling states. Every state.identity.dimensions key must be declared here, with a detection that reads an element or a route, so that 'these two states are different' is always backed by something observable."
+    },
+    "states": {
+      "type": "array",
+      "items": { "$ref": "state.schema.json" },
+      "default": []
+    },
+    "behaviors": {
+      "type": "array",
+      "items": { "$ref": "behavior.schema.json" },
+      "default": [],
+      "description": "What an actor can do, in domain terms. One entry per user-meaningful action, however many DOM steps it takes."
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "transition.schema.json" },
+      "default": [],
+      "description": "The behaviour graph's edges: one entry per (from_state, behavior, to_state). A set, not a walk - order and purpose live in journeys[].steps[]."
+    },
+    "apis": {
+      "type": "array",
+      "items": { "$ref": "api.schema.json" },
+      "default": []
+    },
+    "journeys": {
+      "type": "array",
+      "items": { "$ref": "journey.schema.json" },
+      "default": [],
+      "description": "Ordered walks over transitions that reach a goal. The model does not require an actor to have asked for one: a run with no stated goal still produces a journey, with goal_stated false, so the order and evidence of what was done are never lost."
+    },
+    "observations": {
+      "type": "array",
+      "items": { "$ref": "observation.schema.json" },
+      "default": [],
+      "description": "Raw evidence index. May be kept in a sibling file (e.g. *.observations.json) once it grows large; the file split is not part of the schema."
+    },
+    "coverage": {
+      "type": "object",
+      "description": "Optional snapshot of what the model covers at application.version. Useful for spotting unmodelled areas between runs.",
+      "properties": {
+        "visited_routes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "unmodelled_routes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal issues recorded at generation time: dangling ids, low-confidence objects, ambiguous states.",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "description": "A semantic thing the application holds and moves between states.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Semantic noun: session, project, cart. This is the name transitions[].effects[].target paths are expected to belong to."
+        },
+        "description": { "type": "string" },
+        "reads": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Elements or surfaces this entity is read from."
+        },
+        "writes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Where this entity is persisted, as a semantic path or a storage key (localStorage.acme-demo-state)."
+        },
+        "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+        "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+        "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+      },
+      "additionalProperties": false
+    },
+    "stateVariable": {
+      "type": "object",
+      "description": "A fact that separates sibling states which share route, page_type and variant.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Must match a key used in some state.identity.dimensions."
+        },
+        "description": { "type": "string" },
+        "type": { "$ref": "common.schema.json#/$defs/argumentValueSpec" },
+        "values": {
+          "type": "array",
+          "items": { "type": ["string", "number", "boolean", "null"] },
+          "description": "Finite domain of the dimension, when it is finite: [empty, populated]. Naming the domain is what lets a test generator enumerate the sibling states instead of only reproducing the one that was walked."
+        },
+        "dimension_of": {
+          "type": "array",
+          "items": { "$ref": "common.schema.json#/$defs/stateId" },
+          "uniqueItems": true,
+          "description": "States whose identity.dimensions carries this variable."
+        },
+        "detection": { "$ref": "#/$defs/stateVariableDetection" },
+        "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+        "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+        "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+      },
+      "additionalProperties": false
+    },
+    "stateVariableDetection": {
+      "type": "object",
+      "description": "How a test reads this variable. A detection must read an element or a route: a dimension nothing observable reports is not a distinction a test can make, and therefore not a distinction the model is entitled to draw.",
+      "required": ["type", "expected"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["value", "element_present", "element_absent", "text", "route"]
+        },
+        "element": {
+          "$ref": "common.schema.json#/$defs/elementId",
+          "description": "Element the detection reads. Required for every type except route."
+        },
+        "route": {
+          "type": "string",
+          "description": "Route the detection reads. Required for type route."
+        },
+        "operator": {
+          "type": "string",
+          "enum": ["equals", "not_equals", "contains", "matches", "greater_than", "less_than", "present", "absent"],
+          "default": "equals"
+        },
+        "expected": {
+          "type": ["string", "number", "boolean", "null"],
+          "description": "The observed value, recorded as observed. Use a semantic word such as populated or empty when the underlying value is incidental."
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "route" } }, "required": ["type"] },
+          "then": { "required": ["route"] },
+          "else": { "required": ["element"] }
+        }
+      ]
+    }
+  }
+}

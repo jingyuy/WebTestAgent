@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/capability.schema.json",
+  "title": "Capability",
+  "description": "A behaviour the application offers, expressed in domain terms ('apply_coupon') rather than DOM terms ('click button #apply'). The layer that lets an agent reason about intent, and the layer a test writes against.",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/capabilityId" },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Stable snake_case verb phrase: login, logout, search_product, add_product_to_cart, remove_product_from_cart, apply_coupon, submit_order, change_shipping_address."
+    },
+    "description": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": ["interaction", "navigation", "query", "setup", "composite"],
+      "default": "interaction",
+      "description": "query reads state, setup prepares state (login, seed data), composite is a capability built from other capabilities."
+    },
+    "input": { "$ref": "common.schema.json#/$defs/argumentMap" },
+    "output": { "$ref": "common.schema.json#/$defs/argumentMap" },
+    "preconditions": { "$ref": "common.schema.json#/$defs/preconditionList" },
+    "assertions": {
+      "$ref": "common.schema.json#/$defs/assertionList",
+      "description": "Postconditions that should hold once the capability succeeded."
+    },
+    "element": {
+      "$ref": "common.schema.json#/$defs/elementId",
+      "description": "Shorthand for a single-element capability. Equivalent to one step."
+    },
+    "steps": {
+      "type": "array",
+      "description": "How to realise the capability in the UI. Ordered, deterministic. Values may reference input parameters with {{param}} placeholders. Optional in v0.1: inferred from transitions when absent.",
+      "items": { "$ref": "#/$defs/capabilityStep" }
+    },
+    "composed_of": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/capabilityId" },
+      "uniqueItems": true,
+      "description": "For kind=composite: the capabilities this one is built from, in order."
+    },
+    "aliases": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Alternative names seen in the UI or in analytics events."
+    },
+    "source_mappings": { "$ref": "common.schema.json#/$defs/sourceMappingList" },
+    "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "capabilityStep": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["goto", "click", "dblclick", "fill", "type", "press", "clear", "select_option", "check", "uncheck", "hover", "focus", "blur", "drag", "drop", "upload", "wait", "wait_for", "assert"]
+        },
+        "element": {
+          "$ref": "common.schema.json#/$defs/elementId",
+          "description": "Target element. Optional for goto/wait."
+        },
+        "value": {
+          "type": "string",
+          "description": "Literal value or \"{{param}}\" template bound to an input parameter."
+        },
+        "arguments": {
+          "type": "object",
+          "description": "Action-specific options, e.g. {option: 'express'} for select_option.",
+          "additionalProperties": true
+        },
+        "optional": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when the step may legitimately be skipped (dismissible banner, cookie notice)."
+        },
+        "description": { "type": "string" },
+        "timeout_ms": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/journey.schema.json",
+  "title": "Journey",
+  "description": "A user goal expressed as an ordered walk through transitions, plus the assertions that prove the goal was reached. The bridge between the graph and a generated integration test.",
+  "type": "object",
+  "required": ["id", "name", "transitions"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/journeyId" },
+    "name": { "type": "string", "minLength": 1 },
+    "goal": {
+      "type": "string",
+      "description": "Business outcome in one sentence: 'Complete a purchase using a valid coupon'."
+    },
+    "description": { "type": "string" },
+    "actor": {
+      "type": "string",
+      "description": "Role the journey is exercised as. Should match an application.actors[].id when listed."
+    },
+    "start_state": {
+      "$ref": "common.schema.json#/$defs/stateId",
+      "description": "State the journey assumes as a starting point. Derived from the first transition when omitted."
+    },
+    "preconditions": { "$ref": "common.schema.json#/$defs/preconditionList" },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "common.schema.json#/$defs/transitionId" },
+      "minItems": 1,
+      "description": "Ordered transitions. Together they must form a connected walk from start_state to the goal state."
+    },
+    "assertions": {
+      "$ref": "common.schema.json#/$defs/assertionList",
+      "description": "What must be true for the journey to count as passed."
+    },
+    "criticality": {
+      "type": "string",
+      "enum": ["smoke", "critical", "standard", "extended"],
+      "default": "standard",
+      "description": "Test selection hint: smoke/critical run on every PR, extended runs nightly."
+    },
+    "variants": {
+      "type": "array",
+      "description": "Named data variations of the same journey (valid coupon, expired coupon, coupon over threshold).",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "argument_overrides": {
+            "type": "object",
+            "description": "Transition id -> concrete argument values for this variant.",
+            "additionalProperties": { "type": "object", "additionalProperties": true }
+          },
+          "expected": {
+            "type": "string",
+            "description": "Expected outcome for this variant: a state id (state_checkout), an error code, or a message. Free-form on purpose, because a rejected variant ends somewhere the graph may not model yet."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "source_mappings": { "$ref": "common.schema.json#/$defs/sourceMappingList" },
+    "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false
+}

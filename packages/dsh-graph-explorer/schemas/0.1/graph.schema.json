@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/graph.schema.json",
+  "title": "Application Behavior Graph",
+  "description": "Root document for ABG v0.1. Entities live in top-level arrays and reference each other by id, so the graph stays queryable and diffable as it grows. Elements are embedded inside states. Observations are attached as evidence, not mixed into semantics.",
+  "type": "object",
+  "required": ["schema_version", "application"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^0\\.1(?:\\.[0-9]+)?$",
+      "description": "Version of the ABG schema this document conforms to."
+    },
+    "generated_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "generator": {
+      "type": "object",
+      "description": "What produced this file.",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "command": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "application": { "$ref": "application.schema.json" },
+    "features": {
+      "type": "array",
+      "items": { "$ref": "feature.schema.json" },
+      "default": []
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "$ref": "capability.schema.json" },
+      "default": []
+    },
+    "states": {
+      "type": "array",
+      "items": { "$ref": "state.schema.json" },
+      "default": []
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "transition.schema.json" },
+      "default": []
+    },
+    "apis": {
+      "type": "array",
+      "items": { "$ref": "api.schema.json" },
+      "default": []
+    },
+    "journeys": {
+      "type": "array",
+      "items": { "$ref": "journey.schema.json" },
+      "default": []
+    },
+    "observations": {
+      "type": "array",
+      "items": { "$ref": "observation.schema.json" },
+      "default": [],
+      "description": "Raw evidence index. May be kept in a sibling file (e.g. *.observations.json) once it grows large; the file split is not part of the schema."
+    },
+    "coverage": {
+      "type": "object",
+      "description": "Optional snapshot of what the graph covers at application.version. Useful for spotting unmodelled areas between runs.",
+      "properties": {
+        "visited_routes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "unmodelled_routes": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal issues recorded at generation time: dangling ids, low-confidence objects, ambiguous states.",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": false
+}

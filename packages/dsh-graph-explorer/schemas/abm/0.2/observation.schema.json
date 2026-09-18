@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://webtestagent.local/schemas/abm/0.2/observation.schema.json",
+  "title": "Observation",
+  "description": "Raw evidence captured by Playwright (or another collector). Deliberately NOT part of the semantic graph: reality -> observation -> interpretation -> graph. Observations are immutable; the graph is derived from them and can be rebuilt.",
+  "type": "object",
+  "required": ["id", "type", "timestamp"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/observationId" },
+    "type": {
+      "type": "string",
+      "enum": ["browser_state", "action", "network_trace", "console", "screenshot", "dom_snapshot", "accessibility_tree", "recording", "custom"],
+      "description": "Kind of evidence. Composite observations (browser_state) normally carry several payload fields at once."
+    },
+    "timestamp": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "url": { "type": "string", "description": "Full URL at capture time, including query and hash." },
+    "title": { "type": "string" },
+    "state": {
+      "$ref": "common.schema.json#/$defs/stateId",
+      "description": "State this observation was used to justify, if any."
+    },
+    "transition": {
+      "$ref": "common.schema.json#/$defs/transitionId",
+      "description": "Transition this observation documents, if any."
+    },
+    "parent": {
+      "$ref": "common.schema.json#/$defs/observationId",
+      "description": "The observation this was captured after, giving a temporal ordering without a session object."
+    },
+    "action": {
+      "type": "object",
+      "description": "The interaction that was executed, for type=action.",
+      "properties": {
+        "behavior": { "$ref": "behavior.schema.json#/$defs/behaviorId" },
+        "element": { "$ref": "common.schema.json#/$defs/elementId" },
+        "raw": { "type": "string", "description": "Low-level action as executed, e.g. 'click role=button[name=\"Apply\"]'." },
+        "arguments": { "type": "object", "additionalProperties": true },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "success": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "accessibility_tree": {
+      "type": "string",
+      "description": "Serialised AX snapshot, or a path to an artifact file. Prefer a path for large payloads."
+    },
+    "screenshot": { "type": "string", "description": "Artifact path, e.g. artifacts/obs_001.png." },
+    "dom_snapshot": { "type": "string", "description": "Artifact path to the HTML snapshot." },
+    "text_content": { "type": "string", "description": "Visible text extract, useful when the AX tree is unavailable." },
+    "console": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["level", "text"],
+        "properties": {
+          "level": { "type": "string", "enum": ["log", "info", "debug", "warn", "error"] },
+          "text": { "type": "string" },
+          "timestamp": { "$ref": "common.schema.json#/$defs/timestamp" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "page_errors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Uncaught exceptions / failed requests surfaced as page errors."
+    },
+    "network": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/networkEntry" }
+    },
+    "viewport": {
+      "type": "object",
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "device_scale_factor": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "browser": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "examples": ["chromium", "firefox", "webkit"] },
+        "version": { "type": "string" },
+        "user_agent": { "type": "string" },
+        "locale": { "type": "string" },
+        "timezone": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "collector": {
+      "type": "object",
+      "properties": {
+        "tool": { "type": "string", "examples": ["playwright", "chrome-devtools", "manual"] },
+        "tool_version": { "type": "string" },
+        "artifacts_dir": { "type": "string" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "run_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "commit": { "type": "string" },
+        "environment": { "type": "string" },
+        "base_url": { "type": "string", "format": "uri" }
+      },
+      "additionalProperties": false
+    },
+    "artifacts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Other artifact paths produced with this observation (video, trace.zip, har)."
+    },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "networkEntry": {
+      "type": "object",
+      "description": "One request/response pair. Bodies are referenced, not inlined.",
+      "required": ["method", "url"],
+      "properties": {
+        "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] },
+        "url": { "type": "string" },
+        "status": { "type": "integer", "minimum": 0, "maximum": 599 },
+        "resource_type": { "type": "string", "examples": ["document", "xhr", "fetch", "script", "stylesheet", "image"] },
+        "api": { "$ref": "common.schema.json#/$defs/apiId" },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "request_body_ref": { "type": "string" },
+        "response_body_ref": { "type": "string" },
+        "failed": { "type": "boolean" },
+        "failure_reason": { "type": "string" },
+        "timestamp": { "$ref": "common.schema.json#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

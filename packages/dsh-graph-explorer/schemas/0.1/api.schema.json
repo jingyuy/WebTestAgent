@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/api.schema.json",
+  "title": "API operation",
+  "description": "A backend operation the UI depends on. Connects UI behaviour to application behaviour and gives tests a stable, non-DOM observable.",
+  "type": "object",
+  "required": ["id", "method", "path"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/apiId" },
+    "method": {
+      "type": "string",
+      "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path or path template, e.g. /api/coupon or /api/orders/:id. No host."
+    },
+    "operation": {
+      "type": "string",
+      "description": "Semantic operation name from the API schema: applyCoupon, getCart, createOrder."
+    },
+    "description": { "type": "string" },
+    "auth": {
+      "type": "string",
+      "enum": ["none", "session", "bearer", "api_key", "oauth2", "unknown"],
+      "default": "unknown"
+    },
+    "request": {
+      "type": "object",
+      "properties": {
+        "query": { "$ref": "common.schema.json#/$defs/argumentMap" },
+        "body": { "$ref": "common.schema.json#/$defs/argumentMap" },
+        "headers": { "$ref": "common.schema.json#/$defs/argumentMap" },
+        "content_type": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "response": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "description": "Expected success status, or the set of statuses the UI handles.",
+          "oneOf": [
+            { "type": "integer", "minimum": 100, "maximum": 599 },
+            { "type": "array", "items": { "type": "integer", "minimum": 100, "maximum": 599 }, "minItems": 1, "uniqueItems": true }
+          ]
+        },
+        "body": { "$ref": "common.schema.json#/$defs/argumentMap" }
+      },
+      "additionalProperties": false
+    },
+    "effect": {
+      "type": "string",
+      "description": "Server-side effect in semantic terms: creates order, invalidates cart cache, sends email."
+    },
+    "idempotent": { "type": "boolean" },
+    "source_mappings": { "$ref": "common.schema.json#/$defs/sourceMappingList" },
+    "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false
+}

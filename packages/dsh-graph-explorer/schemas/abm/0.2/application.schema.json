@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://webtestagent.local/schemas/abm/0.2/application.schema.json",
+  "title": "Application",
+  "description": "Which application, at which version, the model was derived from. Actors are required rather than optional: an actor vocabulary is a property of the application, so a model that cannot name who it is describing has not finished describing it.",
+  "type": "object",
+  "required": ["id", "name", "actors"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/appId" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "base_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Entry point for the crawler/agent, e.g. https://example.com"
+    },
+    "repository": {
+      "type": "object",
+      "description": "Code repository that source_mappings paths are relative to.",
+      "properties": {
+        "name": { "type": "string" },
+        "url": { "type": "string", "format": "uri" },
+        "default_branch": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "version": {
+      "description": "Either a free-form string (git:abc123) or a structured descriptor.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "$ref": "common.schema.json#/$defs/versionInfo" }
+      ]
+    },
+    "actors": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Roles the application can be exercised as. Referenced by id from state.identity.variant and journey.actor; the id is the join, so both sides must name one of these.",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "description": { "type": "string" },
+          "credentials_ref": {
+            "type": "string",
+            "description": "Name of a secret/credential entry. Never store raw credentials in the graph."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "environments": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "base_url": { "type": "string", "format": "uri" },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "description": "Optional map of environment name -> base url, when the graph is reused across environments."
+    },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false
+}

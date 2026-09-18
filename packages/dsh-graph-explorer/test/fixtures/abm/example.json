@@ -1,0 +1,433 @@
+{
+  "schema_version": "0.2",
+  "generated_at": "2026-09-18T10:15:00Z",
+  "generator": {
+    "name": "dsh-graph-explorer",
+    "version": "0.1.23",
+    "command": "graph_commit",
+    "notes": "Hand-written target shape for ABM 0.2. This is the document docs/abm-pivot.md §3 describes, with the comment elisions resolved into real objects, so §3 can be validated instead of read."
+  },
+  "application": {
+    "id": "app_acme-demo",
+    "name": "Acme Demo App",
+    "base_url": "http://127.0.0.1:4173/",
+    "actors": [
+      { "id": "anonymous", "description": "Not signed in. The state the application starts in." },
+      {
+        "id": "authenticated",
+        "description": "Signed in as the demo user.",
+        "credentials_ref": "TEST_USER"
+      }
+    ]
+  },
+  "entities": [
+    {
+      "name": "session",
+      "description": "An authenticated session.",
+      "reads": ["element_email_input", "element_password_input"],
+      "writes": ["localStorage.acme-demo-state"],
+      "evidence": [{ "observation": "obs_0004", "role": "effect" }]
+    },
+    {
+      "name": "project",
+      "description": "A unit of work owned by a user.",
+      "reads": ["element_project_list", "element_project_name_input"],
+      "writes": ["element_project_list"],
+      "evidence": [{ "observation": "obs_0004", "role": "identity" }]
+    }
+  ],
+  "state_variables": [
+    {
+      "name": "projects",
+      "description": "How many projects the signed-in user owns.",
+      "type": "string",
+      "values": ["empty", "populated"],
+      "dimension_of": ["state_project_list_authenticated_projects_populated"],
+      "detection": {
+        "type": "value",
+        "element": "element_project_list",
+        "operator": "equals",
+        "expected": "populated"
+      },
+      "evidence": [{ "observation": "obs_0004", "role": "effect" }]
+    }
+  ],
+  "states": [
+    {
+      "id": "state_login_anonymous",
+      "identity": {
+        "route": "/",
+        "page_type": "login",
+        "variant": "anonymous"
+      },
+      "kind": "page",
+      "description": "The sign-in form, seen by someone who is not signed in.",
+      "elements": [
+        {
+          "id": "element_email_input",
+          "role": "textbox",
+          "name": "Email",
+          "semantic": { "purpose": "email", "data_subject": "session.email" },
+          "kind": "input",
+          "locator": { "strategy": "label", "value": "Email" },
+          "actions": ["fill", "type", "clear", "focus", "read"],
+          "value_domain": { "type": "string", "format": "email", "required": true },
+          "region": "main",
+          "evidence": [{ "observation": "obs_0001", "role": "identity" }]
+        },
+        {
+          "id": "element_password_input",
+          "role": "textbox",
+          "name": "Password",
+          "semantic": { "purpose": "password", "data_subject": "session.password" },
+          "kind": "input",
+          "locator": { "strategy": "label", "value": "Password" },
+          "actions": ["fill", "type", "clear", "read"],
+          "value_domain": { "type": "string", "format": "password", "required": true },
+          "region": "main",
+          "evidence": [{ "observation": "obs_0001", "role": "identity" }]
+        },
+        {
+          "id": "element_remember_checkbox",
+          "role": "checkbox",
+          "name": "Remember me",
+          "semantic": { "purpose": "remember_me" },
+          "kind": "control",
+          "locator": { "strategy": "role", "value": "checkbox", "name": "Remember me" },
+          "actions": ["check", "uncheck", "read"],
+          "region": "main",
+          "evidence": [{ "observation": "obs_0001", "role": "identity" }]
+        },
+        {
+          "id": "element_login_button",
+          "role": "button",
+          "name": "Sign in",
+          "semantic": { "purpose": "sign_in" },
+          "kind": "control",
+          "locator": { "strategy": "role", "value": "button", "name": "Sign in" },
+          "actions": ["click"],
+          "region": "main",
+          "evidence": [{ "observation": "obs_0001", "role": "identity" }]
+        },
+        {
+          "id": "element_forgot_password_link",
+          "role": "link",
+          "name": "Forgot password?",
+          "semantic": { "purpose": "forgot_password" },
+          "kind": "navigation",
+          "locator": { "strategy": "text", "value": "Forgot password?" },
+          "actions": ["click"],
+          "region": "main",
+          "evidence": [{ "observation": "obs_0001", "role": "element" }]
+        }
+      ],
+      "detection": [
+        { "type": "element_state", "element": "element_login_button", "operator": "exists" },
+        { "type": "element_state", "element": "element_project_list", "operator": "not_exists" }
+      ],
+      "affordances": [
+        {
+          "element": "element_forgot_password_link",
+          "expected_behavior": "reset_password",
+          "description": "Offered on the sign-in form and never taken by this run.",
+          "evidence": [{ "observation": "obs_0001", "role": "element" }],
+          "metadata": { "confidence": 0.3, "producer": "llm:deepseek-flash" }
+        }
+      ],
+      "evidence": [{ "observation": "obs_0001", "role": "identity" }],
+      "metadata": { "confidence": 1, "status": "verified" }
+    },
+    {
+      "id": "state_project_list_authenticated_projects_populated",
+      "identity": {
+        "route": "/",
+        "page_type": "project_list",
+        "variant": "authenticated",
+        "dimensions": { "projects": "populated" }
+      },
+      "kind": "page",
+      "description": "The signed-in user's project list, with at least one project.",
+      "elements": [
+        {
+          "id": "element_nav_projects",
+          "role": "link",
+          "name": "Projects",
+          "semantic": { "purpose": "nav_projects" },
+          "kind": "navigation",
+          "locator": { "strategy": "role", "value": "link", "name": "Projects" },
+          "actions": ["click"],
+          "region": "nav",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }]
+        },
+        {
+          "id": "element_nav_settings",
+          "role": "link",
+          "name": "Settings",
+          "semantic": { "purpose": "nav_settings" },
+          "kind": "navigation",
+          "locator": { "strategy": "role", "value": "link", "name": "Settings" },
+          "actions": ["click"],
+          "region": "nav",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }]
+        },
+        {
+          "id": "element_current_user",
+          "role": "text",
+          "name": "test@example.com",
+          "semantic": { "purpose": "current_user" },
+          "kind": "display",
+          "actions": ["read"],
+          "current_value": "test@example.com",
+          "region": "header",
+          "evidence": [{ "observation": "obs_0004", "role": "effect" }]
+        },
+        {
+          "id": "element_logout_button",
+          "role": "button",
+          "name": "Log out",
+          "semantic": { "purpose": "log_out" },
+          "kind": "control",
+          "locator": { "strategy": "role", "value": "button", "name": "Log out" },
+          "actions": ["click"],
+          "region": "header",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }]
+        },
+        {
+          "id": "element_project_name_input",
+          "role": "textbox",
+          "name": "New project name",
+          "semantic": { "purpose": "project_name", "data_subject": "project.name" },
+          "kind": "input",
+          "locator": { "strategy": "label", "value": "New project name" },
+          "actions": ["fill", "type", "clear", "read"],
+          "value_domain": { "type": "string" },
+          "region": "main",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }]
+        },
+        {
+          "id": "element_add_project_button",
+          "role": "button",
+          "name": "Add project",
+          "semantic": { "purpose": "add_project" },
+          "kind": "control",
+          "locator": { "strategy": "role", "value": "button", "name": "Add project" },
+          "actions": ["click"],
+          "region": "main",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }]
+        },
+        {
+          "id": "element_project_list",
+          "role": "list",
+          "name": "Project list",
+          "semantic": { "purpose": "project_list", "data_subject": "project.list" },
+          "kind": "collection",
+          "actions": ["read"],
+          "region": "main",
+          "evidence": [{ "observation": "obs_0004", "role": "identity" }]
+        }
+      ],
+      "detection": [
+        { "type": "element_state", "element": "element_project_list", "operator": "exists" },
+        { "type": "value", "target": "projects", "operator": "equals", "expected": "populated" }
+      ],
+      "affordances": [
+        {
+          "element": "element_nav_projects",
+          "expected_behavior": "list_projects",
+          "description": "Present in the reading, in no committed realization step.",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }],
+          "metadata": { "confidence": 0.3 }
+        },
+        {
+          "element": "element_nav_settings",
+          "expected_behavior": "open_settings",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }],
+          "metadata": { "confidence": 0.3 }
+        },
+        {
+          "element": "element_logout_button",
+          "expected_behavior": "sign_out",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }],
+          "metadata": { "confidence": 0.3 }
+        },
+        {
+          "element": "element_add_project_button",
+          "expected_behavior": "create_project",
+          "evidence": [{ "observation": "obs_0004", "role": "element" }],
+          "metadata": { "confidence": 0.3 }
+        }
+      ],
+      "evidence": [{ "observation": "obs_0004", "role": "identity" }],
+      "metadata": { "confidence": 1, "status": "verified" }
+    }
+  ],
+  "behaviors": [
+    {
+      "id": "behavior_login",
+      "name": "login",
+      "description": "Sign in with an existing account and land on the project list.",
+      "kind": "interaction",
+      "actor": "anonymous",
+      "input": {
+        "email": { "type": "string", "required": true, "format": "email" },
+        "password": { "type": "string", "required": true, "format": "password" }
+      },
+      "output": {
+        "session": { "type": "object", "description": "The session the login produced." }
+      },
+      "realization": [
+        {
+          "action": "fill",
+          "element": "element_email_input",
+          "value": "{{email}}",
+          "purpose": "enter_credentials",
+          "effects": [
+            {
+              "type": "value_changed",
+              "target": "element_email_input",
+              "to": "test@example.com",
+              "observed": true
+            }
+          ]
+        },
+        {
+          "action": "fill",
+          "element": "element_password_input",
+          "value": "{{password}}",
+          "purpose": "enter_credentials",
+          "effects": [
+            {
+              "type": "value_changed",
+              "target": "element_password_input",
+              "to": "[set]",
+              "observed": true
+            }
+          ]
+        },
+        {
+          "action": "click",
+          "element": "element_login_button",
+          "purpose": "submit"
+        }
+      ],
+      "composed_of": [],
+      "evidence": [
+        { "observation": "obs_0002", "role": "action" },
+        { "observation": "obs_0003", "role": "action" },
+        { "observation": "obs_0004", "role": "effect" }
+      ],
+      "metadata": { "confidence": 0.9, "status": "verified", "producer": "llm:deepseek-flash" }
+    }
+  ],
+  "transitions": [
+    {
+      "id": "transition_login",
+      "name": "Sign in",
+      "from_state": "state_login_anonymous",
+      "behavior": "behavior_login",
+      "to_state": "state_project_list_authenticated_projects_populated",
+      "arguments": { "email": "test@example.com", "password": "[set]" },
+      "guard": "the login form accepted the credentials",
+      "effects": [
+        {
+          "type": "state_entered",
+          "to": "state_project_list_authenticated_projects_populated",
+          "observed": true
+        },
+        {
+          "type": "storage_changed",
+          "target": "localStorage.acme-demo-state",
+          "observed": true
+        }
+      ],
+      "apis": [],
+      "evidence": [
+        { "observation": "obs_0001", "role": "identity" },
+        { "observation": "obs_0003", "role": "action" },
+        { "observation": "obs_0004", "role": "effect" }
+      ],
+      "metadata": { "confidence": 0.9, "status": "verified" }
+    }
+  ],
+  "apis": [],
+  "journeys": [
+    {
+      "id": "journey_login_and_see_projects",
+      "name": "Sign in to Acme and see the projects list",
+      "goal": "Sign in as the demo user and reach the project list",
+      "goal_stated": true,
+      "actor": "authenticated",
+      "start_state": "state_login_anonymous",
+      "steps": [
+        {
+          "transition": "transition_login",
+          "arguments": { "email": "test@example.com" }
+        }
+      ],
+      "assertions": [
+        { "type": "url", "operator": "matches", "expected": "/" },
+        { "type": "element_state", "element": "element_project_list", "operator": "exists" }
+      ],
+      "criticality": "critical",
+      "evidence": [
+        { "observation": "obs_0001", "role": "identity" },
+        { "observation": "obs_0004", "role": "effect" }
+      ],
+      "metadata": { "confidence": 0.9, "status": "verified" }
+    }
+  ],
+  "observations": [
+    {
+      "id": "obs_0001",
+      "type": "browser_state",
+      "timestamp": "2026-09-18T10:14:02Z",
+      "url": "http://127.0.0.1:4173/",
+      "title": "Acme Demo",
+      "state": "state_login_anonymous"
+    },
+    {
+      "id": "obs_0002",
+      "type": "action",
+      "timestamp": "2026-09-18T10:14:05Z",
+      "parent": "obs_0001",
+      "action": {
+        "behavior": "behavior_login",
+        "element": "element_email_input",
+        "raw": "fill label=Email",
+        "arguments": { "value": "test@example.com" },
+        "success": true
+      }
+    },
+    {
+      "id": "obs_0003",
+      "type": "action",
+      "timestamp": "2026-09-18T10:14:06Z",
+      "parent": "obs_0002",
+      "action": {
+        "behavior": "behavior_login",
+        "element": "element_password_input",
+        "raw": "fill label=Password",
+        "arguments": { "value": "[set]" },
+        "success": true
+      }
+    },
+    {
+      "id": "obs_0004",
+      "type": "browser_state",
+      "timestamp": "2026-09-18T10:14:08Z",
+      "url": "http://127.0.0.1:4173/",
+      "title": "Acme Demo",
+      "state": "state_project_list_authenticated_projects_populated",
+      "transition": "transition_login",
+      "parent": "obs_0003"
+    }
+  ],
+  "coverage": {
+    "visited_routes": ["/"],
+    "unmodelled_routes": [],
+    "notes": "One route, two surfaces. The five controls the reading offers and the walk does not use are recorded as affordances rather than left out."
+  },
+  "warnings": [
+    "behaviors.sign_out and behaviors.create_project are named by affordances only; no realization was observed."
+  ]
+}

@@ -119,8 +119,8 @@ Three rules, and they are the whole policy:
    hash mismatch rather than as folklore.
 3. **`$id` base changes for the fork** (`https://webtestagent.local/schemas/abm/0.2/…`), because
    a document validated against a local schema should not claim the upstream schema's identity.
-   The `$ref` chain inside `abm/0.2/` is self-contained, so this is a mechanical rewrite of ~11
-   files, done once at vendoring time.
+   The `$ref` chain inside `abm/0.2/` is self-contained, so this is a mechanical rewrite of the
+   10 files, done once at vendoring time.
 
 ### Validation, without costing `npm test` its offline property
 
@@ -134,11 +134,17 @@ So, two layers:
 | Layer | Where | Deps | Runs |
 | --- | --- | --- | --- |
 | **Structural validator** | `lib/validate.js` (new) | none | always, inside `commitRun`, before `ok` is reported — the gap-8 fix |
-| **Full JSON Schema validation** | `scripts/validate.mjs` (new) | `ajv` + `ajv-formats`, **devDependency, opt-in** | `npm run validate:schema <file>`, and in the verification protocol |
+| **Full JSON Schema validation** | `test/prove-schema.mjs` (new) | `ajv` + `ajv-formats`, **devDependency, opt-in** | `npm run prove:schema`, and in the verification protocol |
+
+The two layers are not a subset relation, and 0a measured why. Every `$ref` in the ABM is an id
+*string*, so `transition_nonexistent` validates cleanly: **the schemas cannot check that a
+reference resolves, only that it is spelled like a reference.** `lib/validate.js` is therefore
+the only layer that does references at all, which is a stronger reason for it than gap 8 alone,
+and it is the layer that gets to run inside `commitRun`.
 
 `lib/validate.js` is not a JSON Schema implementation. It checks the things the schemas state
 mechanically **and** the commit is the last chance to catch: every `$ref` id resolves, every
-enum membership (`capability.steps[].action`, `effect.type`, `state.kind`, `metadata.status`),
+enum membership (`behavior.realization[].action`, `effect.type`, `state.kind`, `metadata.status`),
 every required field, and every `pattern`. That is exactly the set the plugin already enforces
 piecemeal in `lib/schema.js` (`DETECTION_TYPES`, `EFFECT_REQUIRED`, `CAPABILITY_NAME_PATTERN`, …)
 — one table, read by both the recording tools and the commit, is the `CONTROL_ROLES` precedent
@@ -146,10 +152,10 @@ applied to validation.
 
 **Recommended, stated as a tradeoff:** `ajv` as a devDependency is the honest way to validate
 against the real schemas, and `npm test` staying dependency-free is preserved by keeping
-`npm run validate:schema` a separate, opt-in script. If you would rather keep the plugin's
+`npm run prove:schema` a separate, opt-in script. If you would rather keep the plugin's
 `package.json` dependency-free entirely, the alternative is to keep ajv out-of-repo and point
-`~/tmp/schema-check/validate.mjs` at the in-repo schemas via `GRAPH_SCHEMA_DIR` — the schemas
-are still vendored and versioned here, which is the part D2 actually asks for.
+`~/tmp/schema-check/validate.mjs` at the in-repo schemas via `GRAPH_SCHEMA_ID` / `GRAPH_SCHEMA_DIR`
+— the schemas are still vendored and versioned here, which is the part D2 actually asks for.
 
 ## 3. The ABM document, concretely
 
@@ -160,9 +166,10 @@ are still vendored and versioned here, which is the part D2 actually asks for.
   "application": {
     "id": "app_acme-demo", "name": "Acme Demo App", "base_url": "http://127.0.0.1:4173/",
     "actors": [                                             // D2: top-level array, populated
-      { "id": "anonymous_visitor" },
-      { "id": "authenticated_user", "credentials_ref": "TEST_USER" }
-    ]
+      { "id": "anonymous" },                                // P6: the actor id IS the variant
+      { "id": "authenticated", "credentials_ref": "TEST_USER" }   //   vocabulary the states already
+    ]                                                        //   use, so the rule fits the measured
+                                                             //   evidence instead of rewriting it
   },
 
   "entities": [                                             // D2: new, top-level
@@ -178,8 +185,13 @@ are still vendored and versioned here, which is the part D2 actually asks for.
   "state_variables": [                                      // D2: new, top-level
     { "name": "projects", "type": "string", "values": ["empty", "populated"],
       "dimension_of": ["state_project_list_authenticated_projects_populated"],
-      "detection": {"type": "value", "target": "element_project_list",
-                    "operator": "equals", "expected": "populated"},   // P7: an ELEMENT, not a storage key
+      "detection": {"type": "value", "element": "element_project_list",
+                    "operator": "equals", "expected": "populated"},   // P7: an ELEMENT, not a storage key.
+                                                             //   The rule is structural here: the schema's
+                                                             //   `allOf` requires `element` for every type
+                                                             //   except `route`, which requires `route`,
+                                                             //   so no document can state the storage case
+                                                             //   P7 exists to refuse
       "evidence": [{"observation": "obs_0004", "role": "effect"}] }
   ],
 
@@ -188,10 +200,14 @@ are still vendored and versioned here, which is the part D2 actually asks for.
       "id": "behavior_login",
       "name": "login",                                      // P1: the verb a user would ask for
       "kind": "interaction",
-      "actor": "anonymous_visitor",
+      "actor": "anonymous",
       "input":  { "email": {"type":"string","required":true},
                   "password": {"type":"string","required":true,"format":"password"} },
-      "output": { "session": {"type":"entity","entity":"session"} },
+      "output": { "session": {"type":"object","description":"The session the login produced."} },
+                                                             // the key names an entities[].name: the join
+                                                             // is by name, the way effects[].target joins
+                                                             // to entities (P8), so there is no `entity`
+                                                             // keyword to learn
       "realization": [                                      // D3: mechanics live HERE
                                                              // D5: a step carries its OWN local effect
         { "action":"fill",  "element":"element_email_input",    "value":"{{email}}",    "purpose":"enter_credentials",
@@ -215,7 +231,10 @@ are still vendored and versioned here, which is the part D2 actually asks for.
       "from_state": "state_login_anonymous",
       "behavior": "behavior_login",                         // the behaviour, never the step
       "to_state": "state_project_list_authenticated_projects_populated",
-      "guard": null,                                        // the condition that made it possible, if any
+      "guard": "the login form accepted the credentials",   // the condition that made it possible.
+                                                             //   Omitted when there is none, never null:
+                                                             //   `guard` is a string, and an explicit null
+                                                             //   would be a second way to say "no guard"
       "effects": [                                          // what the APPLICATION changed
         {"type":"state_entered","to":"state_project_list_authenticated_projects_populated","observed":true},
         {"type":"storage_changed","target":"localStorage.acme-demo-state","observed":true}
@@ -239,8 +258,12 @@ are still vendored and versioned here, which is the part D2 actually asks for.
       "detection": [ /* as ABG 0.1 */ ],
       "affordances": [                                      // D6: offered here, never performed
         { "element": "element_forgot_password_link",         // must be one of THIS state's elements
-          "expected_behavior": "reset_password",             // a hypothesis, and `unwalked` says so
-          "metadata": { "status":"unwalked", "confidence":0.3, "producer":"llm:deepseek-flash" } }
+          "expected_behavior": "reset_password",             // a hypothesis. Being IN this array is the
+                                                             //   whole of the claim that nobody took it,
+                                                             //   so there is no `status: unwalked` to set:
+                                                             //   metadata.status is bookkeeping, and this
+                                                             //   is a statement about the application
+          "metadata": { "confidence":0.3, "producer":"llm:deepseek-flash" } }
       ]
     },
     {
@@ -254,10 +277,10 @@ are still vendored and versioned here, which is the part D2 actually asks for.
       "affordances": [                                      // these four are in the capture and
         { "element": "element_nav_projects",                 //   in no committed realization step
           "expected_behavior": "list_projects",
-          "metadata": { "status":"unwalked", "confidence":0.3 } },
-        { "element": "element_nav_settings", "expected_behavior": "open_settings",  "metadata": { "status":"unwalked", "confidence":0.3 } },
-        { "element": "element_logout_button", "expected_behavior": "sign_out",     "metadata": { "status":"unwalked", "confidence":0.3 } },
-        { "element": "element_add_project_button", "expected_behavior": "create_project", "metadata": { "status":"unwalked", "confidence":0.3 } }
+          "metadata": { "confidence":0.3 } },
+        { "element": "element_nav_settings", "expected_behavior": "open_settings",  "metadata": { "confidence":0.3 } },
+        { "element": "element_logout_button", "expected_behavior": "sign_out",     "metadata": { "confidence":0.3 } },
+        { "element": "element_add_project_button", "expected_behavior": "create_project", "metadata": { "confidence":0.3 } }
       ]
     }
   ],
@@ -269,8 +292,11 @@ are still vendored and versioned here, which is the part D2 actually asks for.
       "goal": "Sign in as the demo user and reach the project list",   // NEVER the raw instruction:
                                                              // the instruction carries the credential,
                                                              // and this document is meant to be read
-      "goal_stated": true,                                  // D4: false = the name is the run's own instruction
-      "actor": "authenticated_user",
+      "goal_stated": true,                                  // D4: false = the tools derived this walk and
+                                                             //   nobody asked for the outcome. A derived
+                                                             //   journey is still a journey; a reader just
+                                                             //   has to be told which kind it is holding
+      "actor": "authenticated",
       "start_state": "state_login_anonymous",
       "steps": [                                            // the walk: ORDER over transitions[]
         { "transition": "transition_login", "arguments": {"email":"test@example.com"} }
@@ -385,12 +411,42 @@ Most of the system, and it should not be re-litigated:
 
 Two halves, both cheap and both de-risking everything after them.
 
-**0a — vendoring (D2).** Copy `~/IntegrationTestGenerator/schemas/*.schema.json` to
-`schemas/0.1/` byte-identical, write `VENDOR.md` with sha256s, and fork `schemas/abm/0.2/` with
-the new root, the `$id` rewrite, the **behaviour-level `transitions[]`** (D5), `state.affordances[]`
-(D6) and the `journeys[].steps[]` / `realization[]` additions — and **without** `feature.schema.json`
-(D7).
-Add `scripts/validate.mjs` (opt-in ajv) and point the verification protocol at it.
+**0a — vendoring (D2). DONE.** `schemas/0.1/` is byte-identical (`diff -r` clean, sha256s match
+upstream) and `VENDOR.md` carries the hashes and the two-directory policy. `schemas/abm/0.2/` is
+forked: the new root, the `$id` rewrite, the **behaviour-level `transitions[]`** (D5),
+`state.affordances[]` (D6) and the `journeys[].steps[]` / `realization[]` additions — and
+**without** `feature.schema.json` (D7).
+
+The fork is proved rather than declared, by `test/prove-schema.mjs` (opt-in ajv, in the style of
+`prove-generate.py`): 23 mutations, each the structural half of a recorded decision, **23 refused,
+0 survived**. Without ajv it prints `SKIP` and exits 0, so `npm test` stays dependency-free.
+
+Four things 0a settled that the plan had wrong or had not seen:
+
+1. **§3's example did not validate, in five places.** The actor ids (`anonymous_visitor`) did not
+   match the state variants (`anonymous`) that P6 joins them to; the detection used the old
+   `target` field where the schema now requires `element` or `route`; the affordances carried
+   `metadata.status: "unwalked"`, which is not a member of the `metadata` enumeration and does
+   not belong there; `guard: null` is not a string; and `output` used an `entity` keyword that
+   `argumentValueSpec` does not have. All five are fixed on both sides. Writing the example down
+   as an executable fixture is what surfaced them.
+2. **`metadata.status` cannot hold `unwalked`.** `metadata` is defined as bookkeeping, "never
+   application semantics", and `unwalked` is a statement about the application. Being in
+   `state.affordances[]` is the claim; adding an enum member to a shared def would also have made
+   `common.schema.json` diverge, which is the one file whose value is that it did not.
+3. **The schema cannot check a single reference,** which is measured, not assumed:
+   `transition_nonexistent` is a well-formed transition id. Every dangling reference is therefore
+   a *schema-valid* document. This is a stronger argument for Phase 2's `lib/validate.js` than
+   gap 8 gave — the in-repo layer is not a cheap subset of the ajv layer, it is the only layer
+   that can do references at all, and it is the one that has to run inside `commitRun`.
+4. **P7 is structural.** The detection `allOf` requires `element` for every type except `route`,
+   which requires `route`, so the storage-key case P7 exists to refuse cannot be stated in a
+   document at all — a rule the shape enforces is worth more than a rule the profile reports.
+
+**Acceptance (0a): MET.** `npm run prove:schema` validates the 0.1.22 `graph.json` against
+`schemas/0.1/` (proving the vendored copy is intact) and
+`test/fixtures/abm/example.json` against `schemas/abm/0.2/`. The fixture is §3 made executable,
+and it is also the expected shape for 0b.
 
 **0b — the projection, as a *check*, not as the pipeline.** `lib/abm.js`, pure, no writes:
 `modelFromCandidates({observations, states, capabilities, transitions, instruction})` → the ABM
@@ -404,9 +460,11 @@ same store, and Phase 0b exists to have something to measure with before any liv
 - **Acceptance:** running `profileFindings` over the real 0.1.22 `graph.json` reports
   `fill_login_email` / `fill_login_password` / `submit_login` as **P1 violations**. That is the
   motivating defect, quantified, against real output, before a single line of the plugin changes.
-- **Acceptance (0a):** `npm run validate:schema` validates both the 0.1.22 `graph.json` against
-  `schemas/0.1/` (must pass — proving the vendored copy is intact) and a hand-written ABM sample
-  against `schemas/abm/0.2/`.
+- 0b is also where 0a's unenforced rules have to land: the five `SHAPE_ONLY` references (a step
+  naming an edge that exists, a realization naming an element some state declares, an affordance
+  naming an element *its own* state declares, an actor some `actors[]` entry declares, one edge
+  per `(from_state, behaviour, to_state)`) and the five `NOT_STRUCTURAL` judgement rules (P1, P5,
+  P9, P10, P11). `prove-schema.mjs` lists both families so neither can be quietly forgotten.
 
 ### Phase 1 — behavioural recording
 
@@ -500,9 +558,9 @@ and lowers `confidence`, which is what the schema's `effect.observed` already me
 | **Two documents drift** | They are independent by design (D1), which is exactly what lets them disagree | Both from one store, one commit, one `commit_report.json` section each; **P12a/P12b** check the edge set in both directions, so neither document can quietly lose or invent an edge. |
 | **The walk loses its order or its point** (D4, restated for D5) | `transitions[]` is a *set*: it has no order and no purpose, so only `journeys[].steps[]` says what the walk was and what it was for | `reconcile()` always emits the fallback journey (`goal_stated: false`); **P12c** fails the commit if it ever stops doing so. |
 | **The collapse hides which step landed the state** (D5) | Three calls become one edge, and `realization[]` keeps the order but does not mark which action moved the application | The edge's `evidence` carries the `action` role, which names the observation of that step — in the 0.1.22 run, `obs_0004`, the submit click. So the causal step is *recoverable from evidence* rather than asserted. |
-| **Affordances become a wish list** (D6) | D6 rewards naming what a walk did not do, and a model that wants to look thorough can invent them | P13 requires the element to be declared in *that state's own* `elements[]`, so every affordance is anchored in the capture; `unwalked` is refuted by any committed realization step on the same element; `confidence` reported at 0.3, never argued up. |
+| **Affordances become a wish list** (D6) | D6 rewards naming what a walk did not do, and a model that wants to look thorough can invent them | P13 requires the element to be declared in *that state's own* `elements[]`, so every affordance is anchored in the capture; the claim is refuted by any committed realization step on the same element; `confidence` reported at 0.3, never argued up. |
 | **Fork rot** (D2) | The vendored schema is now a copy, and copies drift from upstream silently | `VENDOR.md` sha256s + `0.1/` never being edited makes the divergence deliberate and checkable. |
-| **`npm test` loses its offline property** (D2) | `ajv` is the natural validator and the plugin has deliberately no deps | `lib/validate.js` (no deps) is the gate; ajv is opt-in via `npm run validate:schema` only. |
+| **`npm test` loses its offline property** (D2) | `ajv` is the natural validator and the plugin has deliberately no deps | `lib/validate.js` (no deps) is the gate; ajv is opt-in via `npm run prove:schema` only, and that script exits 0 with `SKIP` when ajv is absent. |
 | **A behaviour-first reading is not stabilisable** — two runs name one behaviour two ways | Already observed: `vocabulary_notes` fires on `add_to_cart` vs `add_item_to_cart` | The existing convergence path plus the schema's own vocabulary list. **Measure inter-run name stability; do not assume it.** |
 | **Losing the walk** | `assembleJourneys` derives journeys from ordered `transitions.jsonl` | Transitions stay in the log and in `graph.json`; the ABM carries the same edges in `transitions[]` and the same order in `journeys[].steps[]`. |
 | **A greener-looking run that proves less** | Every change makes refusals *more* likely, which reads as regression | Track refusal counts and per-document findings across runs. Fewer findings after a rule change is a **finding**, not a win, until the rule is shown to still fire (§7.2). |
@@ -524,7 +582,8 @@ Each of these is load-bearing, not ceremony:
    must therefore use the run's own numbers — `3` committed transitions, `1` edge, `1` step —
    which are recorded in `docs/experiments/abm-01/compare-output.txt`. Break P12a, P12b and P12c
    separately and confirm each names a different missing object.
-3. **Validate both documents** with `npm run validate:schema` after every live run. Gap 8 means a
+3. **Validate both documents** with `npm run prove:schema` after every live run, plus
+   `lib/validate.js` inside the commit itself. Gap 8 means a
    green commit can still write an invalid document — measured twice.
 4. **Read the generated artifacts.** Both 0.1.22 defects were found by reading the spec, not the
    graph. Read `application-model.json`'s `behaviors[]` and say which paths the run did *not*

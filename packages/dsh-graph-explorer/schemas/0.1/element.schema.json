@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://integration-test-generator.local/schemas/0.1/element.schema.json",
+  "title": "Element",
+  "description": "Something the agent can interact with inside a State. Elements are embedded in a State (not first-class graph nodes) because the same semantic element reappears across many states; their ids stay globally unique so transitions and assertions can point at them.",
+  "type": "object",
+  "required": ["id", "semantic"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/elementId" },
+    "role": {
+      "type": "string",
+      "description": "ARIA role as observed, e.g. textbox, button, link, checkbox, combobox, dialog."
+    },
+    "name": {
+      "type": "string",
+      "description": "Accessible name as observed (label text, aria-label, button caption)."
+    },
+    "semantic": {
+      "type": "object",
+      "description": "What the element MEANS. This is the stable identity; role/name/locator are observations that may change.",
+      "required": ["purpose"],
+      "properties": {
+        "purpose": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Stable snake_case purpose, e.g. coupon_code, email, submit_order, cart_item_count."
+        },
+        "description": { "type": "string" },
+        "data_subject": {
+          "type": "string",
+          "description": "Application data this element reads or writes, e.g. order.discount, user.email."
+        },
+        "vocabulary": {
+          "type": "string",
+          "description": "Namespace for `purpose`, when the same purpose name means different things in different domains."
+        }
+      },
+      "additionalProperties": false
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["input", "control", "display", "container", "navigation", "feedback", "collection", "other"],
+      "default": "control"
+    },
+    "locator": {
+      "description": "Playwright-friendly locator. Evidence for driving the browser, never the semantic identity.",
+      "oneOf": [
+        { "$ref": "#/$defs/locator" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/locator" },
+          "minItems": 1,
+          "description": "Ordered fallback list: try each locator until one resolves."
+        }
+      ]
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["click", "dblclick", "hover", "focus", "blur", "fill", "type", "press", "clear", "select_option", "check", "uncheck", "upload", "drag", "drop", "scroll", "read", "wait"]
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Interactions this element supports. `read` means the agent can only observe it."
+    },
+    "value_domain": {
+      "$ref": "common.schema.json#/$defs/argumentValueSpec",
+      "description": "What kind of value the element accepts/shows. Used to generate test data and to spot invalid-input cases."
+    },
+    "current_value": {
+      "description": "Value observed in the evidence observations for this state, when it is part of the state's identity."
+    },
+    "presence": {
+      "type": "string",
+      "enum": ["always", "conditional", "optional"],
+      "default": "always",
+      "description": "conditional: only rendered under some conditions. optional: may or may not be present."
+    },
+    "visible_when": {
+      "type": "string",
+      "description": "Human-readable condition under which the element appears, when presence is conditional."
+    },
+    "region": {
+      "type": "string",
+      "description": "Page region the element lives in: header, nav, main, cart_summary, modal, footer."
+    },
+    "within": {
+      "$ref": "common.schema.json#/$defs/elementId",
+      "description": "Parent container element, for nested structures such as list rows."
+    },
+    "source_mappings": { "$ref": "common.schema.json#/$defs/sourceMappingList" },
+    "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "locator": {
+      "type": "object",
+      "required": ["strategy"],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["role", "label", "placeholder", "text", "testid", "id", "name", "css", "xpath", "href", "alt", "title"]
+        },
+        "value": {
+          "type": "string",
+          "description": "Selector payload. For strategy=role this is the role name; for testid/css this is the raw selector body."
+        },
+        "name": {
+          "type": "string",
+          "description": "Accessible name filter, used together with strategy=role."
+        },
+        "exact": { "type": "boolean", "description": "Match text/name exactly. Playwright defaults to substring matching." },
+        "level": { "type": "integer", "minimum": 1, "description": "Heading level, for strategy=role with role=heading." },
+        "nth": { "type": "integer", "minimum": 0, "description": "Index, when several elements match." },
+        "frame": { "type": "string", "description": "Frame or iframe path, when the element is not in the main frame." },
+        "note": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

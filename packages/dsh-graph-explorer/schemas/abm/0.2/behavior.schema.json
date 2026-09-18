@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://webtestagent.local/schemas/abm/0.2/behavior.schema.json",
+  "title": "Behavior",
+  "description": "What an actor can do, named in domain terms. A behaviour is the unit a person asks for and the unit a test is written against: 'sign in', not 'fill_login_email'. How the UI happens to do it belongs in realization[] and nowhere else, because a behaviour named after its first DOM step is not a behaviour - it is a step wearing a behaviour's name, and it forces every consumer to reassemble the user's intent from the implementation.",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": { "$ref": "#/$defs/behaviorId" },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "description": "Verb phrase in the application's own language: login, add_to_cart, reset_password, list_projects. Must not name a mechanism - fill_login_email is refused, because it names the page rather than the outcome."
+    },
+    "description": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": ["interaction", "navigation", "query", "setup", "composite"],
+      "default": "interaction",
+      "description": "Coarse classification. 'composite' means the behaviour is defined only by composed_of; a composite whose parts are not all realized is a claim about the application the model cannot support."
+    },
+    "actor": {
+      "$ref": "#/$defs/actorId",
+      "description": "Role that can perform this behaviour, when it is actor-specific. Must equal an application.actors[].id."
+    },
+    "input": { "$ref": "common.schema.json#/$defs/argumentMap" },
+    "output": {
+      "$ref": "common.schema.json#/$defs/argumentMap",
+      "description": "What the behaviour yields, named semantically: session, project, order. A behaviour whose output is read by a later behaviour is a dependency the walk can be checked against."
+    },
+    "assertions": {
+      "$ref": "common.schema.json#/$defs/assertionList",
+      "description": "Checks that hold once the behaviour has been performed, independent of which surface it started from."
+    },
+    "realization": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/behaviorStep" },
+      "description": "The ordered steps that perform this behaviour. A behaviour is realized by steps, never composed of them: steps are how, composed_of is what. A behaviour with a non-empty realization and a non-empty composed_of has two answers to one question."
+    },
+    "composed_of": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/behaviorId" },
+      "uniqueItems": true,
+      "description": "Other behaviours this one is made of, in order. Names behaviours, never steps, and each member must itself be realizable."
+    },
+    "aliases": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "source_mappings": { "$ref": "common.schema.json#/$defs/sourceMappingList" },
+    "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" },
+    "tags": { "$ref": "common.schema.json#/$defs/tagList" },
+    "metadata": { "$ref": "common.schema.json#/$defs/metadata" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "behaviorId": {
+      "type": "string",
+      "$ref": "common.schema.json#/$defs/id",
+      "pattern": "^behavior[-_][A-Za-z0-9._:-]+$",
+      "description": "Behaviours get their own id namespace rather than reusing capabilityId, because the capability pattern (^cap...) would reject behavior_login, and widening it would let a document that has no capabilities keep minting cap_ ids."
+    },
+    "actorId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Must equal an id in application.actors[]. Kept loose here because the actor vocabulary is owned by the application document, and the join is what matters, not the spelling."
+    },
+    "behaviorStep": {
+      "type": "object",
+      "description": "One interaction, as the application actually performed it. This is the mechanism layer: a step may be renamed, reordered or dropped without changing what the actor asked for, which is why nothing outside realization[] is allowed to depend on a step's identity.",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "goto", "click", "dblclick", "fill", "type", "press", "clear", "select_option",
+            "check", "uncheck", "hover", "focus", "blur", "drag", "drop", "upload",
+            "wait", "wait_for", "assert"
+          ]
+        },
+        "element": {
+          "$ref": "common.schema.json#/$defs/elementId",
+          "description": "Element acted on. Must resolve to an element declared by the state the walk was in when the step ran - derived from that state's declaration, never taken on trust from the model."
+        },
+        "value": {
+          "type": "string",
+          "description": "Literal value, or a {{param}} template bound to a declared input or a journey step's arguments. A concrete value is only acceptable when it was observed; a redacted field is recorded honestly as [set] rather than guessed."
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Why this step is in the behaviour, in the behaviour's own terms: enter_credentials, submit, dismiss_banner. This is what makes a step reviewable on its own, and what survives when the step's element is renamed."
+        },
+        "arguments": {
+          "type": "object",
+          "description": "Concrete values observed for this step, when they differ from value. Recorded as observed, redacted as [set].",
+          "additionalProperties": true
+        },
+        "effects": {
+          "type": "array",
+          "items": { "$ref": "transition.schema.json#/$defs/effect" },
+          "description": "What this step changed. Step-scoped effects exist because a multi-step behaviour can land its state only on the last step, and without them the only way to say which step did the work is to re-read the observations."
+        },
+        "optional": { "type": "boolean", "default": false },
+        "timeout_ms": { "type": "integer", "minimum": 0 },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
