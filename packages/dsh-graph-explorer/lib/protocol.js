@@ -214,6 +214,15 @@ For every step:
      Set \`"observed": true\` only for what the evidence shows — an effect you
      inferred is a weaker claim, and it should say so.
    - \`arguments\` — the concrete values used this time, e.g. \`{"coupon_code":"SAVE10"}\`.
+     A field the page never lets you read back — a password box — is recorded as exactly
+     \`"[set]"\`, in the element's own state and in the step's effect, because that is what the
+     capture writes for it. Write \`"[set]"\` as the argument too. The value you typed is a
+     value the browser was *given*, not one the run *observed*, and an edge whose argument no
+     effect and no observation reports is a claim with nothing under it — the model withholds
+     itself over that (\`unobserved_argument\`). \`"[set]"\` is also what a spec needs: it is
+     generated as a value read from the environment and listed as required, while any other
+     spelling of a secret (\`"***"\`, \`"[redacted]"\`) generates a test that types that literal
+     string into the field.
    - \`guard\` — the condition that made this transition possible, if there is one.
    - \`realization\` — for a step: \`{action, element, value, purpose, arguments, effects,
      optional, timeout_ms}\`, the shape the schema uses for one step of a behaviour and the one it
@@ -221,9 +230,12 @@ For every step:
      (\`fill\`, \`click\`, \`press\`, \`goto\`, …), and it is the only key a step cannot do
      without: a realisation with no verb is not a step, and the capability's name is not the verb —
      \`fill_login_email\` is how a capability is spelled, not what the browser did. \`element\` is
-     an element id (\`element_email_input\`), the same form \`target\` takes. \`value\` is a
-     literal or a \`"<param>"\` template bound to the behaviour's input. \`purpose\` is the
-     step's part in the behaviour, in the behaviour's own words (\`enter_credentials\`,
+     an element id (\`element_email_input\`), the same form \`target\` takes — and it is the same
+     control, so the edge is recorded acting on the step's element whether or not you also pass
+     \`target\`. Pass both only when they are the same id: two different ids are two claims
+     about one edge, and the tool refuses them rather than guessing which one moved the page.
+     \`value\` is a literal or a \`"<param>"\` template bound to the behaviour's input. \`purpose\` is
+     the step's part in the behaviour, in the behaviour's own words (\`enter_credentials\`,
      \`submit\`) — it is what still means something after the element is renamed, so write one for
      every step: a step with no purpose is a step the model cannot describe. \`effects\` are this
      step's own, in the same shape as the transition's, because a behaviour that types twice lands

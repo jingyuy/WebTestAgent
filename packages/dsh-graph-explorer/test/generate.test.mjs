@@ -24,7 +24,7 @@
  * No browser, no `dsh`, no temporary directory: a graph is an object and a spec is a string.
  */
 import { CAPTURE_EXPRESSION } from '../lib/capture.js';
-import { ENV_PREFIX, INTERACTION_BY_ROLE, REDACTED, ROW_SELECTOR, elementsById, envVarFor, generateTest, locatorExpression, renderAssertion, selectJourney, statesById } from '../lib/generate.js';
+import { ENV_PREFIX, INTERACTION_BY_ROLE, REDACTED, ROW_SELECTOR, elementsById, envVarFor, generateTest, locatorExpression, renderAssertion, requiresInstruction, selectJourney, statesById } from '../lib/generate.js';
 
 let fails = 0;
 const check = (label, actual, expected) => {
@@ -448,6 +448,16 @@ check('and the disagreement is reported rather than quietly resolved',
   disagreedResult.gaps.filter((gap) => gap.code === 'argument_disagrees_with_the_reading')
     .map((gap) => [gap.severity, gap.transition, gap.element, gap.detail.includes('"password_input"')]),
   [['warning', 'transition_fill_login_password', 'element_password_input', true]]);
+// The instruction a run is left with, and the defect a live 0.1.27 run found in it: `requires` holds
+// records rather than names, so the list joined into a sentence read *Set [object Object] before
+// running it* — an instruction no one can follow, in the one sentence a person has to act on before
+// the spec will run at all.
+check('the value the spec needs is named as the variable to export, not as the record that describes it',
+  [requiresInstruction(disagreedResult.requires).includes('[object Object]'),
+    requiresInstruction(disagreedResult.requires).includes('Set TEST_PASSWORD before running it'),
+    requiresInstruction(disagreedResult.requires).includes('typed into element_password_input'),
+    requiresInstruction(keptResult.requires)],
+  [false, true, true, '']);
 check('and the step says which of the two it believed',
   disagreedResult.steps[1].value_of.includes('the argument it carried was ignored'), true);
 check('while a reading that names the element by id is matched too', (() => {

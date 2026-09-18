@@ -1451,10 +1451,46 @@ committed a valid `graph.json` and **withheld the application model**, for an un
 defect that a live run was the only way to find — this section tells the walk to put the acted
 element in `realization.element` and never names `target`, while `action.target` is what both
 `graph_test` and the ABM read, so every transition of every live run says it acted on nothing and
-the generated spec cannot perform the walk. That is the next phase's first work, not this one's.
+the generated spec cannot perform the walk. That was **fixed in 0.1.27**: a `graph_transition` call
+whose step names an element is recorded acting on it, a call whose `target` and whose step name two
+different controls is refused above the first write, and where the id came from is reported as
+`target_from_realization` at `info` — because a step's `element` and a transition's `target` are one
+element id in two places, and `info` says nothing was inferred. The protocol now says so, and says
+what a redacted field is recorded as (`"[set]"`), which is the `P5` convention the rule enforced and
+the prose never stated.
+
+**And then the corrected spec was run, which nothing up to 0.1.27 had ever done.** That live sign-in
+walk recorded all three edges acting on their controls (`element_email_input`,
+`element_password_input`, `element_sign_in_button`) while the transcript shows the walk never passed
+`target` — the value is the recorder's — committed `blocking: []` with
+`documents.model.written: true, valid: true` and three `target_from_realization` notes at `info`,
+wrote its `application-model.json`, and passed `protocol-coverage`'s four verdicts. The generated
+spec then performed the walk: `goto("/")`, `Email.fill("test@example.com")`,
+`Password.fill(process.env.TEST_PASSWORD!)`, `Sign in.click()`, three assertions. Run under real
+Playwright against the demo app: **`1 passed (1.7s)`**. One run, one journey, one spec — evidence of
+a positive, and the first time this project's output has been shown to *do* anything.
+
+**A 0.1.28 run on a different walk then found the next one, in the same class.** Its edges name
+their controls too (`target_from_realization` three more times, `protocol-coverage` `ACCEPTED`
+again), but its `application-model.json` is **withheld**, and the blocker is new: `P5` /
+`unbound_parameter`, twice — *"realization[0] binds {{email}}, which is not a declared input of
+\"login\" (declared: none)."* The walk wrote `{{email}}` and `{{password}}` into the steps' values
+and **no capability in that run declares an input**. This section offers the template — *"`value` is
+a literal or a `\"<param>\"` template bound to the behaviour's input"* — and never says that writing
+one obliges you to declare the parameter: `capability_input` is documented on the tool, not in the
+orders the walk reads first. So the walk was offered a spelling and not told what it costs, `P5`
+correctly refused the document, and the fix is a sentence here rather than a weaker rule.
+
+**A sixth defect came out of that same run, and it is in the one sentence a person has to act on.**
+The instruction above the spec read *"Set [object Object] before running it"*: `requires` holds
+records (`{env, element, purpose, reason}` — the reason is what a person reads before exporting a
+secret), and the list was interpolated into the sentence instead of the names being read off it.
+Fixed in 0.1.28 by moving the sentence into `lib/generate.js` as `requiresInstruction(requires)`,
+where a suite can see it — `generateTest`'s return carries no `next`, so the tool-level sentence was
+unpinnable until it moved. Prose that no suite can see is prose that rots.
 
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 30 mutations, all 30 refused, the tree
+the failure. `test/prove-abm.py` is that file for this work — 34 mutations, all 34 refused, the tree
 restored byte-identically and `14/14 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.

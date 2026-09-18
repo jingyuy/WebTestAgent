@@ -328,6 +328,26 @@ function valueExpression(raw, element, ctx) {
 }
 
 /**
+ * The instruction a run is left with when the spec needs a value the store did not keep.
+ *
+ * `requires` holds records rather than names — `{env, element, purpose, reason}`, because the reason is
+ * what a person reads before exporting a secret — so the names have to be read off them. The list
+ * itself joined into a sentence instead reads *Set [object Object] before running it*: an instruction
+ * no one can follow, in the one sentence a person has to act on before the spec will run at all. A
+ * live 0.1.27 run was told exactly that.
+ *
+ * A function rather than a line in the tool's wrapper, because a sentence about the spec belongs with
+ * the generator — and because prose that no suite can see is prose that rots.
+ */
+export function requiresInstruction(requires) {
+    if (!requires.length) return '';
+    const names = requires.map((entry) => entry.env).join(', ');
+    const elements = requires.map((entry) => entry.element ?? entry.purpose).join(', ');
+    return `Set ${names} before running it: the walk recorded that a value was typed into ${elements} `
+        + 'but not what it was, so the spec reads it from the environment rather than inventing one. ';
+}
+
+/**
  * Whether the machinery's own reading of this step says the value was withheld.
  *
  * `[set]` is written by the *capture*, not by the model: the recorder reads the field before and

@@ -304,7 +304,7 @@ against the real schemas, and `npm test` staying dependency-free is preserved by
 ```jsonc
 {
   "schema_version": "0.2",
-  "generator": { "name": "dsh-graph-explorer", "version": "0.1.23" },
+  "generator": { "name": "dsh-graph-explorer", "version": "0.1.28" },
   "application": {
     "id": "app_acme-demo", "name": "Acme Demo App", "base_url": "http://127.0.0.1:4173/",
     "actors": [                                             // D2: top-level array, populated
@@ -979,11 +979,72 @@ What the two artifacts hold down, and why the measure is where it is:
     `abm.js`'s `carriedAsStep`, whose third disjunct is **dead** precisely when the walk obeys the
     protocol. P12(a) as written in the table below is therefore not what the code does: the code
     asks for a spelling the protocol never asks the walk for.
-  - **`P5` is a prose gap, and the doc already states the convention the protocol withholds.** Its
-    own row below says a redacted field is "recorded as the honest `[set]` rather than omitted", and
-    `abm.js` implements exactly that — but the section the walk reads never says it, so a walk that
-    records the password it typed is refused for recording it. The rule is right; the text the walk
-    is given is not complete.
+  - **Both were fixed in 0.1.28, at the recorder rather than at the rule.** A transition's `target`
+    and a step's `element` name the same control — one is where the document keeps it, the other is
+    where the walk states it — so the element is taken from the step, under three conditions: it must
+    be an id the run has already declared (the check that was already there), a call that states a
+    *different* `target` is **refused rather than guessed** (`target ... and realization.element ...
+    are two different controls`), and the derivation is reported as a note at `info`
+    (`target_from_realization`) because a value no call passed is not a value the model gave. The
+    refusal sits **above the first write**, so a refused disagreement leaves no capability behind —
+    that placement was got wrong once and `realization.test.mjs`'s "every refusal above wrote nothing
+    at all" caught it. P12 was **not** loosened: `step_targets_no_element` and `committed_transition_
+    not_carried` still refuse an edge that acts on nothing. The protocol was corrected too — it now
+    says the `[set]` convention out loud, which is `P5`'s prose gap closed — and the fact that a
+    redaction has to be typed back as `"[set]"` and not as `"***"` is stated where the walk reads it.
+- **The first live run on the fixed recorder is 0.1.27, and that is where the defect is settled.** Three
+  `graph_transition` calls, each naming its element on the `realization` and **none** passing
+  `target` (the transcript reads `transition target= null | step element= element_email_input`), and
+  all three committed edges name the control: `transition_fill_login_email` →
+  `element_email_input`, `transition_fill_login_password` → `element_password_input`,
+  `transition_submit_login` → `element_sign_in_button`. `commit_report.json` has `blocking: []`,
+  `documents.model.written: true, valid: true`, `P5 ok`, `P12 ok`, `P13 ok`, and three findings of
+  `code: target_from_realization`, `severity: info`, `basis: recorder_note` — one per edge. On the
+  same walk 0.1.26 committed `action.target: null` three times and withheld the model for it; the
+  protocol and the two descriptions that named `target` are what changed, and **the rule that refused
+  the old runs is unchanged** — it simply has something to read now. `profile:protocol` on that
+  directory is `ACCEPTED` (`4 capabilities (1 behaviours, 3 steps, 0 unattached)`, `3 realisations (3
+  described)`, `3 edges`, `login 3/3 steps realised`, four `ok` verdicts).
+- **And that spec was then run for real, which no earlier phase had ever done.** The 0.1.27 run's
+  `application-model.json` is written (43,604 bytes) and its generated spec performs the walk it was
+  generated from: `await page.goto("/")`, `Email.fill("test@example.com")`,
+  `Password.fill(process.env.TEST_PASSWORD!)`, `Sign in.click()`, three assertions, header
+  *3 of 3 step(s) became an action; 3 check(s) were written, from 3 the graph supports*. In a
+  throwaway Playwright project pointed at the demo app: `TEST_PASSWORD=password123 npx playwright
+  test` → **`1 passed (1.7s)`**. A test the machinery wrote, from a model the machinery built, out of
+  a log the walk recorded, signed in. That is the strongest evidence in this document, and it is
+  worth exactly what it costs: **one run, one journey, one spec** — evidence of a positive. The
+  0.1.26 spec of the *same* walk asserted the two destination states and performed no sign-in at all,
+  which is the regression the recorder fix repairs.
+- **The 0.1.28 run repeated the recorder result on a different walk and found a *seventh* defect,
+  which is the same class again and is why this is recorded rather than claimed done.** Its edges
+  name their controls (`element_email_input`, `element_password_input`, `element_login_button`) with
+  the walk still passing no `target`, and `target_from_realization` fires three more times at `info`;
+  `profile:protocol` is `ACCEPTED` a second time. But `documents.model.written` is **`false`**, and
+  the blocker is new: `P5/unbound_parameter` twice — *"realization[0] binds {{email}}, which is not a
+  declared input of \"login\" (declared: none)."* The walk wrote `{{email}}` and `{{password}}` into
+  the steps' `value`, and **no capability in that run declares an `input` at all**. The protocol
+  offers the template (*"`value` is a literal or a `\"<param>\"` template bound to the behaviour's
+  input"*) and **never once says that writing one obliges you to declare the parameter**: the tool
+  description documents `capability_input`, the section the walk is given as its orders does not
+  mention it at all. So the walk is offered a spelling and not told what it costs — the `target`
+  defect exactly, one field over — and `P5` then refuses the document the walk was asked to produce.
+  Note that the machinery's own rescue (`inputOf`, which unions the inputs of the capabilities a
+  behaviour is `composed_of`) **cannot** fire here: it reads a composition Phase 2 folds into
+  `realization[]` and drops, and there is nothing to union anyway. **This is the next thing to fix,
+  and it is a protocol fix, not a rule fix**: P5 is right, and the model it withheld is a correct
+  refusal of a walk that was told half of a convention.
+- **A sixth defect came from the same live run, and it is a deploy-only class of its own.** The
+  sentence that tells a person what to export before the spec will run read *"Set [object Object]
+  before running it"*: `requires` holds records (`{env, element, purpose, reason}` — the reason is
+  what a person reads before exporting a secret), and the list was interpolated into the sentence
+  instead of the variable names being read off it. A machine-written instruction that cannot be
+  acted on is a defect, and it was in the one sentence a person has to act on before the spec runs.
+  Fixed in 0.1.28 by moving the sentence into `lib/generate.js` as `requiresInstruction(requires)` —
+  **a function rather than a line in a tool wrapper, because the tool wrapper's output no suite can
+  see**: `generateTest` returns no `next` key (that is the `graph_test` seam's), so the first version
+  of this fix was unpinnable and the check that pinned it failed with a `TypeError`. Prose that no
+  suite can see is prose that rots.
 - **Two more defects were found by *deploying*, not by any suite, and they are why
   `test/package.test.mjs` exists.** A deployed 0.1.24 shipped the reader and not the directory it
   reads (`files` did not name `schemas/`), so `graph_commit` answered *the schema set could not be
@@ -992,14 +1053,18 @@ What the two artifacts hold down, and why the measure is where it is:
   variable (`dsh: UNKNOWN: unknown prompt variable "{{param}}" in section
   "graph:exploration-protocol"`). Both are rules about the *package*, so the guard is a suite about
   the package: it derives the list of self-relative reads out of `lib/*.js` and requires every one
-  that leaves `lib/` to be covered by `files`. Four of `prove-abm.py`'s 30 cases hold them down.
+  that leaves `lib/` to be covered by `files`. Four of `prove-abm.py`'s cases hold them down. The
+  third such defect is above: the `[set]` convention the protocol withheld (a walk that records the
+  password it typed is refused **correctly** — the rule was right and the text the walk was given was
+  not complete), and the fourth is the `[object Object]` instruction, which no suite could see at all
+  until the sentence moved out of the tool wrapper and into `generate.js`.
 - `test/prove-abm.py` gained the **nine** Phase-3 cases that hold the rewrite down: the reading
   before the walk, the step-is-the-default sentence, the behaviour definition, the once-per-behaviour
   edge, the affordance's missing `confidence`, the hallucination sentence, a kept refusal sentence, an
   argument added to a recording tool, and — the case that matters most after a rewrite — **the old
   composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
   **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
-  is not the rule, and counting it would let a badly written case look like a proof); all **30 cases
+  is not the rule, and counting it would let a badly written case look like a proof); all **34 cases
   are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 14/14.
 
 ### Phase 4 — the model generates the test (D10)
@@ -1064,9 +1129,10 @@ Each of these is load-bearing, not ceremony:
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (30 mutations, all 30 refused; 17 through Phase 2, 9
-   more for Phase 3, and 4 for the defects the first two deploys found); break the *rule*, not a
-   clause the code already treats as equivalent
+   `test/prove-abm.py` is the running instance (34 mutations, all 34 refused; 17 through Phase 2, 9
+   more for Phase 3, and 8 for the defects the deploy and the live runs found — four from the two
+   early deploys, three from the recorder defect, one from the instruction sentence); break the
+   *rule*, not a clause the code already treats as equivalent
    (removing `cutParameter &&` proved nothing — behaviourally identical).
    **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded
    one `journeys[].steps[]` entry per committed transition, and §3 made a step a behaviour: the

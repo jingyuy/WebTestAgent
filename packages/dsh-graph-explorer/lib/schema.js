@@ -643,6 +643,12 @@ export const NOTE_SEVERITY = new Map([
   // controls_changed` is the error in this family, and for the opposite reason: there the
   // identity the edge *names* does not hold for both of its endpoints.)
   ['identity_read_from_element_state', 'warning'],
+  // The control the edge was recorded acting on, taken from the step that performed it. `info`
+  // because nothing was inferred: a step's `element` and a transition's `target` are one element id,
+  // the walk states it on the step, and this notes that the edge carries it. A live walk that named
+  // the control on every step and no `target` at all recorded three transitions acting on nothing,
+  // and two consumers read that field and no other (`step_targets_no_element`, `P12`).
+  ['target_from_realization', 'info'],
   // Two readings bound to one state whose controls have nothing in common, reported by the commit
   // and refused at the reading that would have made it worse. A warning for the same reason the
   // note above is one: the state is a real state and the edges through it are real edges — what is

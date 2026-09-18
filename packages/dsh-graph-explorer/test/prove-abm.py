@@ -335,6 +335,51 @@ CASES = [
         'new': '',
         'suite': 'test/abm-commit.test.mjs',
     },
+    {
+        # The recorder fix, and the defect a live run measured: a walk that names the control on every
+        # step and no `target` at all recorded three committed transitions with `action.target: null`,
+        # so the generator reported `step_targets_no_element` for every step and wrote a spec that
+        # asserts the signed-in screen without ever signing in. The step's element and the transition's
+        # target are one element id, and reading only `args.target` is the rule that made a field the
+        # protocol never asked for decide what two consumers could say.
+        'rule': 'the edge is recorded acting on the control the step names',
+        'file': 'lib/index.js',
+        'old': "            const actionTarget = typeof args.target === 'string' ? args.target : stepElement;\n",
+        'new': "            const actionTarget = typeof args.target === 'string' ? args.target : null;\n",
+        'suite': 'test/realization.test.mjs',
+    },
+    {
+        # The other half: one element id in two places cannot be said two ways. A call that gives both
+        # and gives them differently has mistyped one of them, and the repair is to drop `target` —
+        # resolving it by preferring either would write a graph whose edge and whose step disagree
+        # about which control moved the page.
+        'rule': 'an edge whose target and whose step name different controls is refused',
+        'file': 'lib/index.js',
+        'old': "            if (stepElement && typeof args.target === 'string' && args.target !== stepElement) {\n",
+        'new': "            if (false) {\n",
+        'suite': 'test/realization.test.mjs',
+    },
+    {
+        # Where the id came from is reported, and `info` is the claim: nothing was inferred, because a
+        # step's element and a transition's target are the same element id. A severity above `info`
+        # would make every walk that states the control on the step — which is the shape the protocol
+        # asks for — commit under a warning it cannot avoid.
+        'rule': 'the control taken from the step is reported at info, not as a finding against the walk',
+        'file': 'lib/schema.js',
+        'old': "  ['target_from_realization', 'info'],",
+        'new': "  ['target_from_realization', 'warning'],",
+        'suite': 'test/realization.test.mjs',
+    },
+    {
+        # `requires` holds records, not names. Joining the list into the sentence a run is left with
+        # produced *Set [object Object] before running it* — the one instruction a person has to act
+        # on before the spec runs at all, and one that cannot be acted on.
+        'rule': 'the variable a spec needs is named in the instruction, not the record that describes it',
+        'file': 'lib/generate.js',
+        'old': "    const names = requires.map((entry) => entry.env).join(', ');\n",
+        'new': "    const names = requires.join(', ');\n",
+        'suite': 'test/generate.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

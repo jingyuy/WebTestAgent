@@ -169,6 +169,12 @@ await refuses('a step whose element is written as a bare purpose',
 await refuses('a step naming an element nothing declared',
   () => transition({ ...beat, realization: { action: 'click', element: 'element_checkout_button' } }),
   'is not the id of any element this run has declared');
+// A step's `element` and a transition's `target` are one element id in two places — the control the
+// capability was applied to — so a call that gives both has to give the same one. Two controls in
+// one call is one of them mistyped, and the repair is to drop `target`: the step already names it.
+await refuses('an edge whose target and whose step name different controls',
+  () => transition({ ...beat, target: 'element_submit_button', realization: { action: 'fill', element: 'element_email_input' } }),
+  'are two different controls');
 await refuses('a step effect of a type the schema does not have',
   () => transition({ ...beat, realization: { action: 'click', element: 'element_login_link', effects: [{ type: 'shimmer', to: 'x' }] } }),
   'is not one of');
@@ -247,9 +253,10 @@ check('every affordance refusal above wrote nothing at all, on a page that had n
 const first = await transition({
   capability: 'fill_login_email',
   capability_behaviour: 'login',
-  // `target` takes the element ID, exactly as a step's `element` does — the one argument that wants
-  // the bare purpose is an effect's `target` below.
-  target: 'element_email_input',
+  // `target` is deliberately NOT passed. It takes the element ID, exactly as a step's `element`
+  // does, and the two name one control: passing both is the same string twice, and the step is
+  // where this walk states which control the verb acted on. The two checks below say what the edge
+  // is recorded with instead.
   realization: {
     action: 'fill',
     element: 'element_email_input',
@@ -271,6 +278,16 @@ check('and the realisation is reported back with the position it was recorded at
 check('the realisation that comes back is the whole record, prose and step effects included',
   [first.realization.step.purpose, first.realization.step.effects.map((effect) => effect.type), first.realization.step.value],
   ['enter_credentials', ['value_changed'], '{{email}}']);
+// The edge's target, which this call did not pass and the walk still stated. This is the field two
+// consumers read and no other: the generator, which needs the control to write an action, and the
+// application model's `carriedAsStep`. A live walk that named the control on every step and no
+// `target` at all recorded three transitions acting on nothing (`action.target: null` on all three
+// of the 0.1.26 sign-in walk), and the generator reported `step_targets_no_element` for every step
+// and wrote a spec that could not perform the sign-in it was generated from.
+check('the edge is recorded acting on the control the step names, without being told twice',
+  [first.transition.target, typeof first.transition.target_note], ['element_email_input', 'string']);
+check('and the note says where the id came from rather than leaving the reader to guess',
+  first.transition.target_note.includes('taken from realization.element'), true);
 
 await act('browser_click', { selector: '#submit' });
 await observe({ page_type: 'dashboard', variant: 'authenticated', detection: [{ type: 'url' }] });
@@ -295,6 +312,10 @@ check('and it is a step of the behaviour, not of the capability it names',
   [second.realization.behaviour.capability_id, second.realization.behaviour.name], ['cap_login', 'login']);
 check('the position is the walk position, so the two steps are ordered by the walk',
   [first.realization.position, second.realization.position], [0, 1]);
+// The other half of the rule: a call that states the control itself is not corrected and not
+// commented on, because nothing was supplied that the model did not give.
+check('a call that states the control itself produces no note about it',
+  [second.transition.target, second.transition.target_note], ['element_submit_button', null]);
 
 // --- the log --------------------------------------------------------------
 const capabilityLog = logLines('capabilities.jsonl');
@@ -320,6 +341,12 @@ const verdict = await commit({});
 check('the run commits', [verdict.committed, verdict.graph_path !== null], [true, true]);
 check('and the report counts the realisation apart from the vocabulary',
   [verdict.counts.capabilities, verdict.counts.realization], [3, { recorded: 2, projected: 2 }]);
+// The resolution is a fact about the run that the document cannot hold by itself: the target is in
+// the graph, and where its id came from is in the report. `info`, because nothing was inferred —
+// the step's element and a transition's target are the same element id.
+const resolutionNotes = verdict.warnings.detail.filter((finding) => finding.code === 'target_from_realization');
+check('the report says the control was taken from the step, at info, once, for the one call that did not state it',
+  resolutionNotes.map((finding) => [finding.severity, finding.basis]), [['info', 'recorder_note']]);
 // The affordance is a claim `graph.json` has no room for, and the count is how its absence from the
 // document is a stated fact rather than a silent drop. `retired` is the clause that keeps the claim
 // falsifiable: it says nobody performed this, so the walk is what settles it.
@@ -347,6 +374,13 @@ check('a bare capability has no steps key at all, rather than an empty one',
   [byId.cap_fill_login_email.steps ?? null, byId.cap_submit_login.steps ?? null], [null, null]);
 check('and a realisation is not committed as a capability',
   written.capabilities.map((capability) => capability.id), ['cap_fill_login_email', 'cap_login', 'cap_submit_login']);
+// Both edges, one told and one not, in the document a generator reads: the field is the same either
+// way, which is the point — `graph_test` reads the committed graph and nothing else, so a control
+// that lived only in the capability log is a control no generated test can press.
+const targetById = Object.fromEntries(written.transitions.map((transition) => [transition.id, transition.action.target]));
+check('and every committed edge names the control it acted on, whether or not the call did',
+  [targetById.transition_fill_login_email, targetById.transition_submit_login],
+  ['element_email_input', 'element_submit_button']);
 check('nothing named after the record kind reached the graph', JSON.stringify(written).includes('realization_step'), false);
 // The other claim the log holds and the document cannot carry, asserted the blunt way: the string
 // does not occur anywhere in `graph.json`. 0.1's `state.schema.json` is `additionalProperties:

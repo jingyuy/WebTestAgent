@@ -40,7 +40,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from './capture.js';
 import { assertionSurvival, commitRun, CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, observedApis, persistenceVariablesOf, routeOf, semanticVariablesOf, stateVariablesOf, surfaceIsDisjoint, surfaceOf, unrecordedStateVariables } from './commit.js';
-import { generateTest } from './generate.js';
+import { generateTest, requiresInstruction } from './generate.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
 import {
     APPLICATION_ID_PATTERN,
@@ -1652,8 +1652,9 @@ export function apply(ctx, config) {
                 description: 'How the browser performs THIS step, as one step of the behaviour named by '
                     + '`capability_behaviour`: {action, element, value, purpose, arguments, effects, optional, timeout_ms, '
                     + 'description}. `action` is required and is one of the schema\'s own verbs: '
-                    + `${[...STEP_ACTIONS].join(', ')}. \`element\` is element_<semantic_purpose>, the same id shape as `
-                    + '`target`; `value` is a string — a literal, or "{{param}}" bound to the behaviour\'s input; `purpose` '
+                    + `${[...STEP_ACTIONS].join(', ')}. \`element\` is element_<semantic_purpose>, the same id \`target\` takes — and it `
+                    + 'is the id the edge is recorded acting on, so a call that performs a step does not have to pass `target` as '
+                    + 'well; `value` is a string — a literal, or "{{param}}" bound to the behaviour\'s input; `purpose` '
                     + 'is the step\'s part in the behaviour in the behaviour\'s own words (enter_credentials, submit), which '
                     + 'is what survives an element being renamed; `effects` is the same effect list as the transition\'s, '
                     + 'scoped to this step, because a multi-step behaviour lands its state only on its last step and without '
@@ -1686,7 +1687,10 @@ export function apply(ctx, config) {
             },
             target: {
                 type: 'string',
-                description: 'The element acted on, as element_<semantic_purpose>, when the capability is not bound to one element.',
+                description: 'The element acted on, as element_<semantic_purpose>: the control the capability was applied to. Omit '
+                    + 'it when the call has a `realization` — a step\'s `element` is the same id, it is where this walk states '
+                    + 'which control the verb acted on, and the edge is recorded with it. Passing both is allowed only when they '
+                    + 'name the same element: two different controls in one call is refused rather than guessed.',
             },
             guard: {
                 type: 'string',
@@ -1974,6 +1978,45 @@ export function apply(ctx, config) {
                     + 'Nothing was recorded, and the page has not moved, so fix it and call again.',
                 );
             }
+            // --- the control this edge acted on -----------------------------
+            // A transition's `target` and a step's `element` name the same thing: the control the
+            // capability was applied to. The walk states it on the step, because that is where the
+            // verb and its object belong — and reading only `args.target` is how every live run
+            // recorded an edge that acted on nothing. Measured on the 0.1.26 sign-in walk: three
+            // `graph_transition` calls, each with a `realization.element`, and all three committed
+            // transitions with `action.target: null`. Two consumers read that field and only that
+            // field — the generator, which reported `step_targets_no_element` for every step and
+            // wrote a spec that could not perform the sign-in it was generated from, and the
+            // application model's `committed_transition_not_carried` — so a field the protocol
+            // never asks the walk to write was deciding what both of them could say.
+            //
+            // Nothing is invented by taking it from the step: the element was checked against the
+            // elements this run has declared, in the paragraph above, and it is the id
+            // `transition.schema.json#/properties/action/properties/target` types `target` as. What
+            // the machinery supplied rather than wrote is said out loud below (`targetNote`),
+            // because a value no call passed is not a value the model gave.
+            //
+            // Both checks and the note belong here, above the first write: a refused disagreement
+            // must leave no capability behind, and `addCapability` is the next thing to happen.
+            const stepElement = typeof realizationStep?.element === 'string' ? realizationStep.element : null;
+            if (stepElement && typeof args.target === 'string' && args.target !== stepElement) {
+                throw new Error(
+                    `target ${JSON.stringify(args.target)} and realization.element ${JSON.stringify(stepElement)} are two `
+                    + 'different controls, and this edge acted on one of them. They are one element id in two places: the '
+                    + 'transition\'s `target` is the control the capability was applied to, and a step\'s `element` is the '
+                    + 'control its verb acted on. Drop `target`: the step already names the control, and the edge is recorded '
+                    + 'with it. Nothing was recorded, so call again.',
+                );
+            }
+            const actionTarget = typeof args.target === 'string' ? args.target : stepElement;
+            const targetNote = actionTarget && typeof args.target !== 'string'
+                ? {
+                    kind: 'target_from_realization',
+                    detail: `the edge was recorded acting on ${actionTarget}, taken from realization.element: this walk states `
+                        + 'the control on the step, and the transition\'s target is the same element id — so the two cannot be '
+                        + 'read as two claims. Pass `target` yourself when the edge acts on a control its step does not name.',
+                }
+                : null;
             // The step-scoped effects use the transition's vocabularies, because they are the same
             // effects: `transition.schema.json#/$defs/effect` is what the behaviour model types them
             // as. Checked here rather than at the commit because the commit does not project them —
@@ -2217,7 +2260,7 @@ export function apply(ctx, config) {
                 capability_id: capability.id,
                 capability_name: capabilityName,
                 arguments: args.arguments,
-                target: args.target,
+                target: actionTarget,
                 guard: args.guard,
                 effects,
                 apis: args.apis,
@@ -2236,8 +2279,11 @@ export function apply(ctx, config) {
                 // The step's own disagreements with the evidence, plus whatever the reading at
                 // the end of it said about its claims. Both are the machinery's account of the
                 // step, so they travel together — and the commit turns the kinds into findings
-                // with the same severities either way (`NOTE_SEVERITY`).
-                notes: [...warnings, ...(readingNotes.get(after.id) ?? [])],
+                // with the same severities either way (`NOTE_SEVERITY`). The third is the one
+                // note that is neither: the control the edge was recorded acting on, when the
+                // step is what named it. `info`, because nothing was inferred — the same id, from
+                // the place the walk states it.
+                notes: [...warnings, ...(readingNotes.get(after.id) ?? []), ...(targetNote ? [targetNote] : [])],
             });
             if (!recorded) {
                 // Refused rather than half-kept: the capability above is already in the
@@ -2309,6 +2355,12 @@ export function apply(ctx, config) {
                     name: capabilityName,
                     capability_id: capability.id,
                     derived_from: { before: before.id, after: after.id },
+                    // The control this edge acted on, and where the id came from. Reported because the
+                    // walk states it on the step and the edge is where the document keeps it: a model
+                    // that cannot see it carried has no way to tell an edge that acts on the control
+                    // from one that acts on nothing.
+                    target: actionTarget ?? null,
+                    target_note: targetNote ? targetNote.detail : null,
                     note: recorded.minted
                         ? 'Recorded a new edge.'
                         : 'This edge was already recorded — reused its id and appended the step to the walk.',
@@ -2697,8 +2749,9 @@ export function apply(ctx, config) {
                             + 'would pass without performing them. Read the gaps, fix what they name, and generate '
                             + 'again before treating it as a test. ')
                     + (result.requires.length
-                        ? `Set ${result.requires.join(', ')} before running it — the walk recorded that the field was `
-                            + 'filled, not what it was filled with, so the value is the environment\'s to supply. '
+                        // `requires` holds records, not variable names, and the names have to be read off
+                        // them — the sentence itself is the generator's, where a suite can see it.
+                        ? requiresInstruction(result.requires)
                         : '')
                     + 'Run it with Playwright (npx playwright test), with use.baseURL set to the application. '
                     + 'A gap is not a failure of the generator: it is a step the graph could not turn into code, and '
