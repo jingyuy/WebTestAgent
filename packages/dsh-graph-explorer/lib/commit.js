@@ -74,7 +74,7 @@ import { loadSchemas, validateDocument, DEFAULT_SCHEMA_ROOT } from './validate.j
 // suite can test it. `abm.js` imports this module back (`readRun`, `reconcile`) — a cycle, and a
 // safe one: neither module calls into the other while it is being evaluated, only from inside a
 // function that runs later.
-import { candidatesFromGraph, modelFromCandidates, profileFindings, profileInvariants, summarizeFindings } from './abm.js';
+import { candidatesFromGraph, keyedRealizationSteps, modelFromCandidates, profileFindings, profileInvariants, summarizeFindings } from './abm.js';
 
 /** Severity ordering: a candidate's verdict is the worst thing said about it. */
 const SEVERITY_RANK = { info: 0, warning: 1, error: 2 };
@@ -1730,19 +1730,12 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   // times it was walked: the key is the pair, exactly as `recordTransition` keys an edge by its
   // endpoints. The log is append-only, so a re-walked step has more than one record and the
   // newest stands — the walk is where the run is now, and a behaviour's edge is its last step's
-  // destination (D12). A record with no `walk_index` cannot be ordered against the others, so it
-  // sorts before all of them rather than after: guessing last would claim that an unordered step
-  // ends a behaviour, which is the one position a step cannot be guessed into.
-  const realizationByKey = new Map();
-  for (const record of capabilities) {
-    if (record.kind !== 'realization_step') continue;
-    const id = record.capability_id ?? record.id;
-    if (!id) continue;
-    const key = JSON.stringify([id, record.transition_id ?? null]);
-    const previous = realizationByKey.get(key);
-    if (previous && (previous.walk_index ?? -1) > (record.walk_index ?? -1)) continue;
-    realizationByKey.set(key, record);
-  }
+  // destination (D12). The rule itself lives in `keyedRealizationSteps`, because the behaviour
+  // profile reads the same log and a rule two readers have to agree on is a rule one of them
+  // owns: a live 0.1.29 run re-recorded one edge, this assembly collapsed the pair and the
+  // profile's reader did not, and the two readings of one run disagreed about how many times the
+  // behaviour clicked Sign in.
+  const realizationByKey = keyedRealizationSteps(capabilities);
   const realizationsByCapability = new Map();
   for (const record of realizationByKey.values()) {
     const list = realizationsByCapability.get(record.capability_id) ?? [];

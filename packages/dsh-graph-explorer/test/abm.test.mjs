@@ -448,6 +448,25 @@ console.log('\n# P5 parameters bind, concrete values were observed');
   ok('a value the model typed and the run never read back is refused',
     withRule(profileFindings(model, {}), 'P5').some((finding) => finding.code === 'unobserved_argument'));
 }
+// The rescue P5 depends on, and it had no test until the protocol started telling the walk to rely
+// on it. A live 0.1.28 walk wrote a template and declared no input; the section had never said that
+// writing one obliges you to declare it, and the machinery's own answer — a behaviour's input is
+// the inputs of the capabilities it is composed of — is only worth telling the walk about if it
+// works. A walk sent to declare a parameter somewhere the projection does not read is being told to
+// do something it cannot do, which is the defect this whole exchange is about.
+{
+  const source = candidates();
+  source.capabilities.find((entry) => entry.id === 'cap_login').steps = [
+    { action: 'fill', element: 'element_email_input', value: '{{email}}', purpose: 'enter_credentials' },
+    { action: 'fill', element: 'element_password_input', value: '{{password}}', purpose: 'enter_credentials' },
+  ];
+  const { model, findings } = projected(source);
+  const login = model.behaviors.find((entry) => entry.id === 'behavior_login');
+  check('a behaviour that declares no input of its own takes the inputs of the capabilities it is composed of',
+    Object.keys(login.input ?? {}).sort(), ['email', 'password']);
+  check('and a step binding them is accepted, not refused as unbound',
+    withRule(findings, 'P5').length, 0);
+}
 
 // --- P6, P7 ---------------------------------------------------------------------------------------
 
@@ -759,6 +778,28 @@ console.log('\n# reading a run: the committed document, or the commit run again'
   }));
   check('a document already on disk is read as it was judged, not committed again',
     candidatesFromRun(committed).source, 'graph.json');
+
+  // One edge is one step of a behaviour however many times it was walked — and this is the reader
+  // that did not have the rule while the commit's own assembly did. A live 0.1.29 run re-recorded
+  // one edge to correct a mistake it had made: the shipped model performed the click once, and
+  // this reading performed it twice, naming a different `storage_changed` target each time. Two
+  // readers of one log agreeing is not a detail, because this one is what a profile reports and
+  // what anyone reading the run back sees.
+  const rewound = mkRun(declared);
+  writeFileSync(join(rewound, 'graph.json'), JSON.stringify({
+    schema_version: '0.1', application: declared.application, states: [], journeys: [], observations: [],
+    capabilities: [{ id: 'cap_login', name: 'login', capability_kind: 'composite' }],
+    transitions: [],
+  }));
+  writeFileSync(join(rewound, 'capabilities.jsonl'), [
+    { kind: 'realization_step', capability_id: 'cap_login', transition_id: 'transition_submit_login', walk_index: 2, action: 'click', element: 'element_sign_in_button', effects: [{ type: 'storage_changed', target: 'acme-demo-state', observed: true }] },
+    { kind: 'realization_step', capability_id: 'cap_login', transition_id: 'transition_submit_login', walk_index: 3, action: 'click', element: 'element_sign_in_button', effects: [{ type: 'storage_changed', target: 'localStorage.acme-demo-state', observed: true }] },
+  ].map((record) => JSON.stringify(record)).join('\n'));
+  const read = modelFromCandidates(candidatesFromRun(rewound));
+  const steps = read.behaviors.find((entry) => entry.id === 'behavior_login').realization;
+  check('a step re-recorded because the first attempt was wrong is one step, not two', steps.length, 1);
+  check('and the newest walk of it is the one that stands, not the first',
+    steps[0].effects[0].target, 'localStorage.acme-demo-state');
 }
 
 // --- the severity table ---------------------------------------------------------------------------

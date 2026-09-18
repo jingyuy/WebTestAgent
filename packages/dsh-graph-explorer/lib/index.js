@@ -1616,7 +1616,11 @@ export function apply(ctx, config) {
                 description: 'Parameter type map, recorded on first use: {"coupon_code":{"type":"string","required":true}}. '
                     + 'Each value is a primitive type name (string|number|integer|boolean|object|array|any) or an object whose '
                     + '`type` is one of those — the schema allows no other key. This is the capability\'s parameters, NOT the '
-                    + 'concrete values used this time.',
+                    + 'concrete values used this time. It is also where a step\'s "{{param}}" template is declared: a '
+                    + 'behaviour\'s input is read from the inputs of the capabilities it is composed of, so declare the '
+                    + 'parameter on the capability that is the step, and a template nothing declares is refused '
+                    + '(`unbound_parameter`) — which withholds the model. Write the literal value instead if you would '
+                    + 'rather not declare it.',
             },
             capability_output: {
                 type: 'object',
@@ -1654,7 +1658,10 @@ export function apply(ctx, config) {
                     + 'description}. `action` is required and is one of the schema\'s own verbs: '
                     + `${[...STEP_ACTIONS].join(', ')}. \`element\` is element_<semantic_purpose>, the same id \`target\` takes — and it `
                     + 'is the id the edge is recorded acting on, so a call that performs a step does not have to pass `target` as '
-                    + 'well; `value` is a string — a literal, or "{{param}}" bound to the behaviour\'s input; `purpose` '
+                    + 'well; `value` is a string — the literal the page was given, or "{{param}}" bound to the behaviour\'s '
+                    + 'input, and a template is a parameter the call has to declare with `capability_input` on the '
+                    + 'capability it records, because a template nothing declares is refused (`unbound_parameter`) and '
+                    + 'withholds the model; `purpose` '
                     + 'is the step\'s part in the behaviour in the behaviour\'s own words (enter_credentials, submit), which '
                     + 'is what survives an element being renamed; `effects` is the same effect list as the transition\'s, '
                     + 'scoped to this step, because a multi-step behaviour lands its state only on its last step and without '
@@ -1683,7 +1690,11 @@ export function apply(ctx, config) {
             arguments: {
                 type: 'object',
                 additionalProperties: true,
-                description: 'The concrete values used for THIS transition, e.g. {"coupon_code":"SAVE10"}.',
+                description: 'The concrete values this action was given, e.g. {"coupon_code":"SAVE10"}. They are read against '
+                    + 'THIS transition\'s own evidence — each one is looked for among this transition\'s effects and this step\'s '
+                    + 'observation — so a value the page reports back belongs in the step\'s `value` (a `value_changed` effect is '
+                    + 'where it appears), and an argument on the edge that merely followed the fill is a claim nothing the click did '
+                    + 'reports and refuses the model (`unobserved_argument`). The rule is per edge: the fill\'s value goes on the fill.',
             },
             target: {
                 type: 'string',

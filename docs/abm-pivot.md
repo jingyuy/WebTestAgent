@@ -304,7 +304,7 @@ against the real schemas, and `npm test` staying dependency-free is preserved by
 ```jsonc
 {
   "schema_version": "0.2",
-  "generator": { "name": "dsh-graph-explorer", "version": "0.1.28" },
+  "generator": { "name": "dsh-graph-explorer", "version": "0.1.30" },
   "application": {
     "id": "app_acme-demo", "name": "Acme Demo App", "base_url": "http://127.0.0.1:4173/",
     "actors": [                                             // D2: top-level array, populated
@@ -1031,9 +1031,48 @@ What the two artifacts hold down, and why the measure is where it is:
   defect exactly, one field over — and `P5` then refuses the document the walk was asked to produce.
   Note that the machinery's own rescue (`inputOf`, which unions the inputs of the capabilities a
   behaviour is `composed_of`) **cannot** fire here: it reads a composition Phase 2 folds into
-  `realization[]` and drops, and there is nothing to union anyway. **This is the next thing to fix,
-  and it is a protocol fix, not a rule fix**: P5 is right, and the model it withheld is a correct
-  refusal of a walk that was told half of a convention.
+  `realization[]` and drops, and there is nothing to union anyway. **Fixed in 0.1.29, and it is a
+  protocol fix, not a rule fix**: P5 is right, and the model it withheld is a correct refusal of a
+  walk that was told half of a convention. The section now carries the half it was missing — a
+  template is a parameter the walk has to declare, the declaration goes on the capability that *is*
+  the step because a behaviour's input is read from the inputs of the capabilities it is composed
+  of, the refusal costs the whole model rather than the one step, and writing the literal the page
+  was given is the way out. The wrong spelling went with it: the section used to offer
+  `<param>`, `placeholdersIn` reads double braces, and a walk that obeyed the section would have
+  typed the stand-in into the field as a literal.
+- **The eighth defect came from the next live run — 0.1.29 — and it is one log read two ways.** That
+  walk re-recorded one edge to correct a mistake it had made, which the log keeps correctly as two
+  `realization_step` records for one `capability_id`/`transition_id` pair: the log is append-only and
+  nothing rewrites it. The commit's own assembly folds the pair and keeps the newest walk (*"one edge
+  is one step however many times it was walked"*, its own comment); the behaviour profile's reader did
+  not. So one run had **two readings of one behaviour**: the shipped model performed the click once,
+  and the profile performed it **twice**, naming a different `storage_changed` target each time
+  (`acme-demo-state` and `localStorage.acme-demo-state`). How many times a behaviour clicked is not a
+  cosmetic difference, and this reader is the one a person reads the run back with. **Fixed in
+  0.1.30** by moving the rule into `keyedRealizationSteps`, in the module both readers import —
+  which is where a rule two readers have to agree on belongs, and it is the same collapse the
+  seventh defect's run needed one field over.
+- **The tenth defect is the seventh one's twin, from the same run, and it is a placement.** The
+  section's `arguments` bullet invited *"the concrete values used this time"* and never said **whose**
+  values they are. So the walk filled the email, then put `{"email":"test@example.com"}` on the click
+  that followed — a field that accepts a value, on the edge where the walk happened to be standing —
+  and `P5/unobserved_argument` refused the model: no effect of a click reports the email. The rule is
+  right, and the bullet even names the refusal; what was missing is that the rule is **per edge** —
+  each argument is read against *this* transition's effects and *this* step's own observation — so a
+  walk holding a value and offered two fields that take one was given no way to choose. **Fixed in
+  0.1.30, in prose**: the section and the `graph_transition` schema now say that a value is read
+  against the edge it was given to, that a value the page reports back belongs in the step's `value`
+  (a `value_changed` effect is where it appears), and that the rule is per edge, so the fill's value
+  goes on the fill.
+- **The third thing that run exposed is open, and deliberately not fixed here.** Refused once, the
+  walk tried to correct itself by re-recording the edge: the finding did not clear — the raw
+  transition record carrying the argument still stands — and the re-record **split a second, one-step
+  journey strand** with a chain break. So a wrong `arguments` cannot be retracted by re-recording,
+  while the protocol's own commit step tells the walk that *"evidence is allowed to be wrong"*. That
+  is a machine instruction that cannot be acted on, which is a defect by the same argument as the
+  seventh and the tenth. But its fix is a question about commit semantics — does a re-recorded edge
+  replace its arguments or union them? — rather than a sentence, and guessing at commit semantics
+  under a deadline is how the seventh defect happened. It is written down and left open.
 - **A sixth defect came from the same live run, and it is a deploy-only class of its own.** The
   sentence that tells a person what to export before the spec will run read *"Set [object Object]
   before running it"*: `requires` holds records (`{env, element, purpose, reason}` — the reason is
@@ -1064,7 +1103,7 @@ What the two artifacts hold down, and why the measure is where it is:
   argument added to a recording tool, and — the case that matters most after a rewrite — **the old
   composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
   **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
-  is not the rule, and counting it would let a badly written case look like a proof); all **34 cases
+  is not the rule, and counting it would let a badly written case look like a proof); all **43 cases
   are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 14/14.
 
 ### Phase 4 — the model generates the test (D10)
@@ -1076,6 +1115,20 @@ What the two artifacts hold down, and why the measure is where it is:
 **Acceptance — the MVP milestone, and it is the same sentence as the one at the top:** a spec is
 generated with `graph.json` **absent from the run directory**, and every action in the spec traces
 to a `realization[]` step. Two documents read from one log, and the test written from the second.
+
+**And the 0.1.30 live run is the argument for this phase, in one line of `graph.json`.** That walk
+was the first to have its model **written and valid on a live run** — the seventh and tenth fixes
+together — and its generated spec then dropped its first step with a blocking gap,
+`step_has_no_value_to_type`. The reason is visible in the document: `transition_fill_email`'s action
+is `{"capability": "cap_fill_email", "target": "element_email_input"}` and **the email is not in it
+anywhere**, while the next step's `{"password": "[set]"}` is. The walk had recorded the email as the
+step's `value` — the spelling the section's own `realization.value` bullet asks for, *"the literal
+the page was given"* — and the graph's transition shape carries `arguments` and has no `value` key,
+so the value went into the graph and came out of it gone. The generator did the right thing with what
+it had (it refuses to invent a value, and the gap names the fix: record it as an argument), and that
+is exactly the point: **a document the model writes and the generator cannot read is the pivot
+described but not performed.** `realization[]` keeps the `value`; the graph drops it. Phase 4 is
+where the spec starts being written from the document that has it.
 
 The point is not that the ABM is nicer. It is that **a model nothing downstream reads cannot be
 wrong in a way that matters**: if the spec comes from the graph, P1–P15 are an opinion about a
@@ -1129,9 +1182,11 @@ Each of these is load-bearing, not ceremony:
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (34 mutations, all 34 refused; 17 through Phase 2, 9
-   more for Phase 3, and 8 for the defects the deploy and the live runs found — four from the two
-   early deploys, three from the recorder defect, one from the instruction sentence); break the
+   `test/prove-abm.py` is the running instance (43 mutations, all 43 refused; 17 through Phase 2, 9
+   more for Phase 3, and 17 for the defects the deploy and the live runs found — four from the two
+   early deploys, three from the recorder defect, one from the instruction sentence, five from the
+   value template the walk was never told how to declare, three from the arguments placement the
+   walk was never told the rule of, and one from the two readings of one log); break the
    *rule*, not a clause the code already treats as equivalent
    (removing `cutParameter &&` proved nothing — behaviourally identical).
    **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded

@@ -126,7 +126,31 @@ has('and the one-click case is named as the exception', text, '`apply_coupon` is
 has('and the verb is the schema\'s, not the capability\'s name',
   text, 'the capability\'s name is not the verb');
 has('and the step\'s purpose is asked for', text, '`purpose` is the step\'s part in the behaviour');
-hasNot('the old classification instruction is gone', text, 'capability_kind: composite');
+// The seventh defect a live run found, and it is the `target` defect one field over. The section
+// offered the template and never said that writing one obliges the walk to declare it, so a
+// 0.1.28 walk wrote two templates, declared no input anywhere, and had its whole model withheld by
+// `P5` for a convention it had been told half of. The spelling it offered was wrong too:
+// `placeholdersIn` reads double braces, and `<param>` is a literal the machinery never sees.
+has('a value template is named as a parameter the walk has to declare',
+  text, 'A template is a parameter you have to declare');
+has('and it says where the parameter is declared, and why that is where',
+  text, 'a behaviour\'s input is read from the inputs of the capabilities it is composed of');
+has('and it names the consequence: the model is withheld, not the step',
+  text, 'which withholds the whole model, not the one step');
+has('and writing the literal instead is offered as the way out',
+  text, 'the page was given one, and P5 accepts it');
+hasNot('and the placeholder spelling the machinery does not read is gone from the section',
+  text, '<param>');// The tenth defect, and the seventh one's twin: the section invited a concrete value with `arguments`
+// and never said whose value it is. A 0.1.29 walk filled the email, then put `{"email": …}` on the
+// click that followed — a field that accepted a value, on the edge where the walk happened to be —
+// and P5 refused it, correctly, because no effect of a click reports the email. The rule is per edge,
+// and which edge was never stated.
+has('a value is read against the edge it was given to, not the run at large',
+  text, 'They are read against this edge\'s own evidence');
+has('and it says what it is read against: this transition\'s effects and this step\'s own observation',
+  text, 'transition\'s effects and this step\'s own observation');
+has('and the fill\'s value is placed on the fill rather than on the click that followed it',
+  text, 'the rule is per edge, so the fill\'s value goes on the fill.');hasNot('the old classification instruction is gone', text, 'capability_kind: composite');
 hasNot('and so is the clause that called a composite the behaviour',
   text, 'A **composite** is the behaviour a user would ask');
 hasNot('and the sentence that framed the step as the exception is gone',

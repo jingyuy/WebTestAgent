@@ -235,6 +235,38 @@ export function candidatesFromGraph(graph, run = null, recordedSteps = null) {
 }
 
 /**
+ * One edge is one step of a behaviour however many times it was walked.
+ *
+ * The log is append-only, so a re-walked step is a second record for the same
+ * `capability_id`/`transition_id` pair, and the pair is the key for the same reason
+ * `recordTransition` keys an edge by its endpoints: the walk is where the run is now, and a
+ * behaviour's edge is its last step's destination (D12). The newest `walk_index` stands.
+ *
+ * This is exported because it is a rule about the log and not a step of either reader. A live
+ * 0.1.29 run re-recorded one edge to correct a mistake, the commit's own assembly collapsed the
+ * two records and this module's reader did not, and the two readings of that one run disagreed
+ * about how many times the behaviour clicked Sign in — the shipped model performing the click
+ * once, the profile reading performing it twice with a different `storage_changed` target each
+ * time. Two readers of one log have to agree, so the rule lives in one of them.
+ *
+ * A record with no `walk_index` cannot be ordered against the others, so it sorts before all of
+ * them rather than after: guessing last would claim that an unordered step ends a behaviour,
+ * which is the one position a step cannot be guessed into.
+ */
+export function keyedRealizationSteps(records) {
+  const byKey = new Map();
+  for (const record of rows(records)) {
+    const id = record.capability_id ?? record.id;
+    if (record.kind !== 'realization_step' || typeof id !== 'string') continue;
+    const key = JSON.stringify([id, record.transition_id ?? null]);
+    const previous = byKey.get(key);
+    if (previous && (previous.walk_index ?? -1) > (record.walk_index ?? -1)) continue;
+    byKey.set(key, record);
+  }
+  return byKey;
+}
+
+/**
  * The steps a run recorded, per capability, out of the run's own log.
  *
  * `capabilities.jsonl` holds three kinds of record and the `realization_step` one is the behaviour
@@ -251,10 +283,12 @@ function recordedStepsIn(dir) {
   const path = join(dir, 'capabilities.jsonl');
   if (!existsSync(path)) return null;
   const byCapability = new Map();
-  for (const record of readJsonl(path)) {
-    const id = record?.capability_id;
-    if (record?.kind !== 'realization_step' || typeof id !== 'string') continue;
+  for (const record of keyedRealizationSteps(readJsonl(path)).values()) {
+    const id = record.capability_id ?? record.id;
     byCapability.set(id, [...(byCapability.get(id) ?? []), record]);
+  }
+  for (const list of byCapability.values()) {
+    list.sort((left, right) => (left.walk_index ?? -1) - (right.walk_index ?? -1));
   }
   return byCapability;
 }

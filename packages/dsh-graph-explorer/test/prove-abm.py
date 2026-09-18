@@ -314,13 +314,14 @@ CASES = [
     },
     {
         # A section's text is a prompt template, and 0.1.24 shipped a placeholder written as a
-        # template: the harness refused to boot with `unknown prompt variable "{{param}}"`. The
-        # placeholder is a legitimate thing to want in an example, which is why the suite has to
-        # say that this is not how to write one.
+        # template: the harness refused to boot with `unknown prompt variable "{{param}}"`. A
+        # placeholder is a legitimate thing to want in an example, which is why the suite has to say
+        # that this is not how to write one — and the section now describes the spelling instead of
+        # printing it, which is exactly the care this case holds down.
         'rule': 'the protocol text cannot spell a prompt variable the harness does not register',
         'file': 'lib/protocol.js',
-        'old': 'a \\`"<param>"\\` template bound to the behaviour',
-        'new': 'a \\`"{{param}}"\\` template bound to the behaviour',
+        'old': "or a template bound to the behaviour's input",
+        'new': "or a \\`\"{{param}}\"\\` bound to the behaviour's input",
         'suite': 'test/protocol.test.mjs',
     },
     {
@@ -379,6 +380,94 @@ CASES = [
         'old': "    const names = requires.map((entry) => entry.env).join(', ');\n",
         'new': "    const names = requires.join(', ');\n",
         'suite': 'test/generate.test.mjs',
+    },
+    {
+        # The seventh defect a live run found, and the `target` defect one field over: the section
+        # offered a value template and never said that writing one obliges the walk to declare the
+        # parameter. A 0.1.28 walk wrote two templates, declared no input anywhere, and had its whole
+        # model withheld by `P5` for a convention it had been told half of.
+        'rule': 'a value template is named as a parameter the walk has to declare',
+        'file': 'lib/protocol.js',
+        'old': "     a parameter you have to declare**:\n",
+        'new': "     a parameter you may declare if you like**:\n",
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # And the other half of the convention: *where* the declaration goes, and why that is where.
+        # A behaviour's input is read from the inputs of the capabilities it is composed of, so a
+        # walk told to declare the parameter and not told where has been told nothing it can do.
+        'rule': 'and the section says where the parameter is declared, and why that is where',
+        'file': 'lib/protocol.js',
+        'old': "     because a behaviour's input is read from the inputs of the capabilities it is composed of, and\n",
+        'new': "     because a behaviour's input is whatever the behaviour says it is, and\n",
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # The consequence, which is the part that makes it a rule rather than advice: the refusal
+        # costs the whole model, not the one step.
+        'rule': 'and the consequence of an undeclared parameter is named as the model, not the step',
+        'file': 'lib/protocol.js',
+        'old': "     the whole model, not the one step. Write the literal instead if you would rather not declare\n",
+        'new': "     the one step alone. Write the literal instead if you would rather not declare\n",
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # And the way out, so that a walk that does not want to declare a parameter has something to
+        # do other than invent one: write the literal the page was actually given.
+        'rule': 'and writing the literal instead is offered, with the reason it is accepted',
+        'file': 'lib/protocol.js',
+        'old': "     it: the page was given one, and P5 accepts it.\n",
+        'new': "     it: a value is a value.\n",
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # And the machinery the sentence now relies on. Telling the walk to declare a parameter on
+        # the capability that is the step is only worth saying if the projection actually reads it
+        # there: a behaviour's input is the inputs of the capabilities it is composed of. Sending a
+        # walk somewhere the code does not look would be the same defect with one more move in it.
+        'rule': 'a behaviour takes the inputs of the capabilities it is composed of',
+        'file': 'lib/abm.js',
+        'old': "    if (!members.length) return declared;\n",
+        'new': "    if (!members.length) return declared;\n    return declared;\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The other half of the same live run. Its walk re-recorded one edge to correct a mistake,
+        # the commit's own assembly folded the two records and the behaviour profile's reader did
+        # not, so one run had two readings of how many times the behaviour clicked Sign in. The
+        # rule is one edge is one step however many times it was walked; this mutation keys the
+        # collapse by the walk as well, which is the shape the reader had before the fix.
+        'rule': 'a step re-walked is one step of a behaviour, not two',
+        'file': 'lib/abm.js',
+        'old': "    const key = JSON.stringify([id, record.transition_id ?? null]);\n",
+        'new': "    const key = JSON.stringify([id, record.transition_id ?? null, record.walk_index]);\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The tenth defect, which is the seventh one's twin: the section invited a concrete value
+        # with `arguments` and never said whose value it is. A 0.1.29 walk filled the email and then
+        # put `{"email": ...}` on the click that followed, and P5 refused it — correctly, because no
+        # effect of a click reports the email. The rule is per edge; which edge was never stated.
+        # These three mutations are the three ways of leaving that unsaid.
+        'rule': 'a value is read against the edge it was given to, and not the run at large',
+        'file': 'lib/protocol.js',
+        'old': "     They are read against this edge's own evidence: each one is looked for among this\n",
+        'new': "     They are read against the run's own evidence: each one is looked for among this\n",
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        'rule': 'and what they are read against is this edge\'s own evidence',
+        'file': 'lib/protocol.js',
+        'old': "     transition's effects and this step's own observation, so a value the page reports\n",
+        'new': "     effects and observations of the whole run, so a value the page reports\n",
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        'rule': 'and the fill\'s value is placed on the fill, not on the click that followed it',
+        'file': 'lib/protocol.js',
+        'old': "     the rule is per edge, so the fill's value goes on the fill.\n",
+        'new': "     the rule is wherever the value reads best.\n",
+        'suite': 'test/protocol.test.mjs',
     },
 ]
 

@@ -1479,7 +1479,12 @@ and **no capability in that run declares an input**. This section offers the tem
 a literal or a `\"<param>\"` template bound to the behaviour's input"* — and never says that writing
 one obliges you to declare the parameter: `capability_input` is documented on the tool, not in the
 orders the walk reads first. So the walk was offered a spelling and not told what it costs, `P5`
-correctly refused the document, and the fix is a sentence here rather than a weaker rule.
+correctly refused the document, and the fix is a sentence here rather than a weaker rule — **fixed in
+0.1.29**: the section now says that a template is a parameter the walk has to declare, where the
+declaration goes and why that is where, that the refusal costs the whole model rather than the step,
+and that writing the literal the page was given is the way out. It also stops printing a spelling the
+machinery does not read — `placeholdersIn` matches double braces, so the `<param>` the section used
+to offer would have been typed into the field verbatim.
 
 **A sixth defect came out of that same run, and it is in the one sentence a person has to act on.**
 The instruction above the spec read *"Set [object Object] before running it"*: `requires` holds
@@ -1489,8 +1494,47 @@ Fixed in 0.1.28 by moving the sentence into `lib/generate.js` as `requiresInstru
 where a suite can see it — `generateTest`'s return carries no `next`, so the tool-level sentence was
 unpinnable until it moved. Prose that no suite can see is prose that rots.
 
+**The 0.1.29 run is where that seventh fix was proved, and where the next two defects came from.**
+Its behaviour takes `{email, password}` as its input with **no input declared anywhere in the run** —
+the union rescue read them off `cap_fill_login_email` and `cap_fill_login_password`, which is exactly
+what the new sentence tells a walk to depend on — the walk wrote `{{email}}` and `{{password}}` in the
+double braces the section now names, and there is **no `unbound_parameter` at all**. Under 0.1.28
+that same walk shape produced two blockers; under 0.1.29 it produced none, and the fix is the
+sentence. What withheld the model this time was a *different* refusal, and a fair one: the walk
+filled the email and then put `{"email":"test@example.com"}` on the **click** that followed, and
+`P5/unobserved_argument` refused the document, because no effect of a click reports the email. The
+rule is right — what the section had never said is that it is **per edge** (each argument is read
+against *this* transition's effects and *this* step's own observation), so a walk holding a value and
+offered two fields that take one had no way to choose. Fixed in 0.1.30, in prose, in the section and
+in the `graph_transition` schema.
+
+**And the same run had one log read two ways.** Its walk re-recorded an edge to correct itself, which
+the log keeps correctly as two `realization_step` records for one `capability_id`/`transition_id`
+pair. The commit's own assembly folds the pair and keeps the newest walk; the behaviour profile's
+reader did not — so the shipped model performed the click once and the profile performed it **twice**,
+naming a different `storage_changed` target each time (`acme-demo-state` and
+`localStorage.acme-demo-state`). Also fixed in 0.1.30, by moving the rule into one function both
+readers import.
+
+What that run did *not* settle is whether a wrong `arguments` can be retracted: re-recording the edge
+did not clear the finding, and it split a second one-step journey strand. The protocol's commit step
+tells the walk that evidence is allowed to be wrong, so this is a machine instruction that cannot be
+acted on — a defect by the same argument as the two above — but the fix is a question about commit
+semantics rather than a sentence, and it is left open rather than guessed at.
+
+**The 0.1.30 run then wrote the model — the first live run whose `application-model.json` is both
+written and valid — and found the defect that says most about where the pivot still is.** Its walk
+recorded the email as the step's `value`, the spelling the section asks for; the graph's transition
+shape carries `arguments` and has no `value`, so `transition_fill_email`'s action is
+`{"capability": "cap_fill_email", "target": "element_email_input"}` with the email nowhere in it. The
+generated spec dropped that step with a blocking `step_has_no_value_to_type`, correctly refusing to
+invent a value — and the result would not sign in, while the next step's password generated fine
+because the walk had put that one in `arguments`. A document the model writes that the generator
+cannot read is the pivot described rather than performed, and the reason is stated in the acceptance
+sentence of Phase 4: the spec is to be written from `realization[]`, which keeps the `value`.
+
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 34 mutations, all 34 refused, the tree
+the failure. `test/prove-abm.py` is that file for this work — 43 mutations, all 43 refused, the tree
 restored byte-identically and `14/14 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.
