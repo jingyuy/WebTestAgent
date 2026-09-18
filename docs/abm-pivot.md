@@ -13,6 +13,17 @@ Status: **plan, not started.** Baseline: plugin `0.1.22`, branch
 | **D2** | **Copy the schemas in-repo and modify them here.** The external schema is no longer authoritative for this project. | §2: a vendored `schemas/` tree, a fork policy, and a validation strategy that does not cost the plugin its zero-dependency `npm test`. §3: `entities` / `state_variables` / `actors` get **real top-level arrays** instead of `metadata.extra`. |
 | **D3** | **`composed_of` demoted.** `realization.steps[]` is the default home for a behaviour's mechanics. | §3: P2/P3 rules. `composed_of` survives only for a behaviour genuinely built from other behaviours. |
 | **D4** | **A goal-less run keeps its walk as a journey.** The ABM always carries ≥1 journey, with `goal_stated: false` when the run named no goal. No `paths[]` container. | §3: the walk has exactly one home. Rules P7/P11 depending on a journey's presence must be written to hold for a `goal_stated: false` journey. |
+| **D5** | **`transitions[]` comes back, re-scoped to the behaviour.** One entry per `(from_state, behaviour, to_state)` — never per tool call. `journeys[].steps[]` references them, the way `journeys[].transitions[]` already does. | §3: an edge is first-class again, so `preconditions[]`/`effects[]` leave `behaviors[]`. **P12 is repaired** (it cannot hold without this — see the note below). |
+| **D6** | **The ABM represents unwalked affordances.** `state.affordances[]` — an affordance is offered *by a surface*, so it lives on the state that offers it. | §3: new array + **P13**, which makes "nobody did this" checkable rather than asserted. |
+| **D7** | **No `features[]` in the ABM.** Feature grouping stays a `graph.json` layer; the ABM is a behaviour model, not a product map. | §3: "what the ABM deliberately does not gain". §2: `feature.schema.json` is **not** forked. The `feature` protocol argument keeps feeding `graph.json` only. |
+
+**Why D5 is not just a preference — P12 could not hold without it.** The current §3 made a walk step a
+*behaviour* (`login`) while P12 demanded "every committed transition appears as exactly one
+`journeys[].steps[]` entry". On the real 0.1.22 run that is **3 committed transitions against 1
+behaviour-level step**, so the rule fails on the very run it was written to check. It holds today only
+because `assembleJourneys` builds `journeys[].transitions[]` per *call* (`commit.js:1183`) — i.e. the
+rule was accidentally reading the graph's own granularity, not the ABM's. An edge whose unit is the
+behaviour is what makes the rule sound, and collapsing 3 calls into 1 edge is the pivot itself.
 
 ## 1. Two documents, one evidence log
 
@@ -57,10 +68,13 @@ Nothing is recorded twice by hand, and neither document is a projection of the o
 | | `graph.json` (fallback) | `application-model.json` (product) |
 | --- | --- | --- |
 | Schema | vendored ABG `0.1`, **byte-identical to upstream** | forked ABM `0.2` |
-| Spine | `states` + `transitions` | `behaviors` |
+| Spine | `states` + `transitions` | `behaviors` + `transitions` |
 | Per-element interaction | its own top-level `capability` (`cap_fill_login_email`) | a `step` inside its behaviour's `realization[]` |
 | Behaviour composition | `composed_of` over capabilities | `composed_of` over behaviours, demoted (D3) |
-| The walk | `transitions[]`, ordered | `journeys[].steps[]`, ordered |
+| The edge set | `transitions[]`, **one per tool call** (3 for one sign-in) | `transitions[]`, **one per (from, behaviour, to)** (1 for one sign-in) — D5 |
+| The walk | `journeys[].transitions[]`, derived by `assembleJourneys` | `journeys[].steps[]`, referencing `transitions[]` and carrying the call's `arguments` |
+| Unwalked affordances | nothing — `coverage.unmodelled_routes` is a *route* statement, and an SPA has one route | `state.affordances[]` (D6), so "offered but never performed" is representable at all |
+| Product features | `features[]`, assembled from the `feature` argument | **none** — D7 |
 | Actors | `state.identity.variant`, a free string | `actors[]` top-level, referenced by id |
 | Entities / state variables | implicit (`data_subject`, effect targets, dimensions) | `entities[]` / `state_variables[]` top-level |
 | Consumers | `graph_test` (unchanged), anything already reading ABG 0.1 | the PR→test path this pivot exists for |
@@ -86,10 +100,12 @@ packages/dsh-graph-explorer/
       application-model.schema.json     NEW root document
       common.schema.json                copied; ids/refs/assertions/metadata unchanged
       behavior.schema.json              NEW (capability, re-scoped: the spine)
-      state.schema.json                 copied; identity/detection unchanged
-      journey.schema.json               MODIFIED: carries the ordered walk
-      element.schema.json api.schema.json observation.schema.json feature.schema.json
-      application.schema.json           copied; `actors` now populated
+      transition.schema.json            MODIFIED (D5): `capability` → `behavior`, one edge per behaviour
+      state.schema.json                 MODIFIED (D6): gains `affordances[]`
+      journey.schema.json               MODIFIED: `steps[]` references `transitions[]`, ordered
+      element.schema.json api.schema.json observation.schema.json application.schema.json
+                                        copied; `actors` now populated
+      (feature.schema.json NOT forked — D7)
 ```
 
 Three rules, and they are the whole policy:
@@ -151,36 +167,41 @@ are still vendored and versioned here, which is the part D2 actually asks for.
 
   "entities": [                                             // D2: new, top-level
     { "name": "session", "description": "An authenticated session.",
-      "reads": ["element_login_email"], "writes": ["state_project_list"] },
+      "reads":  ["element_email_input", "element_password_input"],
+      "writes": ["localStorage.acme-demo-state"] },
     { "name": "project", "description": "A unit of work owned by a user.",
+      "reads":  ["element_project_list", "element_project_name_input"],
+      "writes": ["element_project_list"],
       "evidence": [{"observation": "obs_0004", "role": "identity"}] }
   ],
 
   "state_variables": [                                      // D2: new, top-level
     { "name": "projects", "type": "string", "values": ["empty", "populated"],
       "dimension_of": ["state_project_list_authenticated_projects_populated"],
-      "detection": {"type": "value", "target": "projects", "operator": "equals", "expected": "populated"},
+      "detection": {"type": "value", "target": "element_project_list",
+                    "operator": "equals", "expected": "populated"},   // P7: an ELEMENT, not a storage key
       "evidence": [{"observation": "obs_0004", "role": "effect"}] }
   ],
 
-  "behaviors": [                                            // the spine
+  "behaviors": [                                            // the vocabulary: what an actor can DO
     {
       "id": "behavior_login",
-      "name": "login",                                      // the verb a user would ask for
+      "name": "login",                                      // P1: the verb a user would ask for
       "kind": "interaction",
       "actor": "anonymous_visitor",
-      "preconditions": [{ "kind": "state", "state": "state_login_anonymous" }],
       "input":  { "email": {"type":"string","required":true},
                   "password": {"type":"string","required":true,"format":"password"} },
       "output": { "session": {"type":"entity","entity":"session"} },
       "realization": [                                      // D3: mechanics live HERE
-        { "action":"fill",  "element":"element_login_email",    "value":"{{email}}",    "purpose":"enter_credentials" },
-        { "action":"fill",  "element":"element_login_password", "value":"{{password}}", "purpose":"enter_credentials" },
-        { "action":"click", "element":"element_login_submit",   "purpose":"submit" }
+                                                             // D5: a step carries its OWN local effect
+        { "action":"fill",  "element":"element_email_input",    "value":"{{email}}",    "purpose":"enter_credentials",
+          "effects":[{"type":"value_changed","target":"element_email_input","to":"test@example.com","observed":true}] },
+        { "action":"fill",  "element":"element_password_input", "value":"{{password}}", "purpose":"enter_credentials",
+          "effects":[{"type":"value_changed","target":"element_password_input","to":"[set]","observed":true}] },
+        { "action":"click", "element":"element_login_button",   "purpose":"submit" }
       ],
-      "effects": [ { "type":"state_entered", "to":"state_project_list_authenticated_projects_populated", "observed":true },
-                   { "type":"storage_changed", "target":"localStorage.session", "observed":true } ],
       "composed_of": [],                                    // D3: empty unless genuinely compositional
+      // D5: no `preconditions[]`/`effects[]` here — those are the EDGE's, see transitions[] below
       "evidence": [ {"observation":"obs_0002","role":"action"},
                     {"observation":"obs_0003","role":"action"},
                     {"observation":"obs_0004","role":"effect"} ],
@@ -188,18 +209,71 @@ are still vendored and versioned here, which is the part D2 actually asks for.
     }
   ],
 
-  "states": [ /* unchanged from ABG 0.1: identity{page_type,variant,dimensions}, elements[], detection[] */ ],
+  "transitions": [                                          // D5: one edge per (from, behaviour, to)
+    {
+      "id": "transition_login",                              // 3 committed graph transitions → this ONE
+      "from_state": "state_login_anonymous",
+      "behavior": "behavior_login",                         // the behaviour, never the step
+      "to_state": "state_project_list_authenticated_projects_populated",
+      "guard": null,                                        // the condition that made it possible, if any
+      "effects": [                                          // what the APPLICATION changed
+        {"type":"state_entered","to":"state_project_list_authenticated_projects_populated","observed":true},
+        {"type":"storage_changed","target":"localStorage.acme-demo-state","observed":true}
+      ],
+      "apis": [],                                           // Phase 5 resolves these from the request log
+      "evidence": [                                         // the per-EDGE three-role binding
+        {"observation":"obs_0001","role":"identity"},       //   the surface it started from
+        {"observation":"obs_0004","role":"action"},         //   the action itself
+        {"observation":"obs_0004","role":"effect"}          //   what changed between the readings
+      ],
+      "metadata": { "confidence": 0.9, "status": "verified" }
+    }
+  ],
+
+  "states": [  // as ABG 0.1 — identity{page_type,variant,dimensions}, elements[], detection[] — PLUS:
+    {
+      "id": "state_login_anonymous",
+      "identity": { "route":"/", "page_type":"login", "variant":"anonymous" },
+      "elements": [ /* element_email_input, element_password_input, element_remember_checkbox,
+                        element_login_button, element_forgot_password_link */ ],
+      "detection": [ /* as ABG 0.1 */ ],
+      "affordances": [                                      // D6: offered here, never performed
+        { "element": "element_forgot_password_link",         // must be one of THIS state's elements
+          "expected_behavior": "reset_password",             // a hypothesis, and `unwalked` says so
+          "metadata": { "status":"unwalked", "confidence":0.3, "producer":"llm:deepseek-flash" } }
+      ]
+    },
+    {
+      "id": "state_project_list_authenticated_projects_populated",
+      "identity": { "route":"/", "page_type":"project_list", "variant":"authenticated",
+                    "dimensions": { "projects": "populated" } },
+      "elements": [ /* element_nav_projects, element_nav_settings, element_current_user,
+                        element_logout_button, element_project_name_input,
+                        element_add_project_button, element_project_list */ ],
+      "detection": [ /* as ABG 0.1, incl. the `projects` value assertion */ ],
+      "affordances": [                                      // these four are in the capture and
+        { "element": "element_nav_projects",                 //   in no committed realization step
+          "expected_behavior": "list_projects",
+          "metadata": { "status":"unwalked", "confidence":0.3 } },
+        { "element": "element_nav_settings", "expected_behavior": "open_settings",  "metadata": { "status":"unwalked", "confidence":0.3 } },
+        { "element": "element_logout_button", "expected_behavior": "sign_out",     "metadata": { "status":"unwalked", "confidence":0.3 } },
+        { "element": "element_add_project_button", "expected_behavior": "create_project", "metadata": { "status":"unwalked", "confidence":0.3 } }
+      ]
+    }
+  ],
 
   "journeys": [
     {
       "id": "journey_login_and_see_projects",
       "name": "Sign in to Acme and see the projects list",
-      "goal": "Sign in as the demo user and reach the project list",
+      "goal": "Sign in as the demo user and reach the project list",   // NEVER the raw instruction:
+                                                             // the instruction carries the credential,
+                                                             // and this document is meant to be read
       "goal_stated": true,                                  // D4: false = the name is the run's own instruction
       "actor": "authenticated_user",
       "start_state": "state_login_anonymous",
-      "steps": [                                            // the walk, moved here
-        { "behavior": "behavior_login", "arguments": {"email":"demo@acme.test"}, "to_state": "state_project_list_authenticated_projects_populated" }
+      "steps": [                                            // the walk: ORDER over transitions[]
+        { "transition": "transition_login", "arguments": {"email":"test@example.com"} }
       ],
       "assertions": [ {"type":"url","operator":"matches","expected":"/projects"} ]
     }
@@ -209,21 +283,25 @@ are still vendored and versioned here, which is the part D2 actually asks for.
 }
 ```
 
-### What the ABM drops, and why
+### What the ABM drops, what it re-scopes, and what it refuses to gain
 
-| Dropped from graph.json | Why | Where it went |
+| graph.json | ABM | Why |
 | --- | --- | --- |
-| flat `capabilities[]` mixing behaviours and steps | That mix *is* the defect this pivot exists to fix — measured in the 0.1.22 run: `cap_login` beside `cap_fill_login_email`, `cap_fill_login_password`, `cap_submit_login` | behaviours in `behaviors[]`, steps in `behaviors[].realization[]` |
-| `transitions[]` as a top-level array | A transition is "one behaviour applied between two states" — a *walk* fact, and a walk is what a journey is | `journeys[].steps[]` (ordered), with `effects[]` on the behaviour |
-| element `composed_of` chains for mechanics | D3 | `realization[]` |
+| flat `capabilities[]` mixing behaviours and steps | **dropped** → behaviours in `behaviors[]`, mechanics in `behaviors[].realization[]` | That mix *is* the defect this pivot exists to fix — measured in the 0.1.22 run: `cap_login` beside `cap_fill_login_email`, `cap_fill_login_password`, `cap_submit_login` |
+| `transitions[]`, one per tool call | **re-scoped** → one per `(from_state, behaviour, to_state)`, with `journeys[].steps[]` referencing it | D5. The edge is real knowledge (`guard`, per-edge `evidence` roles, the from→to *pairing*) that a behaviour cannot carry without implying a cross-product. It also gives P12 a sound unit |
+| element `composed_of` chains for mechanics | **dropped** → `realization[]` | D3 |
+| `features[]` | **deliberately not carried** | D7. A product map is a different document's job; the ABM stays a behaviour model |
+| — | **gained:** `state.affordances[]` | D6. `coverage.unmodelled_routes` is a *route* statement, and an SPA has one route, so the graph cannot express "this control was offered and never pressed" at all |
 
-Nothing is lost that a consumer needs: a walk still exists as an ordered sequence, every step
-still names a behaviour and an arrival state, and every arrival state still carries `detection[]`.
+Nothing is lost that a consumer needs: the edge set is `transitions[]`, the walk's order is
+`journeys[].steps[]`, the mechanics are `realization[]`, and every state still carries `detection[]`.
 
-**D4 — the walk always has a home.** With `transitions[]` gone from the ABM, a run that reached
-no goal would have no walk recorded at all, and "the steps exist nowhere" is a worse outcome than
-"the journey has no goal". So the ABM always contains **at least one journey**, assembled the way
-`assembleJourneys` already does (`commit.js:1183`), with:
+**D4 — the walk always has a home, restated for D5.** D4 was originally argued from preservation:
+with `transitions[]` gone, a goal-less run would have had no walk recorded anywhere. D5 restores
+`transitions[]`, so that specific loss is repaired — but D4 stands, for a reason that survives it:
+`transitions[]` is an edge *set*, and a set has no order and no purpose. **The walk's order and the
+walk's point live only in `journeys[]`.** So the ABM still contains **at least one journey**,
+assembled the way `assembleJourneys` already does (`commit.js:1183`), with:
 
 - `goal_stated: false` when no step claimed a `journey_name`, and the run's instruction kept as
   the journey's `goal` (as today) — the flag is what tells a consumer "this name is a sentence a
@@ -254,21 +332,28 @@ correctable while the page is still on screen).
 | P1 | Every `behaviors[].name` is a verb phrase a user would ask for; `<verb>_<page>_<element>` (`fill_login_email`) is refused | `error` |
 | P2 | Every behaviour has `realization[]`, **or** a non-empty `composed_of`, **or** is `kind: navigation`/`query` | `warning` |
 | P3 | `composed_of` may only name **behaviours**, and each must be realised by ≥1 committed step (the existing `composite_part_never_walked` idea, restated over behaviours) | `error` |
-| P4 | Every `realization[].element` resolves to an element declared in some state | `error` (ABG invariant 3) |
-| P5 | Every `realization[].value` that is a literal was **observed**; every `{{param}}` binds to a declared `input` | `error` (extends `withheldByEvidence`, generate.js:345) |
-| P6 | Every `state.identity.variant` and `journeys[].actor` names an `actors[].id` | `warning` |
-| P7 | Every entry in `identity.dimensions` is declared in `state_variables[]`, and each declaration has a `detection` | `error` (today a protocol rule only) |
-| P8 | Every `effects[].target` that is a semantic path belongs to a declared `entities[].name`, or to `localStorage`/`sessionStorage`/`cookie` | `warning` |
-| P9 | Every behaviour carries ≥1 `evidence[]` entry, and every evidence id resolves | `error` — the anti-hallucination rule |
+| P4 | Every `realization[].element` **and every element-shaped `effects[].target`** (`value_changed`, `visibility_changed`, `element_created`, `element_destroyed`, `validation_error`) resolves to a declared element **id** — and a realization's element is **derived from the state's declaration, never accepted as typed by the model** | `error` (ABG invariant 3) |
+| P5 | Every `{{param}}` in a `realization[].value` binds to a declared `input` or to a `journeys[].steps[].arguments` key; every concrete value the model records (a step's effect `to`, an edge's `arguments`) was **observed**, and a redacted field is recorded as the honest `[set]` rather than omitted | `error` (extends `withheldByEvidence`, generate.js:345) |
+| P6 | Every `state.identity.variant` and `journeys[].actor` names an `actors[].id`, and that id is **traceable** to a state variant or an observation | `warning` |
+| P7 | Every entry in `identity.dimensions` is declared in `state_variables[]`, each declaration carries a `detection`, and **that `detection` reads an element or a route** — a check over a storage key is a dimension-shaped claim nothing can evaluate | `error` (today a protocol rule only; the graph's own `persistence_evidence_recorded` note already refuses the storage case) |
+| P8 | Every `transitions[].effects[].target` that is a semantic path belongs to a declared `entities[].name`, or to `localStorage`/`sessionStorage`/`cookie` | `warning` |
+| P9 | Every behaviour carries ≥1 `evidence[]` entry, every `transitions[]` entry carries the three evidence roles (`identity`/`action`/`effect`), and every evidence id resolves | `error` — the anti-hallucination rule |
 | P10 | Objects with `metadata.confidence < 0.5` or `status: inferred` cannot back a `criticality: critical` journey | `warning` (ABG invariant 12) |
-| P11 | Every behaviour is reachable from some journey's `steps[]`, or from a walkable behaviour's `composed_of` — a behaviour nothing can perform is a vocabulary entry, not a behaviour | `warning` (supersedes the draft's "every behaviour in a journey") |
-| P12 | The ABM has **≥1 journey** (D4), and every committed transition appears as exactly one `journeys[].steps[]` entry | `error` — the walk-preservation rule, and the D1 coherence check |
+| P11 | Every behaviour is the `behavior` of ≥1 `transitions[]` entry, or a member of a walkable behaviour's `composed_of` — a behaviour no edge can perform is a vocabulary entry, not a behaviour | `warning` (supersedes the draft's "every behaviour in a journey") |
+| P12 | **Walk preservation (D4 + D5), both directions.** *(a)* every transition `graph.json` committed is accounted for in the ABM — as an edge's behaviour, or as a `realization[]` step of a behaviour whose own edge starts where that transition started; *(b)* every `transitions[]` entry is backed by ≥1 committed graph transition with the same `from_state`/`to_state`/behaviour; *(c)* the ABM has ≥1 journey (D4) and every `journeys[].steps[]` entry names a `transitions[]` id | `error` — the D1 coherence check |
+| P13 | **An affordance is offered, not performed (D6).** Every `state.affordances[].element` is declared in **that same state's** `elements[]`; an affordance whose element *is* the target of a committed `realization[]` step is reported, because the walk itself refutes "nobody did this" | `error` (unresolved element) / `warning` (`affordance_already_walked`) |
 
 P1 and P3 are the ones that make this the pivot rather than a rename: P1 refuses the exact names
 the 0.1.22 run produced, and P3 stops `composed_of` from being used as a stand-in for realisation.
-P12 is what stops D4 from being a promise: it is the same check from both directions at once —
-on the ABM (is there a walk?) and across the two documents (does it match `graph.json`'s
-transitions?).
+P12 is the load-bearing one and it is why D5 exists: as written before D5 it could not hold — it
+demanded one `journeys[].steps[]` entry per committed transition while §3 made a step a
+*behaviour*, which is 1 against the real run's 3. It now checks the same fact in the unit the ABM
+actually uses, and it is the pivot stated as a gate: **three committed calls become one edge and
+three ordered realization steps, and nothing is allowed to go missing in the collapse.**
+
+One deliberate asymmetry: an edge that no journey walks is reported the way `reachability`
+already is (`warning`), because a walk that avoided a behaviour is not evidence it cannot be
+performed. The error severities above apply only where the two documents must agree exactly.
 
 ## 4. What does not change
 
@@ -289,6 +374,9 @@ Most of the system, and it should not be re-litigated:
 - **`graph_test` and the generated spec.** It reads `graph.json`, which is unchanged, so the
   spec path keeps working on day one. Whether an ABM-native generator is better is a later
   question, not a prerequisite.
+- **The `features[]` layer (D7).** `features[]` stays a `graph.json` property. The `feature`
+  protocol argument keeps feeding it and `feature_closure` keeps checking it; the ABM ignores it.
+  A consumer that needs product grouping reads the fallback — which is what a fallback is for.
 - **The lossless-JSON tool boundary** (`test/lossless.mjs`).
 
 ## 5. Phases
@@ -299,12 +387,14 @@ Two halves, both cheap and both de-risking everything after them.
 
 **0a — vendoring (D2).** Copy `~/IntegrationTestGenerator/schemas/*.schema.json` to
 `schemas/0.1/` byte-identical, write `VENDOR.md` with sha256s, and fork `schemas/abm/0.2/` with
-the new root, the `$id` rewrite, and the `journeys[].steps[]` / `realization[]` additions.
+the new root, the `$id` rewrite, the **behaviour-level `transitions[]`** (D5), `state.affordances[]`
+(D6) and the `journeys[].steps[]` / `realization[]` additions — and **without** `feature.schema.json`
+(D7).
 Add `scripts/validate.mjs` (opt-in ajv) and point the verification protocol at it.
 
 **0b — the projection, as a *check*, not as the pipeline.** `lib/abm.js`, pure, no writes:
 `modelFromCandidates({observations, states, capabilities, transitions, instruction})` → the ABM
-shape of §3, plus `profileFindings(model)` implementing P1–P12. This is a **diagnostic over
+shape of §3, plus `profileFindings(model)` implementing P1–P13. This is a **diagnostic over
 recorded runs**, never the production path — `commitRun` will build the same document from the
 same store, and Phase 0b exists to have something to measure with before any live run.
 
@@ -327,12 +417,14 @@ same store, and Phase 0b exists to have something to measure with before any liv
 - Rule: when `behavior` is given, the call **also** appends a realization step to that behaviour
   (via a new `store.addRealizationStep`) **and** keeps minting the step capability as it does
   today, so `graph.json` stays faithful (D1). One call, both documents.
-- `graph_observe` (index.js:1197) gains `actor`, validated against the run's actor registry.
+- `graph_observe` (index.js:1197) gains `actor`, validated against the run's actor registry, and
+  `affordances` — the elements the reading offers and the walk is not exercising (D6). The reading
+  is the only moment an affordance can be recorded, because it is a fact about the surface.
 - Actors come from **config** beside `application:` in `cordis.patch.yml` — the actor vocabulary
   is a property of the application, not of a walk, and config is where `application` already lives.
 - `lib/session.js`: `addRealizationStep(capabilityId, step)`, `actors()`, and append-only records
   (`kind: 'realization_step'`), consistent with "a reading appends a new state or a sighting".
-- Early refusals matching P1/P4/P5 while the page is still on screen.
+- Early refusals matching P1/P4/P5/P7/P13 while the page is still on screen.
 
 **Acceptance:** a scripted walk on `demo-app` produces, from one set of calls, a `graph.json`
 whose `capabilities[]` matches 0.1.22's shape **and** an ABM whose `behaviors[]` contains `login`
@@ -343,12 +435,13 @@ with three `realization[]` entries and no top-level step capability. Covered by
 
 `lib/commit.js`, `reconcile()` (commit.js:1379).
 
-- Assemble `behaviors[]` (with `realization[]` ordered by walk order), `entities[]`,
-  `state_variables[]`, `actors[]`, and `journeys[].steps[]`.
-- Add P1–P12 to `invariantsOf()` (commit.js:3351), sharing one definition with Phase 0b's
+- Assemble `behaviors[]` (with `realization[]` ordered by walk order), **`transitions[]` collapsed to
+  one edge per `(from_state, behaviour, to_state)`** (D5), `entities[]`, `state_variables[]`,
+  `actors[]`, and `journeys[].steps[]` referencing those edges.
+- Add P1–P13 to `invariantsOf()` (commit.js:3351), sharing one definition with Phase 0b's
   `profileFindings` so the diagnostic and the gate cannot drift.
 - Emit the D4 fallback journey (the run's own walk, `goal_stated: false`, `criticality`
-  omitted) whenever no step claimed a `journey_name`, so P12 always has a journey to check.
+  omitted) whenever no step claimed a `journey_name`, so P12c always has a journey to check.
 - **Run `lib/validate.js` over both documents before reporting `ok`** — this closes README gap 8
   and is the reason it cannot stay open any longer: an ABM with a `realization[].action` outside
   the enum is precisely the class of defect that has already shipped twice.
@@ -368,6 +461,11 @@ is actually *made*, because no tool schema can force a behaviour-first reading.
   behaviours → validate → walk** (it is `act → observe → record` today).
 - Replace the 0.1.18 composite-vs-step clause: `realization[]` is the default home for a step;
   a per-element interaction is a capability only if a user would ask for it by that name.
+- State the D5 distinction in the tool's own words: a **step** is one interaction, a **behaviour**
+  is what a user asks for, and an **edge** is one behaviour applied between two states — so three
+  calls in one sign-in are one edge, and the edge is recorded once, when the behaviour completes.
+- Add the D6 sentence: a control the reading offers and the walk does not use is an **affordance**,
+  and recording it is the only way the model can say what the application can do but this walk did not.
 - Add the grounding paragraph: a behaviour with no evidence is a hallucination, and
   `confidence` is the honest report of how well grounded it is.
 - Keep every existing refusal sentence verbatim — they encode failure modes found in live runs.
@@ -399,12 +497,14 @@ and lowers `confidence`, which is what the schema's `effect.observed` already me
 | Risk | Why it is real here | Mitigation |
 | --- | --- | --- |
 | **Semantic hallucination** — `create_project` inferred from a `[Create]` button | The pivot pushes inference earlier, when less is known | P9 (evidence required), P5 (a literal value must have been observed), plus the existing refusal set. `confidence` reported, never invented. |
-| **Two documents drift** | They are independent by design (D1), which is exactly what lets them disagree | Both from one store, one commit, one `commit_report.json` section each; **P12** asserts that every committed transition is exactly one `journeys[].steps[]` entry, in both directions. |
-| **The walk is homeless** (D4) | `transitions[]` is gone from the ABM, so a goal-less run would have nowhere to put its steps | `reconcile()` always emits the fallback journey; **P12** fails the commit if it ever stops doing so. |
+| **Two documents drift** | They are independent by design (D1), which is exactly what lets them disagree | Both from one store, one commit, one `commit_report.json` section each; **P12a/P12b** check the edge set in both directions, so neither document can quietly lose or invent an edge. |
+| **The walk loses its order or its point** (D4, restated for D5) | `transitions[]` is a *set*: it has no order and no purpose, so only `journeys[].steps[]` says what the walk was and what it was for | `reconcile()` always emits the fallback journey (`goal_stated: false`); **P12c** fails the commit if it ever stops doing so. |
+| **The collapse hides which step landed the state** (D5) | Three calls become one edge, and `realization[]` keeps the order but does not mark which action moved the application | The edge's `evidence` carries the `action` role, which names the observation of that step — in the 0.1.22 run, `obs_0004`, the submit click. So the causal step is *recoverable from evidence* rather than asserted. |
+| **Affordances become a wish list** (D6) | D6 rewards naming what a walk did not do, and a model that wants to look thorough can invent them | P13 requires the element to be declared in *that state's own* `elements[]`, so every affordance is anchored in the capture; `unwalked` is refuted by any committed realization step on the same element; `confidence` reported at 0.3, never argued up. |
 | **Fork rot** (D2) | The vendored schema is now a copy, and copies drift from upstream silently | `VENDOR.md` sha256s + `0.1/` never being edited makes the divergence deliberate and checkable. |
 | **`npm test` loses its offline property** (D2) | `ajv` is the natural validator and the plugin has deliberately no deps | `lib/validate.js` (no deps) is the gate; ajv is opt-in via `npm run validate:schema` only. |
 | **A behaviour-first reading is not stabilisable** — two runs name one behaviour two ways | Already observed: `vocabulary_notes` fires on `add_to_cart` vs `add_item_to_cart` | The existing convergence path plus the schema's own vocabulary list. **Measure inter-run name stability; do not assume it.** |
-| **Losing the walk** | `assembleJourneys` derives journeys from ordered `transitions.jsonl` | Transitions stay in the log and in `graph.json`; the ABM carries the same walk in `journeys[].steps[]` (D4). |
+| **Losing the walk** | `assembleJourneys` derives journeys from ordered `transitions.jsonl` | Transitions stay in the log and in `graph.json`; the ABM carries the same edges in `transitions[]` and the same order in `journeys[].steps[]`. |
 | **A greener-looking run that proves less** | Every change makes refusals *more* likely, which reads as regression | Track refusal counts and per-document findings across runs. Fewer findings after a rule change is a **finding**, not a win, until the rule is shown to still fire (§7.2). |
 
 ## 7. Verification protocol
@@ -417,6 +517,13 @@ Each of these is load-bearing, not ceremony:
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template;
    add `test/prove-abm.py`. Break the *rule*, not a clause the code already treats as equivalent
    (removing `cutParameter &&` proved nothing — behaviourally identical).
+   **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded
+   one `journeys[].steps[]` entry per committed transition, and §3 made a step a behaviour: the
+   real 0.1.22 run has **3 committed transitions and 1 behaviour-level step**, so a naive test
+   would have passed for the wrong reason (it read the graph's per-call steps). The revert-proof
+   must therefore use the run's own numbers — `3` committed transitions, `1` edge, `1` step —
+   which are recorded in `docs/experiments/abm-01/compare-output.txt`. Break P12a, P12b and P12c
+   separately and confirm each names a different missing object.
 3. **Validate both documents** with `npm run validate:schema` after every live run. Gap 8 means a
    green commit can still write an invalid document — measured twice.
 4. **Read the generated artifacts.** Both 0.1.22 defects were found by reading the spec, not the
@@ -425,10 +532,14 @@ Each of these is load-bearing, not ceremony:
 5. Deploy with a **version bump** (`0.1.23`), **pack last**, `diff -r lib` / `diff -r test` /
    `diff -r schemas` IDENTICAL, then re-run `scripts/patch-dsh-browser.mjs --profile {graph,web} --verify`.
 
-## 8. Do this first
+## 8. Do this first — **DONE**
 
-The proposal's own closing experiment, and it is still the right first step — now it can be run
-against *both* documents:
+The proposal's own closing experiment. It was run before any code was written, and it did its
+job: it **validated the pivot on its main axis and falsified three of its edges**. The full
+record is `docs/abm-experiment-1.md`; the frozen artifacts and the reproducible diff are
+`docs/experiments/abm-01/`.
+
+What it asked, kept here so the record is self-contained:
 
 1. Take `~/tmp/live-graph/graph-run/` (the 0.1.22 sign-in walk) — a real run whose
    `capabilities[]` contains the four-name abstraction-mixing defect.
@@ -437,7 +548,20 @@ against *both* documents:
 3. Ask for the ABM of §3.
 4. Diff it against the committed `graph.json`.
 
-If it produces `login` with `realization[]`, grounded evidence and no `fill_login_email`
-sibling, the pivot is validated and Phases 1–3 are execution. If it cannot, the failure names
-exactly what the tool boundary must ask for *while the page is on screen* — which is the design
-input for Phase 1. Either answer is worth more than the rest of this plan.
+**Result.** The blind read (`blind-model.json`, sha256 `c170d9e5…`, hashed before the graph was
+opened) produced **one behaviour `login` with three ordered `realization[]` steps and no
+`fill_login_email` sibling**; both states matched the graph's identity character for character,
+and the walk matched action for action. It was wrong in three ways, and each became a rule:
+realization element references must be **derived** (P4), actor vocabulary must be **traceable**
+(P6), and a dimension's `detection` must read an element or a route (P7).
+
+It also surfaced **D5, D6 and D7** — the edge had to come back at the behaviour's unit (D5),
+the five controls the capture shows and the graph cannot name had to become affordances (D6), and
+`features[]` had to stay out (D7). And it found a **secret leak that outlives the run**
+(`password123` in `journeys[0].goal`, which quotes the instruction): §3's `goal` must be redacted
+or stored as a reference.
+
+**Why the sequencing held.** The experiment was run *before* Phase 0a/0b because 0b implements
+§3's shape and P1–P13, and D5 changes that shape materially — the rule set and the document's
+edge unit had to be right before there was anything to implement. The plan revision below is
+that reordering, not a delay.
