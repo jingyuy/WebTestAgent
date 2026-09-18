@@ -508,7 +508,7 @@ correctable while the page is still on screen).
 | P9 | Every behaviour carries ≥1 `evidence[]` entry, every `transitions[]` entry carries the three evidence roles (`identity`/`action`/`effect`), and every evidence id resolves | `error` — the anti-hallucination rule |
 | P10 | Objects with `metadata.confidence < 0.5` or `status: inferred` cannot back a `criticality: critical` journey | `warning` (ABG invariant 12) |
 | P11 | Every behaviour is the `behavior` of ≥1 `transitions[]` entry, or a member of a walkable behaviour's `composed_of` — a behaviour no edge can perform is a vocabulary entry, not a behaviour | `warning` (supersedes the draft's "every behaviour in a journey") |
-| P12 | **Walk preservation (D4 + D5, with D12 for the sequence form), both directions.** *(a)* every transition `graph.json` committed is accounted for in the ABM — as an edge's behaviour, as a `realization[]` step of a behaviour whose own edge starts where that transition started, or as a member of the composite whose `composed_of` names it, when the composite's edge is the span of its members' edges in order; *(b)* every `transitions[]` entry is backed by ≥1 committed graph transition — the same `from_state`/`to_state`/behaviour, or that in-order sequence of member transitions for a composite; *(c)* the ABM has ≥1 journey (D4) and every `journeys[].steps[]` entry names a `transitions[]` id | `error` — the D1 coherence check |
+| P12 | **Walk preservation (D4 + D5, with D12 for the sequence form), both directions.** *(a)* every transition `graph.json` committed is accounted for in the ABM — as an edge's behaviour, as a `realization[]` step of a behaviour whose own edge starts where that transition started (and that step's element may be named by the transition's `target` **or** by the element the realisation itself records: `lib/protocol.js` never asks the walk for `target`, so reading only that field is a rule no live run can satisfy — measured on 0.1.26, both `fill` calls), or as a member of the composite whose `composed_of` names it, when the composite's edge is the span of its members' edges in order; *(b)* every `transitions[]` entry is backed by ≥1 committed graph transition — the same `from_state`/`to_state`/behaviour, or that in-order sequence of member transitions for a composite; *(c)* the ABM has ≥1 journey (D4) and every `journeys[].steps[]` entry names a `transitions[]` id | `error` — the D1 coherence check |
 | P13 | **An affordance is offered, not performed (D6).** Every `state.affordances[].element` is declared in **that same state's** `elements[]`; an affordance whose element *is* the target of a committed `realization[]` step is reported, because the walk itself refutes "nobody did this" | `error` (unresolved element) / `warning` (`affordance_already_walked`) |
 | P14 | **No claim outranks its support (D9, D11).** A `verified` claim must be shown by the observations it cites *for that claim*: a behaviour's **name** is not verified by the observation that a click happened, so the name is `inferred` even when its edge is `observed`. Formally, an object's level is the **minimum** over the claims it carries — its own producer's level and its inputs' levels — so no chain of rebuilds, re-projections or re-imports can promote an inference to a fact. Codes: `claim_outranks_its_producer`, `claim_outranks_its_inputs` (a composition inherited a weaker part), `claim_has_no_producer` (a derivation) | `error` |
 | P15 | **An inference names itself and its basis (D9).** Every `status: inferred` claim names its `producer` and points at the observations it was inferred *from* (its `evidence[]`, its `composed_of`, or a stated derivation). An inference with no basis is a hallucination and is reported as one. Distinct from P9, which asks that evidence **exist**. Codes: `inference_without_producer`, `inference_without_basis` | `error` |
@@ -520,6 +520,19 @@ demanded one `journeys[].steps[]` entry per committed transition while §3 made 
 *behaviour*, which is 1 against the real run's 3. It now checks the same fact in the unit the ABM
 actually uses, and it is the pivot stated as a gate: **three committed calls become one edge and
 three ordered realization steps, and nothing is allowed to go missing in the collapse.**
+
+**Where that rule stops, and why it had to be said.** A collapse may not hide a *state*, so an
+invocation whose steps passed through a state neither of the edge's endpoints names, and which no
+step's `state_entered` accounts for, is refused (`collapsed_past_a_state`). The edge's own two
+endpoints are where that stops. A call that stays where the walk already stood — a self-loop, which
+is what typing into a form is — puts that state in `passed_through`, and that state is the surviving
+edge's `from_state`; demanding the behaviour *arrive* there asks for a `state_entered` no honest
+step can record, because the walk never entered the state, it was already in it. The 0.1.25 live
+sign-in run is the case that measured it: three calls over two states, one behaviour, and a model
+withheld for a state the edge itself names. **A rule whose sole satisfaction is a lie is the rule
+that was wrong** — the rule was narrowed to the two endpoints and given its own floor (three
+checks in `test/abm-commit.test.mjs` and a 30th proof case) rather than deleted, because its real
+content — a state the edge does *not* name — is the D12 claim.
 
 **P14/P15 are the rules the project's own doctrine demands, and they fail on today's output.** A
 rule nothing enforces is not a rule the schema has, and the schema's `status` enum is currently
@@ -881,7 +894,9 @@ and a projection cannot move it.
 **DONE.** `lib/protocol.js` rewritten (240 → 306 lines), with two artifacts this phase owes and
 neither of which existed before: `test/protocol.test.mjs`, an offline suite that pins the text, and
 `test/protocol-coverage.mjs` (`npm run profile:protocol`), the log-level acceptance as a harness.
-`npm test` is **13 suites**.
+`npm test` is **13 suites** after the rewrite, and **14** after the deploy that followed it added
+`test/package.test.mjs` — a suite for a rule about the *package* rather than the code, because the
+first defect that a deployed 0.1.24 had and no suite in the tree could see was a `files` entry.
 
 What the rewrite did, in the phase's own terms:
 
@@ -917,7 +932,7 @@ What the rewrite did, in the phase's own terms:
 
 What the two artifacts hold down, and why the measure is where it is:
 
-- `test/protocol.test.mjs` pins **72 claims** and is offline and dependency-free like the rest of
+- `test/protocol.test.mjs` pins **73 claims** and is offline and dependency-free like the rest of
   `npm test`: the section's name and order (150), the rendered text equal to `protocolText(...)` for
   the live config, each rule above, the seam between the loop and the tools — **every argument
   `graph_observe` and `graph_transition` declare is either named in the loop or on the one spelled-out
@@ -936,18 +951,56 @@ What the two artifacts hold down, and why the measure is where it is:
   0.1.22 dial-in run records **3 capabilities, 0 behaviours, 0 realisations**, every one of them a
   behaviour in its own right (`fill_login_email`, `fill_login_password`, `login`) — verdict 1 fails;
   and the later `/login` run records **4 capabilities, 1 behaviour, 3 steps, 0 realisations** —
-  verdict 1 passes, verdict 2 fails at `login: 0/3 steps realised`. **No live run on this machine has
-  ever written a `realization_step` record**, because the record kind postdates all of them. The
-  decisive number therefore does not exist yet: it needs a 0.1.23 run, and until then the acceptance
-  is *owed*, not met.
+  verdict 1 passes, verdict 2 fails at `login: 0/3 steps realised`. **No live run on this machine had
+  ever written a `realization_step` record**, because the record kind postdates all of them.
+- **The decisive number arrived with the 0.1.26 run of 2026-09-18**, and it is the log's own count:
+  **4 capabilities (1 behaviour, 3 steps, 0 unattached), 3 realisations (3 described — verbs `fill`,
+  `fill`, `click`), 3 edges, `login 3/3 steps realised`**, and all four verdicts `ok`. `ACCEPTED`,
+  and the measure is where D13 put it, so the acceptance is **met on 0.1.26** rather than inherited
+  from the two baselines above. What that run's log shows the walk doing: `graph_transition` called
+  three times, each naming `capability_kind: interaction` with `capability_behaviour: login` and a
+  `realization` — nothing recorded as a behaviour in its own right, which is the phase's whole
+  claim, reached without the protocol being re-read mid-run.
+- **The same live run withheld the application model, and the two causes are the next phase's first
+  work rather than Phase 3's.** It committed a valid `graph.json` and refused the model three times:
+  `P5/unobserved_argument` on `transition_submit_login` (the walk wrote
+  `arguments.password = "password123"`; the evidence says `[set]`, and P5 skips only `[set]`), and
+  `P12/committed_transition_not_carried` twice, for the two `fill` self-loops. Both are true of that
+  log. Both are also the machinery reading its own input wrong, and in a way a live run is the only
+  thing that could have shown:
+  - **The `P12` pair is a recorder defect.** `lib/protocol.js` tells the walk to put the acted
+    element in `realization.element` and never once names `target`; `action.target` is taken from
+    `args.target` alone (`index.js` → `session.js#recordTransition`, whose `action` is literally
+    `{capability, arguments?, target?}`), so **every** transition of every live run carries a
+    capability and no element — measured, all three transitions of the 0.1.26 `graph.json` have
+    `action.target: null`. Two consumers read that field and only that field: `generate.js`'s
+    `const element = transition?.action?.target …`, which is why that run's spec is *0 of 3 steps
+    became an action* with three `step_targets_no_element` gaps and performs no sign-in at all; and
+    `abm.js`'s `carriedAsStep`, whose third disjunct is **dead** precisely when the walk obeys the
+    protocol. P12(a) as written in the table below is therefore not what the code does: the code
+    asks for a spelling the protocol never asks the walk for.
+  - **`P5` is a prose gap, and the doc already states the convention the protocol withholds.** Its
+    own row below says a redacted field is "recorded as the honest `[set]` rather than omitted", and
+    `abm.js` implements exactly that — but the section the walk reads never says it, so a walk that
+    records the password it typed is refused for recording it. The rule is right; the text the walk
+    is given is not complete.
+- **Two more defects were found by *deploying*, not by any suite, and they are why
+  `test/package.test.mjs` exists.** A deployed 0.1.24 shipped the reader and not the directory it
+  reads (`files` did not name `schemas/`), so `graph_commit` answered *the schema set could not be
+  read* and wrote **neither** document; and the same version could not boot at all, because a
+  `systemPrompt` section is a prompt template and `{{param}}` in its prose is an unregistered
+  variable (`dsh: UNKNOWN: unknown prompt variable "{{param}}" in section
+  "graph:exploration-protocol"`). Both are rules about the *package*, so the guard is a suite about
+  the package: it derives the list of self-relative reads out of `lib/*.js` and requires every one
+  that leaves `lib/` to be covered by `files`. Four of `prove-abm.py`'s 30 cases hold them down.
 - `test/prove-abm.py` gained the **nine** Phase-3 cases that hold the rewrite down: the reading
   before the walk, the step-is-the-default sentence, the behaviour definition, the once-per-behaviour
   edge, the affordance's missing `confidence`, the hallucination sentence, a kept refusal sentence, an
   argument added to a recording tool, and — the case that matters most after a rewrite — **the old
   composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
   **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
-  is not the rule, and counting it would let a badly written case look like a proof); all **26 cases
-  are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 13/13.
+  is not the rule, and counting it would let a badly written case look like a proof); all **30 cases
+  are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 14/14.
 
 ### Phase 4 — the model generates the test (D10)
 
@@ -1003,15 +1056,16 @@ and lowers `confidence`, which is what the schema's `effect.observed` already me
 
 Each of these is load-bearing, not ceremony:
 
-1. `npm test` — currently **13** suites (0a/0b added `test/abm.test.mjs`, Phase 1 added
+1. `npm test` — currently **14** suites (0a/0b added `test/abm.test.mjs`, Phase 1 added
    `test/realization.test.mjs`, Phase 2 added `test/abm-commit.test.mjs`, Phase 3 added
-   `test/protocol.test.mjs`); every phase adds a suite
+   `test/protocol.test.mjs`, and the first deploy after it added `test/package.test.mjs`); every
+   phase adds a suite
    or a case, never only a claim.
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (26 mutations, all 26 refused; 17 through Phase 2, 9
-   more for Phase 3); break the *rule*, not a
+   `test/prove-abm.py` is the running instance (30 mutations, all 30 refused; 17 through Phase 2, 9
+   more for Phase 3, and 4 for the defects the first two deploys found); break the *rule*, not a
    clause the code already treats as equivalent
    (removing `cutParameter &&` proved nothing — behaviourally identical).
    **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded
@@ -1027,7 +1081,7 @@ Each of these is load-bearing, not ceremony:
 4. **Read the generated artifacts.** Both 0.1.22 defects were found by reading the spec, not the
    graph. Read `application-model.json`'s `behaviors[]` and say which paths the run did *not*
    exercise; a green run is evidence of a positive and never of a negative.
-5. Deploy with a **version bump** (`0.1.23`), **pack last**, `diff -r lib` / `diff -r test` /
+5. Deploy with a **version bump** (the phase's own number: `0.1.26` when Phase 3 was accepted), **pack last**, `diff -r lib` / `diff -r test` /
    `diff -r schemas` IDENTICAL, then re-run `scripts/patch-dsh-browser.mjs --profile {graph,web} --verify`.
 
 ## 8. Do this first — **DONE**

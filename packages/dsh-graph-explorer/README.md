@@ -567,6 +567,17 @@ quietly:
   commit's own model rules are the *same definition* as the standalone profile — asserted
   by asking both the same question about the same walk, not by reading the source.
 
+**A collapse may not hide a state the edge itself names.** `P12`'s collapse check
+(`collapsed_past_a_state`) refuses an edge whose `collapsed.passed_through` names a state that no
+step of the behaviour accounts for: a state the walk entered between the edge's own two ends is a
+reading nothing in the document explains. It skips the edge's own `from_state` and `to_state`, and
+that skip is a fix the 0.1.25 live sign-in walk paid for — the demo application's form is on the
+page the walk begins on, so both fills are self-loops and the three calls collapse into one edge
+`state_home_anonymous → state_home_authenticated` that "passes through" the state it *starts* from.
+The rule asked the behaviour to record arriving at a state the walk never left, and the only effect
+that could satisfy it was a false one, so the run withheld `application-model.json` rather than
+write it. A rule whose sole satisfaction is a lie is the rule that was wrong.
+
 The phase-by-phase design, including what each phase is still allowed not to do, is in
 [`docs/abm-pivot.md`](../../docs/abm-pivot.md).
 
@@ -1384,20 +1395,34 @@ where the recorded graph has the margin.
 ## Tests
 
 ```sh
-npm test        # 13 suites, no browser and no harness
+npm test        # 14 suites, no browser and no harness
 ```
 
 The protocol gets a suite of its own, `test/protocol.test.mjs`, because the section is the only
 place a behaviour-first reading can be *asked* for — no tool schema can require one, since the tool
 that records a step takes the same call whichever reading it came from. It renders the section the
-way `apply()` does and pins **72** claims: the section's name and order (150), the rendered text
+way `apply()` does and pins **73** claims: the section's name and order (150), the rendered text
 equal to `protocolText(...)` for the live config, the reading that comes before the walk, the
 step/behaviour/edge definitions, the absent composite clause it replaced, the affordance bullet's
-deliberately missing `confidence`, all fifteen refusal sentences **verbatim one by one**, and the
+deliberately missing `confidence`, all fifteen refusal sentences **verbatim one by one**, the
+absence of any `{{…}}` in the text (a section is a prompt template, so an unregistered variable in
+one is a boot failure rather than prose), and the
 seam to the tools — every argument `graph_observe` and `graph_transition` declare is either named in
 the loop or on one spelled-out exemption list, which is itself guarded against a rename silently
 widening it. Its matchers collapse whitespace: the section is wrapped prose, so a needle written on
 one line otherwise asserts the wrapping instead of the sentence.
+
+`test/package.test.mjs` is about the **package** rather than the code, and it earns its place from
+the first defect that reached a deployed profile and no suite in this tree could see: `files` did
+not name `schemas/`, so 0.1.24 shipped the reader and not the directory it reads, and a deployed
+`graph_commit` would have answered *the schema set could not be read* and written **neither**
+document — reported as a bad document rather than a bad package. Every suite here runs in the source
+tree, where `schemas/` is present whether or not it is published, so the suite **derives** the list
+instead of trusting a second hand-kept copy of it: it scans `lib/*.js` for the paths the module
+reads relative to itself, requires every read that leaves `lib/` to be covered by `files`, walks
+every `files` entry to check it exists, and checks that `main`, the `cordis.patch.yml` export and
+the `dsh.bundle.patch` contribution point are all published. A read of a new directory therefore
+fails until the manifest names it.
 
 Two harnesses are opt-in, never part of `npm test`, and the reason is the same in both cases — they
 need a run directory this repo does not ship:
@@ -1417,9 +1442,20 @@ purpose; and every edge resolving to a capability the run recorded. **A verdict 
 check prints `n/a` and is left out of the tally** — a green result is evidence of a positive and
 never of a negative — so a run with no realisations in it reports that fact rather than passing.
 
+**The acceptance on live evidence, 2026-09-18 (0.1.26):** `4 capabilities (1 behaviours, 3 steps, 0
+unattached)`, `3 realisations (3 described — verbs fill, fill, click)`, `3 edges`, `login 3/3 steps
+realised`, all four verdicts `ok` — `ACCEPTED`. The two things that run also showed, both of them
+about the *abm* rather than the protocol and both left standing rather than papered over: it
+committed a valid `graph.json` and **withheld the application model**, for an unobserved argument
+(`P5`) and for two committed calls the collapse did not carry (`P12`). The `P12` pair is a recorder
+defect that a live run was the only way to find — this section tells the walk to put the acted
+element in `realization.element` and never names `target`, while `action.target` is what both
+`graph_test` and the ABM read, so every transition of every live run says it acted on nothing and
+the generated spec cannot perform the walk. That is the next phase's first work, not this one's.
+
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 26 mutations, all 26 refused, the tree
-restored byte-identically and `13/13 suites passed` reprinted afterwards. It distinguishes *BROKEN*
+the failure. `test/prove-abm.py` is that file for this work — 30 mutations, all 30 refused, the tree
+restored byte-identically and `14/14 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.
 
