@@ -8,11 +8,20 @@
  *   as capabilities — names that say *how the tool moved the mouse*, not *what the user was
  *   trying to do* — and nothing in the 0.1 pipeline noticed, because nothing in it can.
  *
+ * And the same walk is the measured case for D9/D11 (P14/P15): every one of those capabilities,
+ * every edge and both states carry `status: verified` at `confidence: 1` because a model
+ * (`llm:deepseek-flash`) said so, while the only thing that was actually watched is the action. The
+ * projection re-emits those `metadata` blocks verbatim, so this document is the *mechanism* of the
+ * promotion, not just a witness to it — which is why the acceptance now has to be that the profile
+ * names it.
+ *
  * So this script reads a run the plugin actually produced, projects it into an `abm/0.2` document,
  * and profiles that document. The expected P1 refusals are **derived from the run's own log**, not
  * written here: every committed capability whose leading word is a mechanism verb must come out
  * refused, and nothing else may be refused for that reason. A snapshot would only prove the
- * snapshot.
+ * snapshot. The P14 refusals are derived the same way — the objects whose own producer is a reading
+ * reported at the collector's status — and P15 is asserted silent *because* the walk's inferences
+ * name their producer and their basis.
  *
  * It is a harness, not a suite: `npm test` must keep working in a clone with nothing installed, so
  * this is `npm run profile:abm`, and every part that needs a dependency or a run on this machine
@@ -201,6 +210,34 @@ if (mechanismNames.length) {
   assert('and it says why, in terms the commit can act on', refusedForTheRightReason);
 }
 
+// --- the same objects reported at the collector's confidence (D9, D11) --------------------------
+
+// Same method: the predicate comes from the run's log, not from the rule's output. An object whose
+// `metadata.producer` is a reading (`llm:*`, `importer:*`) cannot be `verified`, because what was
+// actually watched is the action, not the name.
+const READING = /^(llm|importer)(:|$)/;
+const claimedByAReading = [
+  ...candidates.capabilities.map((capability) => [`behavior_${slugify(capability.name)}`, capability]),
+  ...candidates.states.map((state) => [state.id, state]),
+  ...candidates.transitions.map((transition) => [transition.id, transition]),
+].filter(([, object]) => READING.test(String(object?.metadata?.producer ?? '')) && object.metadata.status === 'verified')
+  .map(([id]) => id).sort();
+const refusedForTheReading = findings
+  .filter((finding) => finding.rule === 'P14' && finding.code === 'claim_outranks_its_producer')
+  .map((finding) => finding.subject).sort();
+
+assert('P14 refuses exactly the objects a reading reported as verified',
+  JSON.stringify(refusedForTheReading) === JSON.stringify(claimedByAReading),
+  `refused: ${refusedForTheReading.join(', ') || '(none)'}${claimedByAReading.length ? `\n      expected: ${claimedByAReading.join(', ')}` : ''}${refusedForTheReading.length ? `\n      so the walk is refused for the reason the pivot exists even after the naming rule is satisfied: ${refusedForTheReading.length} of the ${findings.length} findings are this one.` : ''}`);
+
+// P15's silence is a claim too, and it is checked against the log rather than assumed: every
+// inference in this walk says who made it and what it rests on, so there is nothing to refuse.
+const inferencesWithoutAProducer = [...candidates.capabilities, ...candidates.journeys]
+  .filter((object) => object?.metadata?.status === 'inferred' && !object.metadata.producer);
+assert('P15 is silent because every inference this walk made names its producer',
+  inferencesWithoutAProducer.length === 0 && findings.every((finding) => finding.rule !== 'P15'),
+  [inferencesWithoutAProducer.map((object) => object.id).join(', '), findings.filter((finding) => finding.rule === 'P15').map((finding) => finding.subject).join(', ')].filter(Boolean).join(' / '));
+
 // --- the profile is §3's, and the document is 0.2's ---------------------------------------------
 
 const wrongSeverity = findings.filter((finding) => !(PROFILE_RULES[finding.rule] ?? []).includes(finding.severity));
@@ -236,5 +273,5 @@ if (validate) {
 assert('profiling the run did not write to it', fingerprint(runDir) === before);
 
 console.log('');
-console.log(failures ? `${failures} FAILURE(S)` : 'ACCEPTED: the projection reads a real run and the profile refuses it for the reason the pivot exists.');
+console.log(failures ? `${failures} FAILURE(S)` : 'ACCEPTED: the projection reads a real run and the profile refuses it for the reason the pivot exists — the mechanism names, and the confidence they were reported at.');
 process.exit(failures ? 1 : 0);

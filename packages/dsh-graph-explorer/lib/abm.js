@@ -10,8 +10,10 @@
  *
  * - `modelFromCandidates()` turns a run — live candidates or a committed `graph.json` — into the
  *   ABM shape of §3.
- * - `profileFindings()` implements **P1–P13**, the judgement rules of §3, as the flat findings
+ * - `profileFindings()` implements **P1–P15**, the judgement rules of §3, as the flat findings
  *   the commit already emits (`{code, severity, detail, basis, …}`, plus `rule` and `scope`).
+ * - `claimsOf()` is the list of claims a document makes, each with the epistemic level P14/P15
+ *   judge it at (D9); `claimLevel()` is the level of one `metadata` block (D11).
  * - `summarizeFindings()` is the counting half, for a CLI.
  *
  * ## The projection is deliberately mechanical, and that is the point
@@ -67,6 +69,69 @@ export const MECHANISM_VERBS = new Set([
 export const TRANSITION_EVIDENCE_ROLES = ['identity', 'action', 'effect'];
 
 /**
+ * The three epistemic levels (D9), weakest first.
+ *
+ * The order *is* the rule: a claim derived from other claims takes the **minimum** of theirs
+ * (D11), so re-deriving a reading cannot promote it and copying a document forward cannot either.
+ * `modelled` is what nothing claimed, `inferred` is what a producer read out of a capture,
+ * `observed` is what the collector watched or the operator declared.
+ */
+export const CLAIM_LEVELS = Object.freeze(['modelled', 'inferred', 'observed']);
+
+/**
+ * The strongest `status` and `confidence` each level permits (D11).
+ *
+ * `verified` means *executed and verified* — the schema's own gloss on confidence 1.0 — so both
+ * fields are the same claim in two places, and a fix for one that leaves the other standing is not
+ * a fix. A reading may be reported `inferred` at 0.5 (again the schema's gloss), a derivation
+ * `draft` at 0.3 (§3's number for a claim nothing refuted). `draft` is also the schema's default
+ * for a missing status, so silence is never a promotion.
+ */
+export const LEVEL_CEILING = Object.freeze({
+  modelled: Object.freeze({ status: 'draft', confidence: 0.3 }),
+  inferred: Object.freeze({ status: 'inferred', confidence: 0.5 }),
+  observed: Object.freeze({ status: 'verified', confidence: 1 }),
+});
+
+/** The schema's `status` enum, ordered. A status outside it is read as the default (`draft`). */
+export const STATUS_RANK = Object.freeze({ draft: 0, inferred: 1, verified: 2 });
+
+/**
+ * The producers that *reason*: they read a claim out of a capture rather than being in a position
+ * to know it. `llm:<model>` names a semantic object; `importer:<tool>` derives one from a document.
+ */
+const REASONING_PRODUCERS = /^(llm|importer)(:|$)/;
+
+/**
+ * The producers that *observe*. `playwright` was there; `manual` is the operator, who is the
+ * authority on what the application is — the commit's own `application_not_declared` gate says the
+ * identity is declared, never derived. Neither is a fourth level: D9's levels are about what the
+ * *claim* is, and the owner of the application saying what it is called is not a machine reading a
+ * walk. A producer this list does not recognise is treated as `modelled`, never as `observed` —
+ * a producer the rule has not heard of cannot borrow the collector's status.
+ */
+const OBSERVING_PRODUCERS = /^(playwright|manual)(:|$)/;
+
+/**
+ * The level one `metadata` block was obtained at (D9, D11).
+ *
+ * `inputs` are the levels of the claims this one is derived from — a composite's members, say. A
+ * derived claim is the minimum of its inputs' levels and its own, which is how a `login` composed
+ * of three observed steps but *named* by a model stays `inferred`: the parts were watched, the
+ * name was read, and the object makes both claims.
+ */
+export function claimLevel(metadata, inputs = []) {
+  const producer = typeof metadata?.producer === 'string' ? metadata.producer : '';
+  const own = REASONING_PRODUCERS.test(producer) ? 'inferred'
+    : OBSERVING_PRODUCERS.test(producer) ? 'observed'
+      : 'modelled';
+  return [own, ...rows(inputs)].reduce(
+    (lowest, level) => (CLAIM_LEVELS.indexOf(level) < CLAIM_LEVELS.indexOf(lowest) ? level : lowest),
+    own,
+  );
+}
+
+/**
  * Every rule, and the severities it is allowed to report.
  *
  * The table is exported so a test can refuse a finding whose severity drifted, and so the
@@ -88,6 +153,8 @@ export const PROFILE_RULES = Object.freeze({
   P11: ['warning'],
   P12: ['error', 'info'],
   P13: ['error', 'warning'],
+  P14: ['error'],
+  P15: ['error'],
 });
 
 /** The kinds a behaviour may declare. Copied from `behavior.schema.json`'s enum. */
@@ -542,7 +609,75 @@ function journeySteps(journey, transitionById) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * P1–P13 over a projected model.
+ * Every claim a document makes, each with the level it was obtained at (D9, D11).
+ *
+ * One list, so the rule and the *fix* the rule asks for read the same objects: writing
+ * `LEVEL_CEILING[level]` onto each object's `metadata` is what an honest document says, and a rule
+ * whose fix is that one line over this one walk is a rule an author can satisfy rather than a
+ * refusal to describe anything.
+ *
+ * Deliberately absent: the surfaces' `elements[]` and the `observations[]` themselves. Those are
+ * the capture — the thing the claims here are *checked against* — and the collector wrote them.
+ * The claims a behaviour profile judges are the semantic ones: what a behaviour is called, what a
+ * move was, what a surface is, what a distinction means, who a journey is for.
+ */
+export function claimsOf(model) {
+  const behaviors = rows(model.behaviors);
+  const behaviorById = new Map(behaviors.map((behavior) => [behavior.id, behavior]));
+
+  // Memoised per id, and a cycle is `modelled` rather than a stack overflow: a composition that
+  // contains itself is a derivation with no bottom, which is the weakest thing a claim can be.
+  const levelOfBehavior = (id, seen = new Set()) => {
+    if (seen.has(id)) return 'modelled';
+    seen.add(id);
+    const behavior = behaviorById.get(id);
+    if (!behavior) return 'modelled';
+    return claimLevel(behavior.metadata, rows(behavior.composed_of).map((member) => levelOfBehavior(member, seen)));
+  };
+
+  const claim = (scope, object, { subject, label, inputs = [], basis = [] } = {}) => ({
+    scope,
+    subject: subject ?? object?.id ?? object?.name ?? null,
+    label: label ?? null,
+    object,
+    inputs,
+    basis,
+    // The level the object's own producer earned, and the weakest level among its inputs: kept
+    // apart so P14 can say *which* of the two set the ceiling, since that is the difference
+    // between "your reading is over-claimed" and "your composition inherited a weaker part".
+    own: claimLevel(object?.metadata),
+    parts: inputs.length ? inputs.reduce((lowest, level) => (CLAIM_LEVELS.indexOf(level) < CLAIM_LEVELS.indexOf(lowest) ? level : lowest)) : null,
+    level: claimLevel(object?.metadata, inputs),
+  });
+
+  return [
+    ...(model.application ? [claim('application', model.application)] : []),
+    ...behaviors.map((behavior) => claim('behaviors', behavior, {
+      label: `"${behavior.name}"`,
+      inputs: rows(behavior.composed_of).map((member) => levelOfBehavior(member)),
+      basis: rows(behavior.composed_of),
+    })),
+    ...behaviors.flatMap((behavior) => rows(behavior.realization).map((step, index) => claim('behaviors', step, {
+      subject: behavior.id,
+      label: `${behavior.name}'s realization[${index}]`,
+    }))),
+    ...rows(model.transitions).map((transition) => claim('transitions', transition)),
+    ...rows(model.states).flatMap((state) => [
+      claim('states', state),
+      ...rows(state.affordances).map((affordance) => claim('states', affordance, {
+        subject: state.id,
+        label: `the affordance on ${affordance.element}`,
+      })),
+    ]),
+    ...rows(model.journeys).map((journey) => claim('journeys', journey)),
+    ...rows(model.state_variables).map((variable) => claim('state_variables', variable)),
+    ...rows(model.entities).map((entity) => claim('entities', entity)),
+    ...rows(model.apis).map((api) => claim('apis', api)),
+  ];
+}
+
+/**
+ * P1–P15 over a projected model.
  *
  * `candidates` is the second document P12 needs: the committed transitions and capabilities the
  * model has to account for. Without them P12 checks only the model's internal coherence and says
@@ -1028,6 +1163,71 @@ export function profileFindings(model, { candidates = null } = {}) {
         add({
           rule: 'P13', code: 'affordance_already_walked', severity: 'warning', scope: 'states', subject: state.id,
           detail: `affordances[] offers "${affordance.element}" as something nobody did, and a realized step performs it. The walk refutes the claim.`,
+        });
+      }
+    }
+  }
+
+  // --- P14/P15: the epistemic levels (D9, D11) ---------------------------------------------------
+  //
+  // One `metadata` block covers several claims, and they are not the same claim: an edge's *move*
+  // is something the collector watched, while its *name* is something a model read, and `verified`
+  // describes the first while appearing to describe both. Measured on the 0.1.22 walk,
+  // `cap_submit_login` reports `status: verified, confidence: 1` and its name `submit_login` is an
+  // LLM's reading — nothing in the pipeline before this rule could say so. So D11 makes the level
+  // the **minimum** over the claims an object carries: P14 refuses a status above that ceiling, and
+  // P15 makes the honest alternative state its own basis, so the downgrade P14 asks for is a claim
+  // somebody can still read rather than a shrug. Neither rule is a judgement about what a
+  // behaviour *means*; both are about a document not asserting more than it was told.
+  for (const claim of claimsOf(model)) {
+    const metadata = claim.object?.metadata;
+    const ceiling = LEVEL_CEILING[claim.level];
+    const declared = typeof metadata?.status === 'string' ? metadata.status : 'draft';
+    const confidence = typeof metadata?.confidence === 'number' ? metadata.confidence : null;
+    const stated = [
+      typeof metadata?.status === 'string' ? `status "${metadata.status}"` : 'no status',
+      confidence === null ? null : `confidence ${confidence}`,
+    ].filter(Boolean).join(' at ');
+    const outranks = (STATUS_RANK[declared] ?? 0) > STATUS_RANK[ceiling.status]
+      || (confidence !== null && confidence >= 1 && ceiling.status !== 'verified');
+    // Weaker than the object's *own* reading: that is what makes the ceiling a composition's and
+    // not the producer's, and it is also the list the author has to go and look at.
+    const weaker = claim.inputs.filter((level) => CLAIM_LEVELS.indexOf(level) < CLAIM_LEVELS.indexOf(claim.own));
+
+    if (outranks) {
+      const producer = typeof metadata?.producer === 'string' ? metadata.producer : null;
+      const code = claim.level === 'modelled' ? 'claim_has_no_producer'
+        : weaker.length ? 'claim_outranks_its_inputs'
+          : 'claim_outranks_its_producer';
+      const why = code === 'claim_has_no_producer'
+        ? `No metadata.producer says who claimed this, so it is a derivation: the document computed it, and a derivation may be at most "${ceiling.status}" at confidence ${ceiling.confidence}. This is the copy path, not a judgement about the object — anything that reads a document and writes one back is where a level gets promoted.`
+        : code === 'claim_outranks_its_inputs'
+          ? `It is derived from claims at ${weaker.join(', ')}, and a derived claim is the minimum of its inputs' levels (D11): it may be at most "${ceiling.status}". The parts are weaker than the whole.`
+          : `metadata.producer is "${producer}", which read this out of the capture: a reading may be at most "${ceiling.status}" at confidence ${ceiling.confidence}. "verified" is the collector's status, and what the collector saw is the action — not the name.`;
+      add({
+        rule: 'P14', code, severity: 'error', scope: claim.scope, subject: claim.subject,
+        detail: `${claim.label ?? claim.subject} is at level "${claim.level}" and is reported ${stated}. ${why}`,
+      });
+    }
+
+    // P15 is the other half of D11: a document that must not assert `verified` about a reading has
+    // to say *whose* reading it is and *what* it rests on, or the fix for P14 is to record less.
+    if (declared === 'inferred') {
+      const producer = typeof metadata?.producer === 'string' ? metadata.producer.trim() : '';
+      const basis = distinct([
+        ...rows(claim.object.evidence).map((entry) => entry?.observation),
+        ...claim.basis,
+        ...(typeof metadata?.extra?.derived === 'string' ? [metadata.extra.derived] : []),
+      ]);
+      if (!producer) {
+        add({
+          rule: 'P15', code: 'inference_without_producer', severity: 'error', scope: claim.scope, subject: claim.subject,
+          detail: `${claim.label ?? claim.subject} is inferred and names no producer. An inference is somebody's reading, and a document that does not say whose cannot be argued with — nor can it be traced when the reading is wrong.`,
+        });
+      } else if (!basis.length) {
+        add({
+          rule: 'P15', code: 'inference_without_basis', severity: 'error', scope: claim.scope, subject: claim.subject,
+          detail: `${claim.label ?? claim.subject} is inferred by "${producer}" from nothing: no evidence[], no composed_of, no named derivation. An inference with no basis is a hallucination, and it is reported as one rather than carried as a claim P9 could anchor.`,
         });
       }
     }

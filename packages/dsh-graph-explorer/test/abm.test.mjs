@@ -4,8 +4,11 @@
  * The fixture below is the sign-in walk shrunk to what the rules need: two states, four committed
  * capabilities (three steps and the composite that names them), three edges, one journey. Its
  * point is that the projection of it fails exactly the way the real 0.1.22 graph does — three P1
- * errors and three P2 warnings, and nothing else — so every other case in this file can be read as
- * "break exactly this one thing, and exactly this one rule notices".
+ * errors, three P2 warnings and nine P14 errors (D9's laundering, D11's ceiling) — so every other
+ * case in this file can be read as "break exactly this one thing, and exactly this one rule
+ * notices". Its `metadata` blocks are the producers the real commit wrote, because a fixture
+ * without them would be a document nothing had claimed anything about, and P14's whole subject is
+ * who claimed what.
  *
  * The rule is what is asserted, never the wording: each case names the rule, the code and the
  * subject, because those three are the contract `reconcile()` will enforce in phase 2. The
@@ -17,9 +20,13 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  CLAIM_LEVELS,
+  LEVEL_CEILING,
   MECHANISM_VERBS,
   PROFILE_RULES,
   candidatesFromRun,
+  claimLevel,
+  claimsOf,
   modelFromCandidates,
   profileFindings,
   summarizeFindings,
@@ -55,7 +62,7 @@ const element = (id, role, name, extra = {}) => ({
   semantic: { purpose: id.replace(/^element_/, '') },
   locator: { strategy: 'label', value: name },
   evidence: [evidence('obs_0001', 'element')],
-  metadata: { confidence: 1, status: 'verified' },
+  metadata: { confidence: 1, status: 'verified', producer: 'playwright' },
   ...extra,
 });
 
@@ -81,7 +88,7 @@ export const candidates = () => structuredClone({
       detection: [{ type: 'element_state', element: 'element_login_button', operator: 'exists' }],
       capabilities: ['cap_fill_login_email', 'cap_fill_login_password', 'cap_submit_login'],
       evidence: [evidence('obs_0001', 'identity')],
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
     {
       id: 'state_project_list_authenticated_projects_populated',
@@ -93,7 +100,7 @@ export const candidates = () => structuredClone({
       ],
       detection: [{ type: 'element_state', element: 'element_project_list', operator: 'exists' }],
       evidence: [evidence('obs_0003', 'identity')],
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
   ],
   capabilities: [
@@ -104,7 +111,7 @@ export const candidates = () => structuredClone({
       description: 'Type the account email into the sign-in form.',
       input: { email: { type: 'string', required: true } },
       evidence: THREE_ROLES,
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
     {
       id: 'cap_fill_login_password',
@@ -112,14 +119,14 @@ export const candidates = () => structuredClone({
       kind: 'interaction',
       input: { password: { type: 'string', required: true } },
       evidence: THREE_ROLES,
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
     {
       id: 'cap_submit_login',
       name: 'submit_login',
       kind: 'interaction',
       evidence: THREE_ROLES,
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
     {
       id: 'cap_login',
@@ -127,7 +134,7 @@ export const candidates = () => structuredClone({
       kind: 'interaction',
       description: 'Sign in and reach the project list.',
       composed_of: ['cap_fill_login_email', 'cap_fill_login_password', 'cap_submit_login'],
-      metadata: { confidence: 0.5, status: 'inferred' },
+      metadata: { confidence: 0.5, status: 'inferred', producer: 'llm:deepseek-flash' },
     },
   ],
   transitions: [
@@ -139,7 +146,7 @@ export const candidates = () => structuredClone({
       guard: null,
       effects: [{ type: 'value_changed', target: 'element_email_input', to: 'test@example.com', observed: true }],
       evidence: THREE_ROLES,
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
     {
       id: 'transition_fill_login_password',
@@ -148,7 +155,7 @@ export const candidates = () => structuredClone({
       action: { capability: 'cap_fill_login_password', arguments: { password: '[set]' }, target: 'element_password_input' },
       effects: [{ type: 'value_changed', target: 'element_password_input', to: '[set]', observed: true }],
       evidence: THREE_ROLES,
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
     {
       id: 'transition_submit_login',
@@ -160,7 +167,7 @@ export const candidates = () => structuredClone({
         { type: 'storage_changed', target: 'localStorage.acme-demo-state', observed: true },
       ],
       evidence: THREE_ROLES,
-      metadata: { confidence: 1, status: 'verified' },
+      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
   ],
   journeys: [
@@ -171,7 +178,7 @@ export const candidates = () => structuredClone({
       start_state: 'state_login_anonymous',
       transitions: ['transition_fill_login_email', 'transition_fill_login_password', 'transition_submit_login'],
       evidence: [evidence('obs_0001', 'identity'), evidence('obs_0003', 'effect')],
-      metadata: { status: 'verified', producer: 'importer:dsh-graph-explorer', extra: { goal_stated: true } },
+      metadata: { status: 'inferred', producer: 'importer:dsh-graph-explorer', extra: { goal_stated: true } },
     },
   ],
 });
@@ -241,15 +248,28 @@ console.log('\n# the 0.1.22 defect, in miniature');
 {
   const { findings, source } = projected();
   check('three P1 errors (the mechanism names), three P2 warnings (steps with no realization)',
-    codes(findings),
+    codes(findings.filter((finding) => finding.rule === 'P1' || finding.rule === 'P2')),
     ['P1:behavior_name_is_a_mechanism', 'P1:behavior_name_is_a_mechanism', 'P1:behavior_name_is_a_mechanism',
       'P2:behavior_without_realization', 'P2:behavior_without_realization', 'P2:behavior_without_realization']);
   check('P1 refuses the three capabilities the real run committed',
     subjects(findings, 'P1'),
     ['behavior_fill_login_email', 'behavior_fill_login_password', 'behavior_submit_login']);
   check('and passes the composite that names the goal', subjects(findings, 'P1').includes('behavior_login'), false);
+  const p14 = withRule(findings, 'P14');
+  check('P14 refuses nine claims the same way the real walk measured (8 read, 1 derived)',
+    [p14.length, p14.filter((finding) => finding.code === 'claim_outranks_its_producer').length,
+      p14.filter((finding) => finding.code === 'claim_has_no_producer').length],
+    [9, 8, 1]);
+  check('and the three steps, their three edges, both states and one derived variable are which',
+    subjects(findings, 'P14'),
+    ['behavior_fill_login_email', 'behavior_fill_login_password', 'behavior_submit_login', 'projects',
+      'state_login_anonymous', 'state_project_list_authenticated_projects_populated',
+      'transition_fill_login_email', 'transition_fill_login_password', 'transition_submit_login']);
+  check('the composite and the journey are the two the commit wrote honestly, so they are untouched',
+    [subjects(findings, 'P14').includes('behavior_login'), subjects(findings, 'P14').includes('journey_login_anonymous_to_project_list')],
+    [false, false]);
   check('the summary counts them the way a gate would read them', summarizeFindings(findings),
-    { total: 6, errors: 3, warnings: 3, infos: 0, bySeverity: { info: 0, warning: 3, error: 3 }, byRule: { P1: 3, P2: 3 }, failed: true });
+    { total: 15, errors: 12, warnings: 3, infos: 0, bySeverity: { info: 0, warning: 3, error: 12 }, byRule: { P1: 3, P2: 3, P14: 9 }, failed: true });
   ok('the fixture really is the run\'s own vocabulary',
     MECHANISM_VERBS.has('fill') && MECHANISM_VERBS.has('submit') && source.capabilities[3].name === 'login');
 }
@@ -271,10 +291,10 @@ console.log('\n# P1 a behaviour is named for the goal');
 {
   const { findings } = projected({
     capabilities: [
-      { id: 'cap_login', name: 'login', kind: 'interaction', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified' } },
-      { id: 'cap_sign_in', name: 'sign_in', kind: 'interaction', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified' } },
-      { id: 'cap_view_projects', name: 'view_projects', kind: 'query', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified' } },
-      { id: 'cap_add_project', name: 'add_project', kind: 'interaction', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified' } },
+      { id: 'cap_login', name: 'login', kind: 'interaction', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' } },
+      { id: 'cap_sign_in', name: 'sign_in', kind: 'interaction', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' } },
+      { id: 'cap_view_projects', name: 'view_projects', kind: 'query', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' } },
+      { id: 'cap_add_project', name: 'add_project', kind: 'interaction', evidence: THREE_ROLES, metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' } },
     ],
   });
   ok('goal names pass: the leading verb is not a mechanism verb and no later word is the surface',
@@ -557,6 +577,92 @@ console.log('\n# P13 an affordance is offered, not performed');
     codes(profileFindings(walked, {})).includes('P13:affordance_already_walked'));
   check('and it is a warning, not an error', withRule(profileFindings(walked, {}), 'P13')
     .find((finding) => finding.code === 'affordance_already_walked').severity, 'warning');
+}
+
+// --- P14, P15 ------------------------------------------------------------------------------------
+
+console.log('\n# P14/P15 a document is reported at the level its claims were obtained at (D9, D11)');
+{
+  check('the order of CLAIM_LEVELS *is* the rule: a lower index is a weaker claim',
+    CLAIM_LEVELS, ['modelled', 'inferred', 'observed']);
+  check('the producer is what makes a claim one level or another',
+    ['playwright', 'manual', 'llm:deepseek-flash', 'importer:dsh-graph-explorer'].map((producer) => claimLevel({ producer })),
+    ['observed', 'observed', 'inferred', 'inferred']);
+  ok('and a producer nobody recognises is a derivation, never a collector',
+    claimLevel({ producer: 'something-new' }) === 'modelled' && claimLevel({}) === 'modelled',
+    claimLevel({ producer: 'something-new' }));
+}
+{
+  const { model } = projected();
+  model.journeys[0].metadata = { status: 'verified', confidence: 1, producer: 'importer:dsh-graph-explorer' };
+  ok('a tool that read the document may not report what it read as verified',
+    subjects(profileFindings(model, {}), 'P14').includes('journey_login_anonymous_to_project_list'));
+}
+{
+  const { model } = projected();
+  model.journeys[0].metadata = { status: 'inferred', producer: 'importer:dsh-graph-explorer', confidence: 1 };
+  const finding = withRule(profileFindings(model, {}), 'P14')
+    .find((entry) => entry.subject === 'journey_login_anonymous_to_project_list');
+  ok('confidence 1 is the same claim as "verified", so it is refused the same way',
+    finding?.detail.includes('confidence 1'), finding?.detail);
+}
+{
+  const { model } = projected();
+  model.behaviors.find((entry) => entry.id === 'behavior_login').metadata =
+    { status: 'verified', confidence: 1, producer: 'playwright' };
+  const finding = withRule(profileFindings(model, {}), 'P14').find((entry) => entry.subject === 'behavior_login');
+  check('a composite takes the minimum of its parts, even when its own producer watched every click',
+    finding?.code, 'claim_outranks_its_inputs');
+  ok('and the detail names the weaker parts, so the fix is a list and not a guess',
+    finding?.detail.includes('derived from claims at inferred'), finding?.detail);
+}
+{
+  const { model } = projected();
+  model.behaviors.find((entry) => entry.id === 'behavior_submit_login').realization = [
+    { action: 'click', element: 'element_login_button', metadata: { status: 'verified', confidence: 1 } },
+  ];
+  const finding = withRule(profileFindings(model, {}), 'P14')
+    .find((entry) => entry.subject === 'behavior_submit_login' && entry.code === 'claim_has_no_producer');
+  ok('a realization step stamped verified with no producer is a derivation nobody signed',
+    finding !== undefined, JSON.stringify(withRule(profileFindings(model, {}), 'P14').map((entry) => [entry.subject, entry.code])));
+}
+{
+  const { model } = projected();
+  check('the fixture\'s honest claims raise no P15 at all', withRule(profileFindings(model, {}), 'P15'), []);
+
+  const { model: unowned } = projected();
+  unowned.journeys[0].metadata = { status: 'inferred', extra: { goal_stated: true } };
+  check('an inference that names nobody is a claim nobody can be asked about',
+    codes(withRule(profileFindings(unowned, {}), 'P15')), ['P15:inference_without_producer']);
+
+  const { model: baseless } = projected();
+  baseless.behaviors.push({
+    id: 'behavior_dismiss_banner', name: 'dismiss_banner', kind: 'navigation',
+    metadata: { status: 'inferred', confidence: 0.5, producer: 'llm:deepseek-flash' },
+  });
+  check('an inference from nothing is a hallucination, and is reported as one rather than carried',
+    codes(withRule(profileFindings(baseless, {}), 'P15')), ['P15:inference_without_basis']);
+}
+{
+  // D8's floor under the rule: what P14 refuses has to be reachable, or the rule can only be
+  // satisfied by recording less. Writing the ceiling each claim earned is what an honest document
+  // says — and it is the same object list, so the rule and its fix cannot drift apart.
+  const { model } = projected();
+  for (const claim of claimsOf(model)) {
+    if (!claim.object.metadata) continue;
+    const ceiling = LEVEL_CEILING[claim.level];
+    claim.object.metadata = {
+      ...claim.object.metadata,
+      status: ceiling.status,
+      confidence: Math.min(claim.object.metadata.confidence ?? 1, ceiling.confidence),
+    };
+  }
+  const findings = profileFindings(model, {});
+  check('writing each claim\'s ceiling satisfies P14', withRule(findings, 'P14'), []);
+  check('and P15: a downgraded claim still names who read it', withRule(findings, 'P15'), []);
+  check('and it is not silence: the claim is still there, at the level it was obtained at',
+    [model.behaviors[0].metadata.status, model.behaviors[0].metadata.producer, model.behaviors[0].metadata.confidence],
+    ['inferred', 'llm:deepseek-flash', 0.5]);
 }
 
 // --- reading a run --------------------------------------------------------------------------------

@@ -27,6 +27,7 @@ this: it makes the ABM a consumer of its own document, which is the point. |
 | **D8** | **An acceptance number needs a floor under it, and a shared rule needs a test.** "Zero errors" is satisfiable by recording less, "byte-comparable" is not a property of bytes, and "one definition" is an intention until something runs both. | §5: Phase 2's acceptance is four checkable clauses — validity **and** the counts 0.1.22 carried **and** a key-path diff **and** `profileFindings` ≡ `invariantsOf`. Every later phase states its acceptance the same way. |
 | **D9** | **Three epistemic levels, preserved and enforced.** A **fact** the collector captured, a **reading** a producer inferred from it, and a **derivation** the model computed from other claims are three different claims, and the document must not let one turn into another over rebuilds. | §3: the levels ride fields that already exist (`evidence[]` roles, `metadata.status` / `producer` / `confidence`) — no parallel mechanism — and **P14/P15** make the relationship a rule instead of a convention. Also true of ABG 0.1, so the rule is shared and D8's drift test covers both. |
 | **D10** | **The generator reads the ABM, and that is the milestone.** An integration test written from the semantic model, with `graph.json` not consulted as the semantic source. | §5: Phase 4 is in the MVP, not deferred. A model nothing downstream reads cannot be wrong in a way that matters. |
+| **D11** | **An object's level is the minimum of the claims it carries.** One `metadata` block covers several claims — a behaviour's *name* and its *edge*, a state's *identity* and its *reading* — and D9 says those are different claims, so the level of the record is the weakest of them. Derived from `producer` + `composed_of` on the fly; no second field, no `metadata.extra.levels`. | §3: **P14/P15** are the enforcement. The consequence is accepted here rather than discovered later: the three 0.1.22 edges become `inferred`, which makes **P10 reachable on walks that look clean today** — an `inferred` behaviour cannot back a `criticality: critical` journey, so a walk that used to report nothing now reports a warning. That is the rule working, not a regression. |
 
 **Why D5 is not just a preference — P12 could not hold without it.** The current §3 made a walk step a
 *behaviour* (`login`) while P12 demanded "every committed transition appears as exactly one
@@ -35,6 +36,16 @@ behaviour-level step**, so the rule fails on the very run it was written to chec
 because `assembleJourneys` builds `journeys[].transitions[]` per *call* (`commit.js:1183`) — i.e. the
 rule was accidentally reading the graph's own granularity, not the ABM's. An edge whose unit is the
 behaviour is what makes the rule sound, and collapsing 3 calls into 1 edge is the pivot itself.
+
+**Why D11 is a derivation and not a field.** The alternative — one level per claim, written into the
+document — makes the level something an author can write down and get wrong, and leaves the document
+with two answers to one question (the status it reports, the level it declares). Computing it from
+`producer` + `composed_of` means the *fix* P14 asks for is one line over the same object list the rule
+read, so the rule cannot demand something the document has no way to express: the shape is
+`LEVEL_CEILING[level]` written onto each `metadata`. The cost is that the level cannot be finer than
+the object: a behaviour's name and its realization share a behaviour, so a walked behaviour with an
+LLM's name is `inferred` — and that is the conservative answer, because the name is what a generated
+test asserts on.
 
 ## 1. Two documents, one evidence log
 
@@ -380,8 +391,8 @@ correctable while the page is still on screen).
 | P11 | Every behaviour is the `behavior` of ≥1 `transitions[]` entry, or a member of a walkable behaviour's `composed_of` — a behaviour no edge can perform is a vocabulary entry, not a behaviour | `warning` (supersedes the draft's "every behaviour in a journey") |
 | P12 | **Walk preservation (D4 + D5), both directions.** *(a)* every transition `graph.json` committed is accounted for in the ABM — as an edge's behaviour, or as a `realization[]` step of a behaviour whose own edge starts where that transition started; *(b)* every `transitions[]` entry is backed by ≥1 committed graph transition with the same `from_state`/`to_state`/behaviour; *(c)* the ABM has ≥1 journey (D4) and every `journeys[].steps[]` entry names a `transitions[]` id | `error` — the D1 coherence check |
 | P13 | **An affordance is offered, not performed (D6).** Every `state.affordances[].element` is declared in **that same state's** `elements[]`; an affordance whose element *is* the target of a committed `realization[]` step is reported, because the walk itself refutes "nobody did this" | `error` (unresolved element) / `warning` (`affordance_already_walked`) |
-| P14 | **No claim outranks its support (D9).** A `verified` claim must be shown by the observations it cites *for that claim*: a behaviour's **name** is not verified by the observation that a click happened, so the name is `inferred` even when its edge is `observed`. Formally, a derived claim's level is the **minimum** of its inputs' levels — so no chain of rebuilds, re-projections or re-imports can promote an inference to a fact | `error` |
-| P15 | **An inference names itself and its basis (D9).** Every `status: inferred` claim names its `producer` (`llm:<model>`, `manual`, `derived:<tool>`) and points at the observations it was inferred *from*. An inference with no basis is a hallucination and is reported as one. Distinct from P9, which asks that evidence **exist** | `error` |
+| P14 | **No claim outranks its support (D9, D11).** A `verified` claim must be shown by the observations it cites *for that claim*: a behaviour's **name** is not verified by the observation that a click happened, so the name is `inferred` even when its edge is `observed`. Formally, an object's level is the **minimum** over the claims it carries — its own producer's level and its inputs' levels — so no chain of rebuilds, re-projections or re-imports can promote an inference to a fact. Codes: `claim_outranks_its_producer`, `claim_outranks_its_inputs` (a composition inherited a weaker part), `claim_has_no_producer` (a derivation) | `error` |
+| P15 | **An inference names itself and its basis (D9).** Every `status: inferred` claim names its `producer` and points at the observations it was inferred *from* (its `evidence[]`, its `composed_of`, or a stated derivation). An inference with no basis is a hallucination and is reported as one. Distinct from P9, which asks that evidence **exist**. Codes: `inference_without_producer`, `inference_without_basis` | `error` |
 
 P1 and P3 are the ones that make this the pivot rather than a rename: P1 refuses the exact names
 the 0.1.22 run produced, and P3 stops `composed_of` from being used as a stand-in for realisation.
@@ -404,6 +415,25 @@ after a few rebuilds a naming guess is indistinguishable from a capture. That is
 that makes this matter for PR analysis, where a claimed behaviour is compared against a diff and
 reported as fact. So P14 is enforced over **both** documents (D1/D8): `graph.json` commits the same
 promotion today, and `invariantsOf()` is where the graph-side half belongs.
+
+**Measured once the rules are in (0b): 9 P14 refusals and no P15 on the 0.1.22 walk** — the three
+per-element behaviours, their three edges, both states (all `claim_outranks_its_producer`) and one
+derived state variable, `projects`, which the projection computes and nobody signed
+(`claim_has_no_producer`). Two things about that count are worth keeping:
+
+- **The edges and the states are refused too, and that is the same defect, less loud.** A `0.95`
+  reading of a page presented as `verified` is the naming defect with the volume down: the
+  collector saw the page; what it *is* was read. Reporting only the three behaviours would have made
+  the rule look like a naming rule.
+- **The projection is the mechanism, not only the witness.** `lib/abm.js` re-emits those `metadata`
+  blocks verbatim, so before P14 the fork's own tool was the thing carrying `verified` forward. That
+  is why the rule is written over *claims* rather than over behaviours: the objects it names include
+  the ones the new pipeline had just invented.
+
+And the two objects the walk got right stay untouched, which is what makes the rule usable: the
+composite `cap_login` (`inferred, 0.5, producer: llm:deepseek-flash`, its basis its three members)
+and the journey (`inferred`, `importer:dsh-graph-explorer`) both pass, so P14 is not a rule that
+fires on everything a model touched.
 
 One deliberate asymmetry: an edge that no journey walks is reported the way `reachability`
 already is (`warning`), because a walk that avoided a behaviour is not evidence it cannot be
@@ -479,13 +509,15 @@ and it is also the expected shape for 0b.
 
 **0b — the projection, as a *check*, not as the pipeline. DONE.** `lib/abm.js` is pure and writes
 nothing: `modelFromCandidates(candidates)` → the ABM shape of §3, and `profileFindings(model,
-{candidates})` → P1–P13 as the flat findings `commitRun` already emits (`{rule, code, severity,
+{candidates})` → P1–P15 as the flat findings `commitRun` already emits (`{rule, code, severity,
 scope, subject, detail, basis}`), counted by `summarizeFindings()` for a CLI. This is a **diagnostic
 over recorded runs**, never the production path — `commitRun` will build the same document from the
 same store, and 0b exists to have something to measure with before any live run.
 
-- `npm test` is **10 suites**; `test/abm.test.mjs` is 80 checks, one per rule plus both directions
-  of each ("break exactly this one thing, and exactly this one rule notices").
+- `npm test` is **10 suites**; `test/abm.test.mjs` is 97 checks, one per rule plus both directions
+  of each ("break exactly this one thing, and exactly this one rule notices"), including one case
+  that writes each claim's own ceiling and asserts P14 goes quiet — the floor D8 asks for under the
+  rule, since a rule that cannot be satisfied can only be satisfied by recording less.
 - `npm run profile:abm` (`test/abm-baseline.mjs`) is the acceptance proof. It is a harness and not
   a suite, because the run it profiles is not in the clone: with no run directory it prints `SKIP`
   and exits 0.
@@ -495,16 +527,19 @@ same store, and 0b exists to have something to measure with before any live run.
   and SKIPs without one.
 
 **Acceptance (0b): MET.** Over the 0.1.22 walk the profile reports
-`{total: 6, errors: 3, warnings: 3, failed: true}` — **P1 ×3, on exactly the three motivating
+`{total: 15, errors: 12, warnings: 3, failed: true}` — **P1 ×3, on exactly the three motivating
 behaviours** (`behavior_fill_login_email`, `behavior_fill_login_password`, `behavior_submit_login`),
-P2 ×3 because those three capabilities are steps of `login` and have no `realization[]`, and
-**nothing else**: on the real document the other eleven rules are silent, which is the half of the
-claim that matters. The proof does not compare against a snapshot — it derives the expected refusals
-from the run's own `capabilities.jsonl` (every committed capability whose leading word is a
-mechanism verb must come out refused, and nothing else may be refused for that reason), so a fixture
-cannot be made to pass by editing the fixture. It also asserts that the projection validates against
-`schemas/abm/0.2/` (ajv, all 10 schemas, resolved by `test/ajv.mjs`) and that profiling a run does
-not modify the run it read.
+P2 ×3 because those three capabilities are steps of `login` and have no `realization[]`, **P14 ×9**
+for the level those three are reported at and the edges and states that share the defect (§3), and
+**nothing else**: P15 and P3–P13 are silent on the real document, which is the half of the claim that
+matters. The proof does not compare against a snapshot — it derives the expected refusals from the
+run's own logs, both halves: every committed capability whose leading word is a mechanism verb must
+come out refused by P1 (and nothing else may be refused for that reason), and every object whose own
+`producer` is a reading (`llm:*`, `importer:*`) while its `status` is `verified` must come out refused
+by P14 — so a fixture cannot be made to pass by editing the fixture. P15's silence is asserted the
+same way, against the log: every inference this walk made names its producer, so there is nothing for
+the rule to report. It also asserts that the projection validates against `schemas/abm/0.2/` (ajv, all
+10 schemas, resolved by `test/ajv.mjs`) and that profiling a run does not modify the run it read.
 
 Five things 0b settled that the plan had not seen:
 
@@ -575,7 +610,7 @@ with three `realization[]` entries and no top-level step capability. Covered by
 - Assemble `behaviors[]` (with `realization[]` ordered by walk order), **`transitions[]` collapsed to
   one edge per `(from_state, behaviour, to_state)`** (D5), `entities[]`, `state_variables[]`,
   `actors[]`, and `journeys[].steps[]` referencing those edges.
-- Add P1–P13 to `invariantsOf()` (commit.js:3351), sharing one definition with Phase 0b's
+- Add P1–P15 to `invariantsOf()` (commit.js:3351), sharing one definition with Phase 0b's
   `profileFindings` so the diagnostic and the gate cannot drift.
 - Emit the D4 fallback journey (the run's own walk, `goal_stated: false`, `criticality`
   omitted) whenever no step claimed a `journey_name`, so P12c always has a journey to check.
@@ -639,7 +674,7 @@ generated with `graph.json` **absent from the run directory**, and every action 
 to a `realization[]` step. Two documents read from one log, and the test written from the second.
 
 The point is not that the ABM is nicer. It is that **a model nothing downstream reads cannot be
-wrong in a way that matters**: if the spec comes from the graph, P1–P13 are an opinion about a
+wrong in a way that matters**: if the spec comes from the graph, P1–P15 are an opinion about a
 file, and the pivot added a description instead of replacing one. Phase 4 is where the pivot
 becomes load-bearing, which is why it is inside the MVP rather than after it.
 
@@ -667,7 +702,7 @@ and lowers `confidence`, which is what the schema's `effect.observed` already me
 | Risk | Why it is real here | Mitigation |
 | --- | --- | --- |
 | **Semantic hallucination** — `create_project` inferred from a `[Create]` button | The pivot pushes inference earlier, when less is known | P9 (evidence required), P5 (a literal value must have been observed), plus the existing refusal set. `confidence` reported, never invented. |
-| **Inference hardens into fact over rebuilds** (D9) | Measured, not hypothetical: `cap_submit_login` reports `status: verified, confidence: 1` today although its name is an LLM reading, and any tool that re-emits the document copies that forward. After a few rebuilds a naming guess is indistinguishable from a capture — and a PR analysis would then report it as code fact | P14 (a claim may not outrank the observations supporting *that claim*; a derived claim takes the **minimum** of its inputs' levels) and P15 (an inference names its producer and its basis). Enforced over **both** documents, since `graph.json` has the same defect today |
+| **Inference hardens into fact over rebuilds** (D9) | Measured, not hypothetical: `cap_submit_login` reports `status: verified, confidence: 1` today although its name is an LLM reading, and any tool that re-emits the document copies that forward. After a few rebuilds a naming guess is indistinguishable from a capture — and a PR analysis would then report it as code fact | P14 (a claim may not outrank the observations supporting *that claim*; by D11 an object's level is the **minimum** over the claims it carries) and P15 (an inference names its producer and its basis). Enforced over **both** documents, since `graph.json` has the same defect today |
 | **Two documents drift** | They are independent by design (D1), which is exactly what lets them disagree | Both from one store, one commit, one `commit_report.json` section each; **P12a/P12b** check the edge set in both directions, so neither document can quietly lose or invent an edge. |
 | **The walk loses its order or its point** (D4, restated for D5) | `transitions[]` is a *set*: it has no order and no purpose, so only `journeys[].steps[]` says what the walk was and what it was for | `reconcile()` always emits the fallback journey (`goal_stated: false`); **P12c** fails the commit if it ever stops doing so. |
 | **The collapse hides which step landed the state** (D5) | Three calls become one edge, and `realization[]` keeps the order but does not mark which action moved the application | The edge's `evidence` carries the `action` role, which names the observation of that step — in the 0.1.22 run, `obs_0004`, the submit click. So the causal step is *recoverable from evidence* rather than asserted. |
@@ -735,6 +770,6 @@ the five controls the capture shows and the graph cannot name had to become affo
 or stored as a reference.
 
 **Why the sequencing held.** The experiment was run *before* Phase 0a/0b because 0b implements
-§3's shape and P1–P13, and D5 changes that shape materially — the rule set and the document's
+§3's shape and P1–P15, and D5 changes that shape materially — the rule set and the document's
 edge unit had to be right before there was anything to implement. The plan revision below is
 that reordering, not a delay.
