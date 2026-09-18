@@ -20,7 +20,8 @@ export const protocolText = (config) => `## Application-behaviour exploration (g
 
 This session turns a browsing session into a machine-readable application behaviour
 graph: application, features, states (with their elements and detection) and the
-transitions between them. The browser is driven by the \`browser_*\` tools.
+transitions between them — and, from that graph, a Playwright test for one of its
+journeys. The browser is driven by the \`browser_*\` tools.
 
 **Evidence is collected for you.** Around every \`browser_*\` call that can change the
 page, the harness records the URL, title, headings, interactive elements, form values,
@@ -43,6 +44,11 @@ You never need to collect that, and you must never invent it. Read
 
 **Your job is the part the harness cannot do: deciding what the page MEANS.**
 
+The first action of a run is a step, not a transition. Nothing came before it, so there is
+no state for it to have moved between — read the state it arrived in with
+\`${config.observeTool}\`, and record transitions from the second action onward. The tool
+refuses the first one rather than inventing an entry state for it.
+
 For every step:
 
 1. Act with exactly one \`browser_*\` tool. One action at a time — a compound step
@@ -63,15 +69,29 @@ For every step:
      effect on a self-loop rather than a transition into a state of its own. Ask what
      the app would say at that moment: \`{"form_error":"duplicate_name"}\` is the app
      answering; \`{"email":"filled"}\` is you having typed.
+
+     A dimension has two halves and a state needs both: the word, here, and a \`value\`
+     assertion in \`detection\` that reads it. The digest's \`state_variables\` names the
+     variables your own steps moved that no state records this way — a step that changes
+     only what the app remembers (a cart count, a filter, a draft) is a real difference,
+     and this is where it goes, so the graph can hold it without giving the screen a
+     state of its own.
    - \`elements\` — only the elements a test would act on, each with a
      \`semantic_purpose\` (the identity — never a CSS path), \`role\`, \`name\`,
      \`locator\` (evidence, not identity).
    - \`detection\` — how a test proves it is in this state: \`url\`, \`element_state\`,
      \`element_value\`, \`message\`, \`absence\`. A state with no detection cannot be
-     asserted, so the tool will refuse it. The condition goes in \`operator\` — or in
+     asserted, so the tool will refuse it. Every state needs one, and the state a walk
+     *lands* in needs it most: the generated test asserts each arrival with the arrival
+     state's own detection, so a state with none costs the spec that check — the test
+     reaches the screen and says nothing about having got there. The condition goes in
+     \`operator\` — or in
      \`value\`/\`expected\` — never in a key of your own: for a state word write
      \`{"type":"element_state","target":"sign_in_button","operator":"visible"}\`, and for
      a value \`{"type":"element_value","target":"email_input","value":"test@example.com"}\`.
+     A dimension is asserted the same way, with the name you gave the dimension:
+     \`{"type":"value","target":"projects","operator":"equals","expected":"empty"}\` — one
+     name, so the graph's word for the difference and the test's check for it are one thing.
      An element in a detection resolves against the \`semantic_purpose\` a state has
      declared, so declare the element in the reading that first sees it. A detection is
      checked against the capture of the very reading that carries it: a claim the page
@@ -102,6 +122,17 @@ For every step:
      and \`search_product\`. When the note offers a name from the schema's vocabulary for
      a behaviour you recognise, that name wins — the vocabulary is the list the graph is
      being converged onto.
+
+     A composite that absorbs the interaction that finishes it is the failure this is
+     written against: \`login\` recorded as a composite over \`fill_login_email\` and
+     \`fill_login_password\`, with the click that submits the form folded into it. The
+     click is a capability of its own *and* a step of \`login\`, so record it in the same
+     call that performs it — \`capability: "submit_login"\` with
+     \`capability_behaviour: "login"\` — and the step is appended to \`login\`'s
+     \`composed_of\`, in the order they are performed:
+     \`["fill_login_email", "fill_login_password", "submit_login"]\`. A composite whose
+     steps do not include the one that does the work is a claim the walk does not
+     support, and the generator reports the mismatch instead of writing a test from it.
    - \`effects\` — what changed, one entry each. \`navigation\`, \`url_changed\` and
      \`state_entered\` need \`to\`; \`value_changed\` and \`visibility_changed\` need
      \`target\` and \`to\`; \`message\` needs \`message\`; \`request\` needs \`api\`; and
@@ -112,10 +143,31 @@ For every step:
      element's \`semantic_purpose\` — \`email_input\`, not \`login.email\` and not a
      selector, and the tool refuses a target no state has declared; for the rest
      (\`storage_changed\`, \`list_changed\`) it is a semantic path or key
-     (\`localStorage.draft\`, \`order.items\`). Set \`"observed": true\` only for what the
-     evidence shows — an effect you inferred is a weaker claim, and it should say so.
+     (\`localStorage.draft\`, \`order.items\`). What \`to\` is depends on the effect too:
+     for \`value_changed\` and \`visibility_changed\` it is what the element moved to
+     (\`"test@example.com"\`, \`"absent"\`); for \`state_entered\` it is the **state id**
+     the reading ended in — the \`state_id\` the tool reported for this step's own
+     reading (\`state_project_list_authenticated_signed_in\`), never the \`page_type\`
+     (\`project_list\`) or the \`variant\` (\`authenticated\`), neither of which is a
+     state. The step's \`to_state\` is derived from evidence — it is where the action
+     actually landed — so the effect's \`to\` is that same id, and the tool refuses the
+     step when the two disagree rather than guess which one you meant.
+     Set \`"observed": true\` only for what the evidence shows — an effect you
+     inferred is a weaker claim, and it should say so.
    - \`arguments\` — the concrete values used this time, e.g. \`{"coupon_code":"SAVE10"}\`.
    - \`guard\` — the condition that made this transition possible, if there is one.
+   - \`journey_name\` — what the walk is a journey *towards*, in the user's own words:
+     \`"Sign in and see the project list"\`. A journey is derived from walk order, so this
+     is the one thing about it the machinery cannot see. Without a claim the journey
+     keeps the run's whole instruction as its name and goal — *"using the browser tools,
+     open the app at http://… and sign in as …"* — which is a sentence a person asked,
+     not a title, and nothing downstream can shorten it back into the journey. State it
+     once, on any step of the walk; the latest claim names the whole walk.
+   - \`feature\` — the product feature this step is part of (\`"authentication"\`,
+     \`"project_management"\`). Nothing in a page says what a product is *for*, so these
+     words are yours and they are the only source \`features[]\` has: a run that claims no
+     feature commits an empty \`features[]\`, however many pages it walked. Reuse the exact
+     words on every step of the same feature — the name is the key.
 
    \`from_state\` and \`to_state\` are derived from evidence — do not pass them. The
    tool returns the change it saw for the step beside the effects you claimed, so
@@ -131,6 +183,17 @@ For every step:
    \`graph.json\` next to a \`commit_report.json\` that says what it committed, what it
    refused and why. Nothing you record is retracted by it — the raw logs stay exactly
    as written.
+6. Call \`${config.generateTool}\` to turn the committed graph into a Playwright spec, and read
+   what it reports. It is the last thing a run does, and it changes nothing: the graph is
+   its only input, so the spec is reproducible from \`graph.json\` alone — the run is not
+   the thing being tested. Name the journey by id, by name, or by the words it is a
+   journey towards; with exactly one journey in the graph you need not name it, and with
+   several the tool refuses rather than picking one, because a spec that clicks through
+   the wrong walk is worse than no spec. Then read its \`gaps[]\` — everything the graph
+   implies and the spec cannot say, each with a sentence naming what to record. A spec
+   with a blocking gap is still written and is *not ok*: it drops the step it could not
+   turn into an action, so it would pass without performing it. Fix what the gaps name
+   and generate again.
 
 Rules that matter:
 
@@ -166,6 +229,12 @@ Rules that matter:
   page, so it can change as much as a click can. Read the state after one exactly as you
   would after a click. Prefer \`browser_get_text\` / \`browser_get_html\` when all you want
   is to read something: those are not actions, and they cost nothing to your evidence chain.
+- **A reading taken before an action is not evidence of that action.** When a step moves
+  the page it has two readings: the one it started from and the one it produced. Only the
+  second documents the step — the first is the step's *input*, and the graph records it as
+  the step's linkage rather than as evidence of it. So read after acting, not only before:
+  a step whose "after" reading is also its "before" reading has no evidence that it did
+  anything at all.
 - **\`${config.transitionTool}\` needs the step before it to have been read too.** Both
   ends of a transition come from evidence, so a step nobody read has no edge into it and
   no edge out of it.`;

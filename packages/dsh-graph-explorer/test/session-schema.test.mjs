@@ -75,6 +75,30 @@ check('observed_change kept beside claimed effects', trans[3].observed_change, n
 check('chain_break is written to the log, not just returned', [trans[3].chain_break && trans[3].chain_break.previous_transition, trans[4].chain_break], ['transition_login', null]);
 check('claimed effects default to empty', trans[0].effects, []);
 
+// --- a composition that arrives after the name ---------------------------
+// The store is append-only, so a later claim about a capability is a second record naming the
+// capability it is about rather than a revision of the first. The index holds the merged view,
+// which is what a commit reads: the step list has to be complete even though no single line is.
+const late = run.addCapability({ name: 'login', kind: 'composite', composed_of: ['cap_add_product_to_cart'] });
+const composition = lines('capabilities.jsonl')[2];
+check('a later composition does not create a capability', [late.created, late.id, run.capabilityCount()], [false, 'cap_login', 2]);
+check('the appended row is a record about the capability, not a second capability',
+  [composition.kind, composition.capability_id, composition.name, composition.composed_of, composition.added, composition.capability_kind],
+  ['capability_composition', 'cap_login', 'login', ['cap_add_product_to_cart'], ['cap_add_product_to_cart'], 'composite']);
+check('and the merged view is what the index hands back',
+  [late.record.composed_of, late.record.capability_kind, late.composition_added],
+  [['cap_add_product_to_cart'], 'composite', ['cap_add_product_to_cart']]);
+check('saying the same thing twice appends nothing',
+  [run.addCapability({ name: 'login', kind: 'composite', composed_of: ['cap_add_product_to_cart'] }).composition_added,
+    lines('capabilities.jsonl').length],
+  [[], 3]);
+check('a name is resolved to a reference, or to nothing at all',
+  [run.capabilityIdFor('login'), run.capabilityIdFor('nobody'), run.capabilityIdFor(undefined)], ['cap_login', null, null]);
+check('an empty id is dropped before it can become a dangling reference',
+  run.addCapability({ name: 'submit_order', composed_of: ['', null, 'cap_login'] }).record.composed_of, ['cap_login']);
+check('a capability nobody has named keeps its name in the log, but is not in the vocabulary twice',
+  [run.capabilityNames().includes('submit_order'), run.capabilityCount()], [true, 3]);
+
 // --- vocabulary ----------------------------------------------------------
 check('exact vocabulary name raises nothing', vocabularyNotes('add_product_to_cart', []).length, 0);
 check('curated synonym', vocabularyNotes('place_order', []).map((n) => [n.signal, n.vocabulary_name]), [['known_synonym', 'submit_order']]);

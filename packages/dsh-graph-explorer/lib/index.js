@@ -35,11 +35,12 @@
  */
 import Schema from '@deepseek-ai/schemastery';
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from './capture.js';
-import { assertionSurvival, commitRun, CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, routeOf, surfaceIsDisjoint, surfaceOf } from './commit.js';
+import { assertionSurvival, commitRun, CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, observedApis, persistenceVariablesOf, routeOf, semanticVariablesOf, stateVariablesOf, surfaceIsDisjoint, surfaceOf, unrecordedStateVariables } from './commit.js';
+import { generateTest } from './generate.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
 import {
     APPLICATION_ID_PATTERN,
@@ -86,6 +87,7 @@ export const Config = Schema.object({
     observeTool: Schema.string().default('graph_observe'),
     transitionTool: Schema.string().default('graph_transition'),
     commitTool: Schema.string().default('graph_commit'),
+    generateTool: Schema.string().default('graph_test'),
     // The pattern declares the contract so a config error is caught while the
     // profile is still booting, alongside every other bad setting. The runtime
     // check in `apply` is not a duplicate of it: this declares *what is valid*,
@@ -670,6 +672,49 @@ const valueMismatchNotes = (detection, registry, capture) => {
 };
 
 /**
+ * The state variables the walk has moved, and whether the states it recorded hold them.
+ *
+ * The commit makes this judgement per edge, which is the right place for the *record*; this is the
+ * same judgement asked of the run so far, because the digest is where the model can still act on
+ * it. A step that changed a collection changed something the screen is showing, so the graph has
+ * exactly one way to hold it which is not a state per value: a dimension on the state's identity,
+ * pinned by a `value` assertion in its detection. Reported as names rather than as a verdict,
+ * because whether the fact *is* what makes the state a different situation is the model's
+ * judgement.
+ *
+ * A storage key is the other case and gets the other advice. It is real evidence — the run's proof
+ * that the step changed something the application *remembers* — but it is not an observable: no
+ * browser can be asked what the application remembers about a user, so a `value` assertion over a
+ * storage key is a check nothing can evaluate. Asking for it as a dimension would be asking for a
+ * test that cannot be written, which is what the two lists below are here to prevent: the
+ * `unrecorded` list is the semantic half only, and the remembered half is named separately.
+ *
+ * `null` when the walk has moved no variable at all, so a digest for a run that never touched one
+ * does not carry a field that means nothing.
+ */
+const stateVariableRollup = (store) => {
+    const effects = store.transitions().flatMap((record) => (Array.isArray(record.effects) ? record.effects : []));
+    const moved = stateVariablesOf(effects);
+    if (!moved.length) return null;
+    const identities = store.states().map((record) => record.identity ?? {});
+    const semantic = semanticVariablesOf(effects);
+    const unrecorded = unrecordedStateVariables(effects, identities);
+    return {
+        moved: moved.map((variable) => variable.name),
+        // By name, and over the semantic half: the unrecorded list was computed from a second
+        // reading of the effects, so its entries are equal as values and not as objects, and a
+        // storage key is not "recorded" merely by not being asked for as a dimension — it was
+        // never a candidate. A variable can therefore be absent from both lists, and the
+        // `persistence` list is where it appears instead.
+        recorded: semantic
+            .filter((variable) => !unrecorded.some((entry) => entry.name === variable.name))
+            .map((variable) => variable.name),
+        unrecorded: unrecorded.map((variable) => variable.name),
+        persistence: persistenceVariablesOf(effects).map((variable) => variable.name),
+    };
+};
+
+/**
  * A caution for a state identity minted out of element state.
  *
  * Whether two readings are two states is the model's judgement — the schema says so, and this
@@ -736,7 +781,9 @@ export function crossCheckEffects({ effects, before, after, fromState, toState, 
         if (effect.type === 'state_entered' && effect.to && effect.to !== toState) {
             errors.push(
                 `effect state_entered says the app entered ${JSON.stringify(effect.to)} while to_state is `
-                + `${JSON.stringify(toState)}. A transition cannot end in two places — fix whichever of the two is wrong.`,
+                + `${JSON.stringify(toState)}. A transition cannot end in two places. to_state is read from the `
+                + 'evidence — it is the state this step\'s own reading was recorded in — so it is the effect\'s `to` '
+                + 'that has to change: it is that state id, not the page_type and not the variant.',
             );
         }
 
@@ -808,6 +855,7 @@ export function apply(ctx, config) {
     const observeTool = config.observeTool ?? 'graph_observe';
     const transitionTool = config.transitionTool ?? 'graph_transition';
     const commitTool = config.commitTool ?? 'graph_commit';
+    const generateTool = config.generateTool ?? 'graph_test';
     // Resolved once, so the directory the model is told to read and the
     // directory the run store writes to are the same string by construction.
     // They used to be two independent derivations of the config, which is how a
@@ -990,7 +1038,7 @@ export function apply(ctx, config) {
      * (`settlePage`), and what the page said about its own timing travels with the
      * record it was taken for.
      */
-    const capture = async (exec, { tool, toolArgs, screenshotPath }) => {
+    const capture = async (exec, { tool, toolArgs, screenshotPath, actionIndex }) => {
         const store = ensureRun(exec);
         let settle = null;
         let captureValue = null;
@@ -1029,6 +1077,11 @@ export function apply(ctx, config) {
                 tool,
                 toolArgs,
                 phase: 'after',
+                // Which step this reading was taken after. The reading is evidence for
+                // that action, and without the link the raw log says only that the
+                // reading exists — which is how a reading taken *before* a step ends up
+                // carrying that step's id in the graph.
+                actionIndex,
                 capture: captureValue,
                 settle,
                 error: captureError,
@@ -1087,11 +1140,11 @@ export function apply(ctx, config) {
         } catch (error) {
             // The action itself failed. The page may still have changed, so the
             // evidence is still worth having — then the error propagates untouched.
-            await capture(exec, { tool: exec.name, toolArgs: exec.arguments, screenshotPath });
+            await capture(exec, { tool: exec.name, toolArgs: exec.arguments, screenshotPath, actionIndex: step });
             throw error;
         }
 
-        await capture(exec, { tool: exec.name, toolArgs: exec.arguments, screenshotPath });
+        await capture(exec, { tool: exec.name, toolArgs: exec.arguments, screenshotPath, actionIndex: step });
         return result;
     }, 'graph-explorer: evidence capture');
 
@@ -1132,6 +1185,7 @@ export function apply(ctx, config) {
             observeTool,
             transitionTool,
             commitTool,
+            generateTool,
             runDirName,
             maxSteps: config.maxSteps ?? null,
         }),
@@ -1356,7 +1410,27 @@ export function apply(ctx, config) {
                 reading_notes: notes,
                 status: latest.capture?.status ?? [],
                 interactive: latest.capture?.interactive ?? [],
+                // The endpoints this reading's own requests went to, with the id each one has in
+                // the graph. They are here for the same reason the element ids are: a claim about
+                // a request can only be checked against the evidence if the claim names the id
+                // the evidence produced, and the `apis` argument of `graph_transition` takes these
+                // ids. Nothing here is inferred from a URL pattern — an entry is a call the page
+                // actually made while this reading was being taken.
+                apis: observedApis(latest.capture?.network).map((api) => ({
+                    id: api.id,
+                    method: api.method,
+                    path: api.path,
+                    ...(api.statuses.length ? { status: api.statuses.length === 1 ? api.statuses[0] : api.statuses } : {}),
+                    ...(api.failed ? { failed: true } : {}),
+                })),
                 storage: latest.capture?.storage ?? {},
+                // The key names the page's storage carries that `storage` above does not. A cookie
+                // name is often the only thing that tells a signed-in screen from the form that
+                // gets you there, and these are two thirds of what `state.metadata.extra.observable`
+                // is made of — so the model naming a state can see the same evidence the commit
+                // will compare states on. Names only, never values: see capture.js.
+                session_storage_keys: latest.capture?.session_storage_keys ?? [],
+                cookie_names: latest.capture?.cookie_names ?? [],
                 console: latest.capture?.console ?? [],
                 page_errors: latest.capture?.page_errors ?? [],
                 graph: {
@@ -1366,6 +1440,18 @@ export function apply(ctx, config) {
                     capabilities_recorded: store.capabilityCount(),
                     transitions_recorded: store.transitionCount(),
                     steps_walked: store.walkLength(),
+                    // The state variables the walk has moved so far, and whether the states it has
+                    // recorded hold them. Said here as well as in the commit report because this is
+                    // where a state gets named: a fact the application remembers is the one thing
+                    // that has to be a dimension on the state it produces, and by the time the
+                    // commit says so the page where it mattered is gone.
+                    state_variables: stateVariableRollup(store),
+                    // The two vocabularies the machinery cannot see for itself: what the run has
+                    // called the product features and the journeys. Both are the model's words, and
+                    // a second name for a thing it already named is the failure mode — so the names
+                    // in play are reported where the model is looking.
+                    features_claimed: store.featureNames(),
+                    journeys_named: store.journeyNames(),
                     // Steps the log does not have, because a write failed at some point
                     // and the run got past it. Non-zero means the counters above are not
                     // the whole story of what was done to this page, and the graph will
@@ -1425,6 +1511,43 @@ export function apply(ctx, config) {
                 description: 'What the capability yields, e.g. {"discount":"number"} or {"discount":{"type":"number"}}. Same '
                     + 'value-spec shape as capability_input. Recorded on first use.',
             },
+            capability_composed_of: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'For a behaviour built out of others: the snake_case names of the capabilities it contains, in the '
+                    + 'order a test would perform them, e.g. ["fill_email","fill_password"] for `login`. Each name must already '
+                    + 'be in the vocabulary — record the steps first, then the behaviour that contains them — and a capability '
+                    + 'may not contain itself. Pass `capability_kind: "composite"` with it: the schema\'s own word for "built '
+                    + 'from other capabilities" is `composite`, and a composition without it is recorded and reported as one. '
+                    + 'The primitive steps are recorded as transitions of their own, as usual; this only says which '
+                    + 'behaviours add up to this one.',
+            },
+            capability_behaviour: {
+                type: 'string',
+                description: 'For a step that is PART of a behaviour: the snake_case name of the behaviour this step is a '
+                    + 'step of, e.g. "login" for the step that submits the form. This is how an action becomes a step of a '
+                    + 'composite instead of a capability nothing contains: the step is appended to that behaviour\'s '
+                    + '`composed_of`, and the behaviour is created as `composite` if the vocabulary does not have it yet. '
+                    + 'Use it on the step that does the work, in the same call: name the behaviour and perform it at once, '
+                    + 'rather than afterwards from memory. Record the behaviour\'s own completion as a separate step of it '
+                    + 'when it has one (`login` contains the submit, and the submit is a step of `login`). A behaviour '
+                    + 'cannot be a step of itself.',
+            },
+            journey_name: {
+                type: 'string',
+                description: 'What the walk this step belongs to is a journey TOWARDS, in the user\'s own words, e.g. '
+                    + '"Sign in and see the project list". A journey is derived from the walk order, so this is the one '
+                    + 'thing about it the machinery cannot see: without a claim the journey keeps the whole run instruction '
+                    + 'as its name and goal, which a test generator then has to rewrite. State it once, on any step of the '
+                    + 'walk (the last is the natural place) — the walk\'s latest claim names the whole walk.',
+            },
+            feature: {
+                type: 'string',
+                description: 'The product feature this step is part of, e.g. "authentication" or "project_management". '
+                    + 'Features have no machine source — nothing in a page says what a product is for — so the words are '
+                    + 'yours, and the commit assembles `features[]` from the capabilities, states, transitions and journeys '
+                    + 'that claim one. Reuse the exact words on every step of the same feature: the name is the key.',
+            },
             arguments: {
                 type: 'object',
                 additionalProperties: true,
@@ -1444,6 +1567,8 @@ export function apply(ctx, config) {
                 description: 'What changed. Each entry is {type, ...}: navigation/url_changed/state_entered need `to`; '
                     + 'value_changed/visibility_changed need `target` and `to`; message needs `message`; request needs '
                     + '`api`; storage_changed/validation_error/list_changed/element_created/element_destroyed need `target`. '
+                    + 'state_entered\'s `to` is the state id the step arrived in — the `state_id` the tool reported for this '
+                    + 'step\'s own reading — not the page_type or the variant. navigation/url_changed\'s `to` is the URL. '
                     + 'An element-shaped target (value_changed, visibility_changed, element_created, element_destroyed, '
                     + 'validation_error) is the element\'s semantic_purpose — `email_input`, not `login.email` and not a '
                     + 'selector: an effect that does not resolve to a declared element is dropped at commit, so it is '
@@ -1521,6 +1646,11 @@ export function apply(ctx, config) {
                             : null,
                     },
                     vocabulary: store.capabilityNames(),
+                    // Features and journeys are vocabulary too, and the same argument applies:
+                    // the second use of a name has to be the same name. Reported here so a model
+                    // can pick up the wording it already used rather than invent a second one.
+                    features: store.featureNames(),
+                    journeys: store.journeyNames(),
                 };
             }
 
@@ -1602,6 +1732,40 @@ export function apply(ctx, config) {
             }
 
             const notes = vocabularyNotes(capabilityName, store.capabilityNames());
+            // A composition is written in names and stored as ids, because the schema closes
+            // `composed_of` to `capabilityId` and the model thinks in behaviours. Every name has to
+            // resolve NOW: the alternative is writing a reference to a behaviour nothing has
+            // recorded, which the commit would have to drop — losing the whole point of the
+            // declaration. The steps come first, so this is a same-run fact, not a lookup.
+            const composedNames = (Array.isArray(args.capability_composed_of) ? args.capability_composed_of : [])
+                .map((name) => (typeof name === 'string' ? name.trim() : ''))
+                .filter(Boolean);
+            for (const step of composedNames) {
+                if (!CAPABILITY_NAME_PATTERN.test(step)) {
+                    throw new Error(
+                        `capability_composed_of entry ${JSON.stringify(step)} is not a capability name: use the same lowercase `
+                        + 'snake_case verb phrase you passed as `capability` when you recorded that step, e.g. fill_email.',
+                    );
+                }
+            }
+            if (composedNames.includes(capabilityName)) {
+                throw new Error(
+                    `capability_composed_of names ${capabilityName}, which is the capability being recorded. A behaviour cannot be `
+                    + 'built from itself: name the steps it is made of, and record the step that completes it as this transition. '
+                    + 'Nothing was recorded.',
+                );
+            }
+            const unresolvedSteps = composedNames.filter((step) => !store.capabilityIdFor(step));
+            if (unresolvedSteps.length) {
+                const known = listOf(store.capabilityNames());
+                throw new Error(
+                    `capability_composed_of names ${listOf(unresolvedSteps)}, and no capability in this run has that name yet, so the `
+                    + 'reference would be dropped when the graph is committed. Record the step as its own transition first — the '
+                    + 'capability is created by the `capability` argument of that call — and then record the behaviour that contains '
+                    + `it. ${known ? `The vocabulary so far: ${known}.` : 'Nothing has been recorded as a capability yet.'} `
+                    + 'Nothing was recorded and the page has not moved, so call again with the step names as they were recorded.',
+                );
+            }
             // The capability's signature is free-form JSON the schema closes: its values are
             // `argumentValueSpec`s, not JSON Schema, and both maps set `additionalProperties:
             // false`. Nothing between this call and the committed document looks at it again —
@@ -1619,6 +1783,7 @@ export function apply(ctx, config) {
                 description: args.description,
                 input: args.capability_input,
                 output: args.capability_output,
+                composed_of: composedNames.map((step) => store.capabilityIdFor(step)),
                 notes,
             });
             if (!capability) {
@@ -1631,6 +1796,83 @@ export function apply(ctx, config) {
                     'Nothing was recorded. Call again once the workspace is writable: the capability is not in the '
                     + 'vocabulary yet, so the same call will create it.',
                 ));
+            }
+
+            // --- the behaviour this step is a step of -----------------------
+            // A composite is only ever as good as the step it is missing: a run that fills two
+            // fields, names `login` as the behaviour of the fill steps, and then submits without
+            // saying the submit *is* `login` leaves the behaviour with no submission in it, and
+            // a generator expanding `login` performs two keystrokes and asserts an outcome
+            // nothing produced. The fix is a step-of relation, and the only moment it can be
+            // recorded is the call that performs the step, because that is the only moment the
+            // action and its name are both in hand.
+            //
+            // Appended rather than declared: `composed_of` names the step's own capability id,
+            // which exists as of the line above, and `addCapability` files a later non-empty
+            // composition as its own record. The behaviour is created as `composite` when the
+            // vocabulary does not have it, because a behaviour with steps is a composite by
+            // definition — the schema's own word for it.
+            const behaviourName = typeof args.capability_behaviour === 'string' ? args.capability_behaviour.trim() : '';
+            let behaviour = null;
+            if (behaviourName) {
+                if (!CAPABILITY_NAME_PATTERN.test(behaviourName)) {
+                    throw new Error(
+                        `capability_behaviour ${JSON.stringify(args.capability_behaviour)} is not usable: it is a capability `
+                        + 'name, so it has to be the same lowercase snake_case verb phrase you would pass as `capability`, e.g. '
+                        + 'login. Nothing was recorded, so fix the name and call again.',
+                    );
+                }
+                if (behaviourName === capabilityName) {
+                    throw new Error(
+                        `capability_behaviour names ${capabilityName}, which is the capability being recorded, so the behaviour `
+                        + 'would contain itself as its own step. If this step is meant to be the whole of a capability, record it '
+                        + 'as that capability and drop the argument; if the behaviour is wider than this step, name the wider '
+                        + 'behaviour. Nothing was recorded.',
+                    );
+                }
+                if (composedNames.includes(behaviourName)) {
+                    throw new Error(
+                        `capability_behaviour names ${behaviourName}, which capability_composed_of also names as a step of `
+                        + `${capabilityName} — the two together would make ${behaviourName} contain ${capabilityName} and `
+                        + `${capabilityName} contain ${behaviourName}, and a composite that contains itself in a loop cannot be `
+                        + 'expanded into a test. Name the behaviour this step belongs to, or drop one of the two. Nothing was recorded.',
+                    );
+                }
+                behaviour = store.addCapability({
+                    name: behaviourName,
+                    kind: 'composite',
+                    // The behaviour's own description is the model's to write; nothing here invents
+                    // one. `notes` is empty because the vocabulary notes for the *step's* name do not
+                    // apply to the behaviour's.
+                    composed_of: [capability.id],
+                    notes: [],
+                });
+                if (!behaviour) {
+                    throw new Error(storeFailureMessage(
+                        store.writeProblem() ?? { path: store.capabilitiesPath, message: 'the write failed' },
+                        runDirName,
+                        `Nothing was recorded — but \`${capabilityName}\` was. Call again once the workspace is writable: the `
+                        + 'same call records the step and attaches it to the behaviour.',
+                    ));
+                }
+            }
+            // The step's walk, named in the user's words when the model gave them. Validated for
+            // length only: a journey name is prose, and the machinery has no better spelling of it
+            // than the model does. Kept on the step record so the commit can attribute the claim to
+            // the walk the step is part of.
+            const journeyName = typeof args.journey_name === 'string' ? args.journey_name.trim() : '';
+            if (journeyName.length > 160) {
+                throw new Error(
+                    'journey_name is longer than 160 characters, which is a paragraph rather than a name. Name the walk as a '
+                    + 'user would say it — "Sign in and see the project list" — and nothing was recorded, so call again.',
+                );
+            }
+            const featureName = typeof args.feature === 'string' ? args.feature.trim() : '';
+            if (featureName.length > 80) {
+                throw new Error(
+                    'feature is longer than 80 characters, which is a description rather than a name. Name the product feature '
+                    + 'as a noun phrase — "authentication", "project management" — and nothing was recorded, so call again.',
+                );
             }
 
             // --- the transition's own references ----------------------------
@@ -1745,6 +1987,12 @@ export function apply(ctx, config) {
                 assertions: args.assertions,
                 precondition_list: args.preconditions,
                 description: args.description,
+                journey_name: journeyName,
+                feature: featureName,
+                // The reading the action produced carries the action's own id, so the step can
+                // name it. `after` is that reading: the capture at the end of the step is what
+                // the action produced, and `before` is the reading the step started from.
+                action_id: after.action_id ?? null,
                 before_observation: before.id,
                 after_observation: after.id,
                 observed_change: observedChange,
@@ -1778,17 +2026,55 @@ export function apply(ctx, config) {
                     note: recorded.minted
                         ? 'Recorded a new edge.'
                         : 'This edge was already recorded — reused its id and appended the step to the walk.',
+                    // The reading the action produced, and the reading it started from. Named here
+                    // because a step is only attributable to a reading if the caller can see which
+                    // reading that is: `action_id` is the reading's own id, written on it when it
+                    // was taken.
+                    evidence: {
+                        action_id: after.action_id ?? null,
+                        produced_by: after.id,
+                        started_from: before.id,
+                    },
+                    ...(journeyName ? { journey_name: journeyName } : {}),
                 },
                 capability: {
                     capability_id: capability.id,
                     name: capabilityName,
                     kind: capability.record.capability_kind,
                     new: capability.created,
+                    composed_of: composedNames.map((step) => ({
+                        capability_id: store.capabilityIdFor(step),
+                        name: step,
+                    })),
+                    composed_of_added: capability.composition_added ?? [],
+                    composed_of_note: composedNames.length
+                        ? capability.record.capability_kind === 'composite'
+                            ? `${composedNames.length} step(s) recorded as what this behaviour is built from.`
+                            : 'The composition was recorded, but the capability is not kind `composite`. If it is built from other '
+                                + 'capabilities, say so: call again with `capability_kind: "composite"` — the kind is what tells a '
+                                + 'generator the behaviour expands into the steps rather than being one action.'
+                        : null,
                     vocabulary_notes: notes,
                     note: notes.length
                         ? 'The vocabulary already has a name close to this one — see vocabulary_notes. Nothing was renamed for you.'
                         : 'No near-duplicate capability name in this run or in the schema vocabulary.',
                 },
+                ...(behaviour
+                    ? {
+                        behaviour: {
+                            capability_id: behaviour.id,
+                            name: behaviourName,
+                            kind: behaviour.record.capability_kind,
+                            new: behaviour.created,
+                            composed_of: behaviour.record.composed_of ?? [],
+                            composed_of_added: behaviour.composition_added ?? [],
+                            note: behaviour.created
+                                ? `\`${behaviourName}\` was created as a composite with \`${capabilityName}\` as its first step. Record the rest of its steps with the same argument, and any step of it that has not been walked is missing from the graph.`
+                                : `\`${capabilityName}\` was attached to \`${behaviourName}\`, which already existed.`,
+                        },
+                    }
+                    : {}),
+                ...(featureName ? { feature: featureName } : {}),
                 chain_break: recorded.chain_break,
                 chain_break_note: recorded.chain_break
                     ? `This step starts at ${fromState} but the previous step ended at ${recorded.chain_break.previous_to_state}, so the walk is not contiguous from here. Correct if that was not deliberate.`
@@ -1803,6 +2089,8 @@ export function apply(ctx, config) {
                     transitions_recorded: store.transitionCount(),
                     steps_walked: store.walkLength(),
                     observations_recorded: store.observationCount(),
+                    features_claimed: store.featureNames().length,
+                    journeys_named: store.journeyNames().length,
                     unwritten_records: store.writeFailures(),
                     directory_recreations: store.recreations(),
                 },
@@ -1886,6 +2174,20 @@ export function apply(ctx, config) {
                     transitions: report.transitions,
                     observations: report.observations.records,
                     elements: report.elements,
+                    // The one part of the graph the machinery found rather than the model read: the
+                    // endpoints the run's own request log shows. Reported because a model writing
+                    // its hand-off should not have to remember which ids exist.
+                    apis: report.apis,
+                    // Journeys are reported here rather than left to the report file, because the
+                    // goal is the one thing about a journey the model can still supply: a walk
+                    // whose instruction could not be attributed needs a hand-written goal, and
+                    // that is a finding about this commit, not a detail in a file.
+                    journeys: report.journeys,
+                    // Features, for the same reason: nothing in a page says what a product is
+                    // for, so a graph with no features is not a graph with nothing to say — it
+                    // is a graph whose model never said it, and the count is what makes the
+                    // difference visible in the commit's own answer.
+                    features: report.features,
                 },
                 // The graph's own index of what it is: a model reporting on the run needs
                 // these without reading the file, because they are what it must explain.
@@ -1901,13 +2203,19 @@ export function apply(ctx, config) {
                     severity: result.severity,
                     detail: result.detail,
                 })),
+                // This is the tool's declared output (`{type: 'json'}`), so it has to be lossless
+                // for *any* report the commit can produce. The framework rejects the whole call
+                // when a value does not survive a JSON round-trip, and its error names no field —
+                // a report row that omitted a key failed `graph_commit` outright with nothing to
+                // read. `?? null` says these fields are nullable here, where the promise is made,
+                // rather than in every reader.
                 decisions: report.decisions.map((decision) => ({
-                    transition_id: decision.transition_id,
+                    transition_id: decision.transition_id ?? null,
                     decision: decision.decision,
-                    capability: decision.capability,
-                    from_state: decision.from_state,
-                    to_state: decision.to_state,
-                    rejection_reason: decision.rejection_reason,
+                    capability: decision.capability ?? null,
+                    from_state: decision.from_state ?? null,
+                    to_state: decision.to_state ?? null,
+                    rejection_reason: decision.rejection_reason ?? null,
                     warnings: (decision.findings ?? decision.warnings ?? []).map((finding) => finding.code),
                 })),
                 blocked_by: report.blocking,
@@ -1918,6 +2226,175 @@ export function apply(ctx, config) {
                     : `No graph was written. ${report.blocking.length} blocking rule(s) fired; each one is a fact the run `
                         + 'does not settle. Resolve them and commit again — the raw evidence is unchanged, so a fix here is a '
                         + 'config fix or another walk, never an edit to the logs.',
+            };
+        },
+    }));
+
+    // ---------------------------------------------------------------------
+    // Seam 4 — the generator, where the graph becomes a program
+    // ---------------------------------------------------------------------
+    // Everything before this point is an account: the walk recorded what it saw, and the
+    // commit decided what of it holds. This is where the account is spent — a spec a person
+    // can run without reading any of the rest.
+    //
+    // It reads the committed graph and nothing else, which is deliberate on two counts. A
+    // generated spec is then reproducible from `graph.json` alone, by anyone, at any later
+    // date, without the raw logs — and the generator cannot quietly disagree with the graph
+    // it came from, because the graph is its only input. It writes one file and never edits
+    // the graph: a test is a claim about the application, and the graph is the record of
+    // what the application was found to do.
+    //
+    // Refusing is a normal outcome. A journey the graph does not name, a step whose target
+    // has no usable locator, a value the run recorded as `[set]` but never kept — each one
+    // stops that line of the spec and comes back as a gap with its own code, because the
+    // alternative is a spec that looks complete and passes for the wrong reason.
+    ctx.tools.register(defineTool({
+        name: generateTool,
+        description: 'Generate a Playwright spec from the committed graph, for one journey. This is the LAST step, '
+            + 'after the commit: it reads graph.json and writes a runnable .spec.ts beside it, plus a list of the '
+            + 'steps it refused to turn into code. Read the spec, then the gaps — a gap names what the graph would '
+            + 'have to say for the generated test to check it.',
+        parameters: {
+            journey: {
+                type: 'string',
+                description: 'Which journey to generate a test for, by id, by name, or by distinctive words from either '
+                    + '("sign in to the demo app"). Omit when the graph has exactly one journey. A near-miss is refused '
+                    + 'rather than guessed at, and the candidates come back with it.',
+            },
+            run_dir: {
+                type: 'string',
+                description: 'Directory holding the committed graph.json, relative to the workspace root. Omit to use the '
+                    + 'run this session committed.',
+            },
+            name: {
+                type: 'string',
+                description: 'Test title, overriding the journey name. Give one when the journey name is a description '
+                    + 'rather than a title.',
+            },
+            base_url: {
+                type: 'string',
+                description: 'Base URL the spec assumes, overriding the graph\'s application.base_url. The spec navigates '
+                    + 'by route, so this is what Playwright\'s use.baseURL has to be set to for it to run.',
+            },
+            write: {
+                type: 'boolean',
+                description: 'Write the spec to generated/<journey>.spec.ts beside the graph. Default true; set false to '
+                    + 'read it without leaving a file behind.',
+            },
+        },
+        output: {
+            schema: { type: 'json' },
+            // Two blocks rather than one JSON body: the spec is the point, and burying it in escaped
+            // newlines inside a JSON string is how a reader ends up trusting the summary instead of
+            // the code. The summary is repeated without it, so nothing is lost by not serializing it.
+            render: (_args, value) => {
+                const { spec, ...summary } = value;
+                return [
+                    { type: 'text', text: typeof spec === 'string' ? spec : `No spec was generated: ${value.error}` },
+                    { type: 'text', text: JSON.stringify(summary, null, 2) },
+                ];
+            },
+        },
+        async execute(args, exec) {
+            const cwd = workspaceCwd(exec);
+            // Same resolution as the commit, on purpose: the graph this generates from is the one
+            // that commit wrote, and the obvious target is the run this session has been recording.
+            // Nothing is created here — generating from a graph that does not exist is a
+            // misremembered path, and a tool that helpfully made an empty directory would turn that
+            // into a directory that looks like a committed run.
+            const dir = args.run_dir
+                ? (isAbsolute(args.run_dir) ? args.run_dir : resolve(cwd, args.run_dir))
+                : (run?.dir ?? join(cwd, runDirName));
+            const graphPath = join(dir, 'graph.json');
+            if (!existsSync(graphPath)) {
+                throw new Error(
+                    `${dir} has no graph.json, so there is no graph to generate a test from. `
+                    + (existsSync(join(dir, 'run.json'))
+                        ? `The run is there but has not been reconciled: call ${commitTool} first, then generate — the `
+                            + 'commit is where a step is decided to be a step, and a spec built from the raw walk would be '
+                            + 'built from candidates nobody accepted.'
+                        : `Pass run_dir to generate from a run recorded earlier (the default is ${runDirName} under the `
+                            + 'workspace root), or walk the application first.'),
+                );
+            }
+            const graph = JSON.parse(readFileSync(graphPath, 'utf8'));
+            const result = generateTest(graph, {
+                journey: args.journey,
+                name: args.name,
+                baseUrl: args.base_url,
+            });
+
+            // Two different failures arrive in the same field, so they are separated here rather
+            // than in the generator: `spec === null` is "this graph has no such journey", which is a
+            // question about the *request* and is answered with the journeys that do exist. A spec
+            // that was produced but carries error-severity gaps is a question about the *graph*, and
+            // the honest answer to that is the spec, plus a count of what it could not render — the
+            // file is written either way, because a spec that says in its own header how much of the
+            // walk it drops is a ledger, and hiding it would leave the gaps as the only record.
+            if (result.spec === null) {
+                // Deliberately not an exception: a journey that could not be identified is answered
+                // with the journeys that exist, which is the information needed to call this again.
+                // Throwing would return the same text as an error, and the caller would still have
+                // to read a list out of it.
+                return {
+                    ok: false,
+                    error: result.error,
+                    candidates: result.candidates ?? [],
+                    graph_path: graphPath,
+                    run_dir: dir,
+                    spec_path: null,
+                    next: `Nothing was written. ${result.candidates?.length
+                        ? 'Name the journey by id, or by the words of its goal, and call again.'
+                        : 'A graph with no journey has nothing to generate: journeys are what the commit derives from the '
+                            + 'transitions the walk performed, so a run with no committed transition has none.'}`,
+                };
+            }
+
+            let specPath = null;
+            if (args.write !== false) {
+                const outDir = join(dir, 'generated');
+                mkdirSync(outDir, { recursive: true });
+                specPath = join(outDir, result.filename);
+                writeFileSync(specPath, result.spec, 'utf8');
+            }
+
+            return {
+                ok: result.ok,
+                error: null,
+                run_dir: dir,
+                graph_path: graphPath,
+                spec_path: specPath,
+                filename: result.filename,
+                test_name: result.test_name,
+                // Why this journey was chosen, when the caller named it loosely. A fuzzy match is a
+                // guess, and a guess that is not reported is indistinguishable from an exact one.
+                matched_by: result.matched_by,
+                journey: result.journey,
+                application: result.application,
+                counts: result.counts,
+                // The spec is returned whole, and the file is a copy of this string — so a caller that
+                // does not write can still read exactly what would have been written.
+                spec: result.spec,
+                steps: result.steps,
+                assertions: result.assertions,
+                requires: result.requires,
+                gaps: result.gaps,
+                next: (specPath ? `The spec is at ${specPath}. ` : 'Nothing was written (write: false). ')
+                    + `${result.counts.actions} of ${result.counts.transitions} step(s) became an action and `
+                    + `${result.counts.assertions} check(s) were written; ${result.counts.gaps} gap(s), `
+                    + `${result.counts.blocking_gaps} of them blocking. `
+                    + (result.ok
+                        ? ''
+                        : 'This spec is not ok: it drops the step(s) the graph could not turn into an action, so it '
+                            + 'would pass without performing them. Read the gaps, fix what they name, and generate '
+                            + 'again before treating it as a test. ')
+                    + (result.requires.length
+                        ? `Set ${result.requires.join(', ')} before running it — the walk recorded that the field was `
+                            + 'filled, not what it was filled with, so the value is the environment\'s to supply. '
+                        : '')
+                    + 'Run it with Playwright (npx playwright test), with use.baseURL set to the application. '
+                    + 'A gap is not a failure of the generator: it is a step the graph could not turn into code, and '
+                    + 'what it names is what the graph would have to say for the generated test to check it.',
             };
         },
     }));
@@ -1939,6 +2416,12 @@ function trimDigest(digest, maxChars) {
     if (rendered.length > maxChars && Object.keys(digest.storage).length) {
         digest.storage = {};
         digest.storage_omitted = true;
+        rendered = JSON.stringify(digest);
+    }
+    if (rendered.length > maxChars && (digest.session_storage_keys.length || digest.cookie_names.length)) {
+        digest.session_storage_keys = [];
+        digest.cookie_names = [];
+        digest.storage_keys_omitted = true;
         rendered = JSON.stringify(digest);
     }
     while (rendered.length > maxChars && digest.interactive.length > 5) {

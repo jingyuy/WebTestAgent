@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
 import { apply, Config } from '../lib/index.js';
+import { losslessPaths } from './lossless.mjs';
 
 let fails = 0;
 const check = (label, actual, expected) => {
@@ -64,12 +65,25 @@ const act = (name, args = {}) => handlers.get('tools/execute')({ ...exec, name, 
 const observe = (args) => tools.get('graph_observe').execute(args, exec);
 const transition = (args) => tools.get('graph_transition').execute(args, exec);
 const commit = (args) => tools.get('graph_commit').execute(args, exec);
+const generate = (args) => tools.get('graph_test').execute(args, exec);
+
+// The one thing about a walk that no browser can witness: what the run was asked to do. It arrives
+// from `agent/pre-step` before the first action, it is written into `run.json` once, and the commit
+// quotes it from there — so firing it here is the whole path an instruction travels.
+await handlers.get('agent/pre-step')({ messages: [{ content: [{ type: 'text', text: 'Log in and check the dashboard.' }] }] }, async () => ({}));
 
 // --- registration ---------------------------------------------------------
-check('all three tools registered', [...tools.keys()].sort(), ['graph_commit', 'graph_observe', 'graph_transition']);
+check('all four tools registered', [...tools.keys()].sort(), ['graph_commit', 'graph_observe', 'graph_test', 'graph_transition']);
 check('protocol section contributed', sections.map((s) => [s.name, s.order]), [['graph:exploration-protocol', 150]]);
 check('protocol teaches the transition tool', sections[0].text.includes('graph_transition'), true);
 check('protocol teaches where the run ends', sections[0].text.includes('graph_commit'), true);
+// Two runs recorded a transition for their first action and were refused: the procedure said to
+// record a transition for every step, and the rule that the first one has no state to move between
+// was only in the tool description. A procedure whose first iteration is not the procedure.
+check('protocol says the first action is a step, not a transition', sections[0].text.includes('The first action of a run is a step, not a transition'), true);
+// And two runs wrote the page_type where a state id was meant, because the paragraph that defines
+// `target` as a semantic name left `to` undefined for `state_entered`.
+check('protocol says what state_entered\'s `to` is', sections[0].text.includes('**state id**'), true);
 
 // --- refusals before anything has happened --------------------------------
 await refuses('observe with no evidence', () => observe({}), 'nothing to interpret');
@@ -87,6 +101,12 @@ queue = [
     title: 'Home',
     hooks_installed_at: 'document_start',
     network: [{ method: 'GET', url: '/api/session', status: 200 }],
+    // The two key names a page carries without showing: a session identifier and a cookie. Names
+    // only — a value is a credential, and a credential is not evidence about a screen — but the
+    // names are, because two screens of one application rarely share them.
+    storage: { theme: 'dark' },
+    session_storage_keys: ['step'],
+    cookie_names: ['sid'],
   }),
   capture({ url: 'http://x/login', title: 'Sign in' }),
 ];
@@ -97,6 +117,8 @@ await refuses('observe rejects an unknown detection type', () => observe({ page_
 await refuses('observe rejects an element with no semantic_purpose', () => observe({ page_type: 'home', detection: [{ type: 'url' }], elements: [{ role: 'link' }] }), 'semantic_purpose');
 const s1 = await observe({ page_type: 'home', variant: 'anonymous', detection: [{ type: 'url' }], elements: [{ semantic_purpose: 'login_link', role: 'link' }] });
 check('state recorded', [s1.graph.state.state_id, s1.graph.states_recorded], ['state_home_anonymous', 1]);
+check('the instruction the host supplied is in run.json, which is the only place intent was written',
+  JSON.parse(readFileSync(join(cwd, 'graph-run', 'run.json'), 'utf8')).instruction, 'Log in and check the dashboard.');
 
 // --- how the run began ----------------------------------------------------
 check('the first observation reports the entry document', [s1.entry_document.url, s1.entry_document.title], ['http://x/', 'Home']);
@@ -106,13 +128,27 @@ check('there was no earlier capture, so there is no diff to confuse it with', s1
 check('the marker is in the evidence, not only in the digest', JSON.parse(
   readFileSync(join(cwd, 'graph-run', 'observations.jsonl'), 'utf8').trim().split('\n')[0],
 ).capture.hooks_installed_at, 'document_start');
-
+// The digest has to name the endpoints this reading's own requests went to with the ids the graph
+// will mint, because the `apis` argument of `graph_transition` only takes ids — a model that invents
+// one gets it dropped as an unresolvable reference and the step reads as having called nothing.
+check('the reading offers the ids of the endpoints it called', s1.apis,
+  [{ id: 'api_get_api_session', method: 'GET', path: '/api/session', status: 200 }]);
+check('the id is the method and the path, which is what the commit will derive',
+  JSON.parse(readFileSync(join(cwd, 'graph-run', 'observations.jsonl'), 'utf8').trim().split('\n')[0])
+    .capture.network[0].url, '/api/session');
+// The digest is what the model gets to choose a state identity against, so the two thirds of the
+// fingerprint that are neither the route nor the controls have to be in it, under the same names
+// the graph will write. Without them, `identity.dimensions` can only ever mention what is on the
+// screen, and a session that changed behind an unchanged screen reads as the same state.
+check('the digest offers the key names the page carries, because they are part of what tells two screens apart',
+  [s1.session_storage_keys, s1.cookie_names], [['step'], ['sid']]);
 // --- step 2: navigate to login --------------------------------------------
 await act('browser_click', { selector: '#login' });
 await refuses('transition with no destination state read yet', () => transition({ capability: 'go_to_login' }), 'has no destination');
 const s2 = await observe({ page_type: 'login', detection: [{ type: 'url' }] });
 check('second state is a distinct state', [s2.graph.state.state_id, s2.graph.state.new], ['state_login', true]);
 check('a later observation carries its own change, not the entry document again', [s2.entry_document, s2.changed_since_previous_observation.url], [null, ['http://x/', 'http://x/login']]);
+check('and a reading that called nothing offers no endpoints', s2.apis, []);
 
 // --- the transition itself ------------------------------------------------
 const t1 = await transition({
@@ -140,7 +176,25 @@ await refuses('bad capability name', () => transition({ capability: 'Go To Login
 await refuses('bad capability kind', () => transition({ capability: 'go_to_login', capability_kind: 'vibe' }), 'capability_kind');
 await refuses('bad target id', () => transition({ capability: 'go_to_login', target: 'div#login' }), 'element_<semantic_purpose>');
 await refuses('bad api id', () => transition({ capability: 'go_to_login', apis: ['/api/login'] }), 'api_<name>');
+// A composition is written in names and stored as ids, and every name has to resolve at the moment
+// it is written: a reference to a behaviour nothing has recorded is dropped by the commit, which
+// would lose the whole point of the declaration.
+await refuses('a composition naming a capability no step has named',
+  () => transition({ capability: 'go_to_login', capability_composed_of: ['fill_email'] }), 'Record the step as its own transition first');
+await refuses('a composition naming the capability being recorded',
+  () => transition({ capability: 'go_to_login', capability_composed_of: ['go_to_login'] }), 'A behaviour cannot be built from itself');
+await refuses('a composition naming something that is not a capability name',
+  () => transition({ capability: 'go_to_login', capability_composed_of: ['Fill Email'] }), 'is not a capability name');
 await refuses('effect contradicting the derived destination', () => transition({ capability: 'go_to_login', effects: [{ type: 'state_entered', to: 'state_home_anonymous' }] }), 'cannot end in two places');
+// A refusal is only as good as the correction it suggests. `to_state` is derived — the model never
+// passes it — so a message that leaves the reader to work out which of the two is wrong sends it
+// back to a field it did not choose. Two live runs guessed here: one wrote the page_type, one the
+// variant, and neither is a state.
+await refuses(
+  'the refusal says which side has to change',
+  () => transition({ capability: 'go_to_login', effects: [{ type: 'state_entered', to: 'state_home_anonymous' }] }),
+  'not the page_type and not the variant',
+);
 check('a refused transition records nothing', readFileSync(join(cwd, 'graph-run', 'transitions.jsonl'), 'utf8').trim().split('\n').length, 1);
 check('a refused transition mints no capability', JSON.parse(readFileSync(join(cwd, 'graph-run', 'capabilities.jsonl'), 'utf8')).name, 'go_to_login');
 
@@ -152,7 +206,11 @@ const t2 = await transition({ capability: 'go_to_login', capability_kind: 'navig
 check('reused capability', [t2.capability.capability_id, t2.capability.new], ['cap_go_to_login', false]);
 check('same capability arriving elsewhere gets its own edge', [t2.transition.transition_id, t2.transition.new], ['transition_go_to_login_home_anonymous', true]);
 check('walk is contiguous', t2.chain_break, null);
-check('vocabulary note names the run-local near-duplicate first', (await transition({ capability: 'go_to_login_page' })).capability.vocabulary_notes.map((n) => n.vocabulary_name), ['go_to_login', 'login']);
+const t3 = await transition({ capability: 'go_to_login_page' });
+check('vocabulary note names the run-local near-duplicate first', t3.capability.vocabulary_notes.map((n) => n.vocabulary_name), ['go_to_login', 'login']);
+check('a name the run had not used before is minted, with the ordinary kind',
+  [t3.capability.capability_id, t3.capability.new, t3.capability.kind, t3.graph.capabilities_recorded],
+  ['cap_go_to_login_page', true, 'interaction', 2]);
 
 // --- an eval is an action too --------------------------------------------
 // `browser_eval` runs arbitrary JavaScript in the page, so it can change the page
@@ -184,6 +242,22 @@ check('file counts', (() => {
 // blocked commit as a crash would lose it.
 const verdict = await commit({});
 check('the commit reads the run this session wrote', [verdict.counts.states.committed, verdict.counts.transitions.committed, verdict.counts.capabilities], [2, 3, 2]);
+// The endpoints the run's own request log shows, with the ids the digest offered — the whole point
+// of deriving the id from the method and the path is that these two agree without sharing state.
+check('the commit found the endpoint the first reading called',
+  [verdict.counts.apis.endpoints, verdict.counts.apis.requests, verdict.counts.apis.by_method], [1, 1, { GET: 1 }]);
+check('and says no step referenced it, because no transition named an endpoint',
+  verdict.counts.apis.unreferenced, ['api_get_api_session']);
+// The instruction is the one piece of intent a browser cannot witness, and it reaches the report
+// whether or not it can be attributed to a walk: this run recorded it, and the report quotes it
+// verbatim. It is not attributed here, because the log holds two candidates for one step — the
+// second of which starts where the first ended rather than where it started — so the walk is read
+// as two strands, and an instruction that describes the run is not put on either of them.
+check('the report quotes the instruction and says what the walk it read against amounts to',
+  [verdict.counts.journeys.assembled, verdict.counts.journeys.walked, verdict.counts.journeys.breaks,
+    verdict.counts.journeys.stated_goals, verdict.counts.journeys.instruction],
+  [2, 3, 1, 0, 'Log in and check the dashboard.']);
+check('and names the states the strands started in', verdict.counts.journeys.entry_states, ['state_home_anonymous', 'state_login']);
 check('it knows which application it is about', verdict.application, null);
 check('an undeclared application blocks the document', [verdict.committed, verdict.blocked_by.map((blocker) => blocker.code)], [false, ['application_not_declared']]);
 check('a blocked commit still writes its report', verdict.report_path.endsWith('commit_report.json'), true);
@@ -191,11 +265,101 @@ check('a blocked commit writes no graph', verdict.graph_path, null);
 check('the refusal names the setting to fix', verdict.blocked_by[0].detail.includes('application: {id, name}'), true);
 check('and says what to do next', verdict.next.includes('No graph was written'), true);
 check('the findings are summarised by severity', [verdict.warnings.errors, verdict.warnings.detail.length > 0], [0, true]);
+// Two states of one application at two routes: the fingerprint is what says so without asking the
+// model, and it is a rule the plugin added (severity `warning`), so a walk that passes it is a walk
+// whose states the page itself distinguished — not a walk with nothing to say.
+check('no state in this walk was reported as one the evidence cannot tell from another',
+  verdict.warnings.detail.filter((item) => item.code === 'state_indistinguishable_from_another').length, 0);
+check('and the invariant that asked is on the report, passing, as a warning',
+  (() => {
+    const asked = verdict.invariants.find((result) => result.code === 'state_indistinguishable_from_another') ?? {};
+    return [asked.ok, asked.severity, asked.detail];
+  })(),
+  [true, 'warning', '2 of 2 state(s) carry a fingerprint from their readings, and no two of them are equal.']);
 check('the invariants travelled with it', verdict.invariants.filter((result) => result.severity === 'error' && !result.ok).length, 0);
 check('the same run can be named explicitly', (await commit({ run_dir: 'graph-run' })).run_dir, join(cwd, 'graph-run'));
 const forced = await commit({ force: true });
 check('forcing writes the assembled document', existsSync(join(cwd, 'graph-run', 'graph.json')), true);
+// A walk is derived, so the graph is where the instruction has to be visible: on every strand, as
+// the run's own words, with `goal_stated` false so a reader knows the goal on this walk was not
+// attributed and has to be supplied by hand. Nothing inferred it from the shape of the walk.
+const written = JSON.parse(readFileSync(join(cwd, 'graph-run', 'graph.json'), 'utf8'));
+check('the graph carries the capabilities this run named, once each, with the kinds it gave them',
+  written.capabilities.map((entry) => [entry.id, entry.kind, entry.composed_of ?? null]),
+  [['cap_go_to_login', 'navigation', null], ['cap_go_to_login_page', 'interaction', null]]);
+check('a walk that could not be attributed is named after its endpoints, and is not given a goal',
+  written.journeys.map((journey) => [journey.name.startsWith('Derived walk '), journey.goal ?? null, journey.metadata.extra.goal_stated]),
+  [[true, null, false], [true, null, false]]);
+check('but the instruction is on both strands anyway, so it can be attributed by hand',
+  written.journeys.map((journey) => [journey.metadata.extra.run_instruction, journey.metadata.extra.goal_source.startsWith('withheld:')]),
+  [['Log in and check the dashboard.', true], ['Log in and check the dashboard.', true]]);
 check('forcing does not make the verdict a pass', forced.committed, false);
+
+// --- the generator, through the same seam ---------------------------------
+// The graph on disk is the generator's only input, which is what makes a generated spec
+// reproducible: the same file gives the same spec, today or a year from now, with no raw evidence
+// and no model. This is the end-to-end shape of the tool — read the graph the commit wrote, turn
+// one journey into code, write it beside the graph — and the walk above is a real run, so the
+// journeys in it are the ones the commit derived rather than ones a fixture declared.
+//
+// Nothing is named first, because a graph the walk produced has more than one journey in it: an
+// unasked-for choice between them is the one thing this tool must not make.
+const unnamed = await generate({});
+check('a graph with more than one journey is not guessed at when none is named',
+  [unnamed.ok, unnamed.spec_path, unnamed.candidates.map((candidate) => candidate.id)],
+  [false, null, written.journeys.map((journey) => journey.id)]);
+const chosen = written.journeys[0].id;
+const generated = await generate({ journey: chosen });
+check('the generator reads the graph the commit wrote',
+  [generated.graph_path, generated.run_dir, generated.journey.id],
+  [join(cwd, 'graph-run', 'graph.json'), join(cwd, 'graph-run'), chosen]);
+check('and writes the spec beside it, named after the journey rather than the title',
+  [generated.spec_path, generated.filename.endsWith('.spec.ts'), generated.spec_path.endsWith(generated.filename)],
+  [join(cwd, 'graph-run', 'generated', generated.filename), true, true]);
+// The string in the result is the file, byte for byte. A tool that reported one spec and wrote
+// another would make the answer useless as evidence about what was generated, so this compares the
+// two rather than trusting the path.
+check('and the file it wrote is the spec it returned',
+  readFileSync(generated.spec_path, 'utf8') === generated.spec, true);
+check('the spec imports the runner and opens the route the walk started at',
+  [generated.spec.includes('from "@playwright/test"'), generated.spec.includes('await page.goto("/")')],
+  [true, true]);
+check('every step of the walk is reported, acted on or not, with what decided it',
+  generated.steps.every((step) => typeof step.transition === 'string' && step.interaction !== undefined), true);
+// This walk recorded no interactive elements at all — its captures have real URLs and an empty
+// surface — so no step of it can become an action, and the spec says so instead of pretending
+// otherwise. That is the case worth asserting here: a generator that wrote a file and reported
+// success for a walk whose every step it dropped would be the failure this rule exists to prevent.
+check('a walk whose steps name no element is not reported as a spec that performs them',
+  [generated.ok, generated.counts.actions, generated.counts.blocking_gaps === generated.counts.gaps,
+    generated.gaps.every((gap) => gap.code === 'step_targets_no_element')],
+  [false, 0, true, true]);
+check('and the file is written anyway, with the gaps as the record of what it drops',
+  [existsSync(generated.spec_path), generated.next.includes('This spec is not ok')], [true, true]);
+// A journey the graph does not have is answered with the ones it does, never with a guess: the
+// difference between "you named it wrong" and "I found something close enough" is the difference
+// between a spec for the journey that was asked for and a spec for another one.
+const missed = await generate({ journey: 'add a product to the cart' });
+check('a journey the graph does not have is refused, with the ones that exist',
+  [missed.ok, missed.spec_path, missed.candidates.length],
+  [false, null, written.journeys.length]);
+await refuses('and a directory with no committed graph is not silently generated from',
+  () => generate({ run_dir: 'no-such-run' }), 'has no graph.json');
+// What the captures recorded about each state is a field of the document, beside the identity the
+// model wrote: it is the half of a state identity that is not a judgement, so it survives to disk
+// where a reader — or the next rule — can compare two states without re-reading the run.
+check('every committed state carries the fingerprint its own reading produced',
+  written.states.slice().sort((left, right) => (left.id < right.id ? -1 : 1)).map((state) => [state.id, state.metadata.extra.observable]),
+  [
+    ['state_home_anonymous', { routes: ['/'], surface_size: 0, storage_keys: ['theme'], session_storage_keys: ['step'], cookie_names: ['sid'] }],
+    ['state_login', { routes: ['/login'], surface_size: 0 }],
+  ]);
+check('and the keys are recorded on the entry reading alone, not on every reading',
+  (() => {
+    const withKeys = written.observations.filter((observation) => observation.metadata.extra.keys_captured);
+    return [withKeys.length, written.observations.length, written.observations[0].metadata.extra.keys_captured];
+  })(),
+  [1, written.observations.length, { localStorage: ['theme'], sessionStorage: ['step'], cookies: ['sid'] }]);
 await refuses('a directory that is not a run is refused', () => commit({ run_dir: 'nope' }), 'not an exploration run');
 
 // --- the run directory is deleted mid-run ---------------------------------
@@ -238,6 +402,122 @@ check('and the walk picks up again from the last step the log still has',
 check('the recreation is counted once, not once per step after it', [resumed.graph.directory_recreations, after.graph.directory_recreations], [1, 1]);
 check('the capability minted after the repair is in the log the commit reads',
   readFileSync(join(runDir, 'capabilities.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line).name), ['buy_item']);
+
+// --- walking the same edge twice: the report has to survive its own verdict -
+// Repeating a step is ordinary — a model re-checks a flow, a page is reloaded — and it leaves two
+// candidates for one transition, the second of which is superseded. That row is a decision with no
+// rejection to report, and it is exactly where the tool boundary broke: the projection copies a
+// decision's fields straight out, a field that is *absent* rather than null is `undefined`, and the
+// harness will not call `undefined` JSON. It does not hand back a report with a hole in it — it
+// fails the whole `graph_commit` call, and its error
+// — `value is not lossless JSON` — names neither the field nor the reason. The model sees a tool
+// that stopped working and has nothing to read. Only a re-walk reaches that row, so the walk is
+// repeated here rather than described.
+queue = [capture({ url: 'http://x/cart', title: 'Cart' })];
+await act('browser_click', { selector: '#back' });
+const returned = await observe({ page_type: 'cart', detection: [{ type: 'url' }] });
+const back = await transition({ capability: 'return_to_cart', capability_kind: 'navigation' });
+check('a second visit to a state is a state, not a new one', [returned.graph.state.state_id, returned.graph.state.new, back.transition.to_state], ['state_cart', false, 'state_cart']);
+queue = [capture({ url: 'http://x/thanks', title: 'Thanks' })];
+await act('browser_click', { selector: '#buy' });
+await observe({ page_type: 'order_confirmation', detection: [{ type: 'url' }] });
+const again = await transition({
+  capability: 'buy_item',
+  // The composition, on a call that arrives after the behaviour was named and after its steps were
+  // recorded. The steps have to resolve now, which is why the tool takes names rather than ids.
+  capability_composed_of: ['return_to_cart'],
+  capability_kind: 'composite',
+  effects: [{ type: 'navigation', to: 'state_order_confirmation' }],
+});
+check('the same edge walked twice is the same transition', [again.transition.transition_id, again.transition.new], ['transition_buy_item', false]);
+check('and the tool says it reused the edge rather than minting one', again.transition.note.includes('already recorded'), true);
+check('a composition arriving later is merged onto the capability, not written beside it',
+  [again.capability.capability_id, again.capability.new, again.capability.kind, again.capability.composed_of_added],
+  ['cap_buy_item', false, 'composite', ['cap_return_to_cart']]);
+check('and the tool hands the names back beside the ids it stored',
+  again.capability.composed_of, [{ capability_id: 'cap_return_to_cart', name: 'return_to_cart' }]);
+check('the note says the steps are what the behaviour expands into',
+  again.capability.composed_of_note, '1 step(s) recorded as what this behaviour is built from.');
+const rewalked = await commit({ force: true });
+check('the second walk of one edge is superseded, not duplicated', rewalked.counts.transitions.superseded, 1);
+check('and graph_commit still returns JSON', losslessPaths(rewalked), []);
+// The composition is a claim about a capability, so the graph is where it has to land: fields on
+// the capability it was about — the step it is built from, and the kind the later call carried,
+// because the kind is what tells a generator to expand the behaviour rather than treat it as one
+// action. It is one entry in `capabilities[]`, not two.
+const settled = JSON.parse(readFileSync(rewalked.graph_path, 'utf8'));
+check('a composition recorded on a later call lands on the capability, not beside it',
+  settled.capabilities.map((entry) => [entry.id, entry.kind, entry.composed_of ?? null]),
+  [['cap_buy_item', 'composite', ['cap_return_to_cart']], ['cap_return_to_cart', 'navigation', null]]);
+// And the goal, on a walk that is one strand again because the log the recreation kept is the walk
+// from the repair onwards: the instruction the host supplied before the first action is now the
+// journey's goal, and its first clause is the name — a goal is a sentence and a name is a handle,
+// so the two fields say different things rather than one being a copy of the other.
+check('the walk that is one strand carries the run\'s instruction as its goal, quoted',
+  settled.journeys.map((journey) => [journey.goal, journey.name, journey.metadata.extra.goal_stated, journey.transitions.length]),
+  [['Log in and check the dashboard.', 'Log in and check the dashboard', true, 3]]);
+// The same two rules at the end of a longer, repaired run: the fingerprint is derived from the
+// readings of the second run (the first run's evidence was deleted with its directory, and nothing
+// here guesses at what it said), and the pair rule is asked of that document rather than of the
+// verdict taken earlier. It is a warning, so it never stands between a model and its graph.
+check('the repaired walk\'s states carry the fingerprints their own readings produced',
+  Object.fromEntries(settled.states.slice().sort((left, right) => (left.id < right.id ? -1 : 1)).map((state) => [state.id, state.metadata.extra?.observable ?? null])),
+  {
+    state_cart: { routes: ['/cart'], surface_size: 0 },
+    state_order_confirmation: { routes: ['/thanks'], surface_size: 0 },
+  });
+check('and the pair rule is asked of the re-read document, not of the earlier verdict',
+  (() => {
+    const asked = rewalked.invariants.find((result) => result.code === 'state_indistinguishable_from_another') ?? {};
+    return [asked.ok, asked.severity, asked.detail];
+  })(),
+  [true, 'warning', '2 of 2 state(s) carry a fingerprint from their readings, and no two of them are equal.']);
+check('and no state of this walk is reported as one the evidence cannot tell from another',
+  rewalked.warnings.detail.filter((item) => item.code === 'state_indistinguishable_from_another').length, 0);
+
+// --- a variable the walk moved and no state can hold ----------------------
+// The digest asks the commit's question at the one moment it can still be answered: the effects
+// are the run's own account of what each step changed, and by commit time the page that showed it
+// is gone. A step that only a remembered value tells apart is a real difference, and the place to
+// hold it is the state's identity — so the digest names the variables the walk moved, which of
+// them some state records as a dimension, and which of them nothing records at all.
+queue = [capture({ url: 'http://x/cart', title: 'Cart' })];
+await act('browser_click', { selector: '#back' });
+await observe({ page_type: 'cart', detection: [{ type: 'url' }] });
+queue = [capture({ url: 'http://x/cart-with-items', title: 'Cart (1 item)' })];
+await act('browser_click', { selector: '#add' });
+const withItem = await observe({ page_type: 'cart_with_items', detection: [{ type: 'url' }] });
+check('a walk that has moved no variable yet offers no rollup rather than an empty one',
+  withItem.graph.state_variables, null);
+const added = await transition({
+  capability: 'add_to_cart',
+  effects: [{ type: 'storage_changed', target: 'cart.count', to: '3' }],
+});
+check('the step that changes only a remembered value is recorded',
+  [added.transition.transition_id, added.transition.new], ['transition_add_to_cart', true]);
+queue = [capture({ url: 'http://x/cart-with-items', title: 'Cart (1 item)' })];
+await act('browser_click', { selector: '#add' });
+const remembered = await observe({ page_type: 'cart_with_items', detection: [{ type: 'url' }] });
+// The digest divides the question in two, because the answer differs: a storage key is something
+// the application remembers, which no browser can be asked about, so nothing asks for a dimension
+// here — while a collection is something the screen shows, and *that* is the dimension the answer
+// asks for. Both are reported, so a model can act on the one it can act on.
+check('and the digest files a remembered value as persistence rather than as a dimension nobody recorded',
+  remembered.graph.state_variables,
+  { moved: ['cart.count'], recorded: [], unrecorded: [], persistence: ['cart.count'] });
+queue = [capture({ url: 'http://x/cart-with-items', title: 'Cart (1 item)' })];
+await act('browser_click', { selector: '#add' });
+await observe({ page_type: 'cart_with_items', detection: [{ type: 'url' }] });
+await transition({
+  capability: 'add_to_cart',
+  effects: [{ type: 'list_changed', target: 'cart.items', to: '3' }],
+});
+queue = [capture({ url: 'http://x/cart-with-items', title: 'Cart (1 item)' })];
+await act('browser_click', { selector: '#add' });
+const collected = await observe({ page_type: 'cart_with_items', detection: [{ type: 'url' }] });
+check('while a collection no state records as a dimension is named, because that one can be checked',
+  collected.graph.state_variables,
+  { moved: ['cart.count', 'cart.items'], recorded: [], unrecorded: ['cart.items'], persistence: ['cart.count'] });
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);

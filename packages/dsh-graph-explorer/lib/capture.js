@@ -143,6 +143,21 @@ export const CAPTURE_EXPRESSION = `(() => {
     } else if (el.type === 'checkbox' || el.type === 'radio') {
       entry.checked = el.checked === true;
     }
+    // A collection is read for what it holds, not only for being there. "The list is on
+    // screen" and "the list has something in it" are two different facts, and the second is
+    // exactly what a dimension like projects: non_empty claims — so without a count it is a
+    // word nothing can check. The count is of the rows the container actually has, which is
+    // what a reader of the page would count, and it is read only for the row-shaped
+    // containers so the common case costs nothing.
+    var collection = entry.tag === 'ul' || entry.tag === 'ol' || entry.tag === 'dl'
+      || entry.tag === 'table' || entry.tag === 'tbody'
+      || entry.role === 'list' || entry.role === 'table' || entry.role === 'grid'
+      || entry.role === 'listbox';
+    if (collection) {
+      var rows = el.querySelectorAll('li,tr,dt,dd,[role="listitem"],[role="row"],[role="option"]');
+      entry.items = rows.length;
+      if (rows.length) entry.first_item = clip(clean(rows[0].textContent), 80);
+    }
     if (el.getAttribute('href')) entry.href = clip(el.getAttribute('href'), 200);
     return entry;
   };
@@ -181,6 +196,37 @@ export const CAPTURE_EXPRESSION = `(() => {
     }
   } catch (error) { /* storage can be blocked; absence is not a failure */ }
 
+  // Session storage and cookies are read for their KEY NAMES only, and that is the one place this
+  // collector deliberately reads less than it could. A key name is what tells two screens of the
+  // same application apart — the presence of a "sid" is the difference between the login form and
+  // the page behind it — and a value is a credential, which is not evidence about a screen and has
+  // no business in a graph that gets committed to a repository. The "storage" map above does keep
+  // values, because a draft in progress is a thing the page shows; a cookie is not.
+  //
+  // HttpOnly cookies are invisible here whatever this does: document.cookie cannot see them, so a
+  // session cookie set that way is evidence nobody can collect from the page. Absence of a cookie
+  // name is therefore never evidence of absence.
+  // (No backticks and no dollar-brace in this file's template literal: see the note at the top.)
+  var sessionStorageKeys = [];
+  try {
+    for (var s = 0; s < sessionStorage.length && s < 20; s++) {
+      var sessionKey = clean(sessionStorage.key(s));
+      if (sessionKey) sessionStorageKeys.push(sessionKey);
+    }
+  } catch (error) { /* storage can be blocked; absence is not a failure */ }
+
+  var cookieNames = [];
+  try {
+    var cookiePairs = document.cookie ? document.cookie.split(';') : [];
+    var cookieSeen = {};
+    for (var c = 0; c < cookiePairs.length && c < 20; c++) {
+      var cookieName = clean(cookiePairs[c].split('=')[0]);
+      if (!cookieName || cookieSeen[cookieName]) continue;
+      cookieSeen[cookieName] = true;
+      cookieNames.push(cookieName);
+    }
+  } catch (error) { /* cookies can be blocked; absence is not a failure */ }
+
   var forms = Array.prototype.map.call(document.forms, function (form) {
     return {
       selector: form.getAttribute('data-testid') ? '[data-testid="' + form.getAttribute('data-testid') + '"]' : (form.id ? '#' + form.id : 'form'),
@@ -202,6 +248,8 @@ export const CAPTURE_EXPRESSION = `(() => {
     forms: forms,
     status: status,
     storage: storage,
+    session_storage_keys: sessionStorageKeys,
+    cookie_names: cookieNames,
     scroll: { y: Math.round(window.scrollY), height: document.documentElement.scrollHeight },
     hooks_installed_at: gx.hooks_installed_at || null,
     network: drain(gx.network),
