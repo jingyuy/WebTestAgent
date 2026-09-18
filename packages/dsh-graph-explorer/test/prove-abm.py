@@ -292,6 +292,26 @@ CASES = [
         'new': "            confidence: { type: 'number', description: '0..1 confidence in this reading' },\n            mystery: { type: 'string', description: 'a reading the protocol never asks for' },",
         'suite': 'test/protocol.test.mjs',
     },
+    {
+        # The manifest is part of the artifact. `lib/validate.js` reads `../schemas/` at commit
+        # time and `files` did not name it — `npm test` was green on a package whose commit would
+        # have answered "the schema set could not be read" and written neither document. This is
+        # that defect: the reader ships, the directory it reads does not.
+        'rule': 'the schema set the commit reads at runtime is published',
+        'file': 'package.json',
+        'old': '        "schemas",\n',
+        'new': '',
+        'suite': 'test/package.test.mjs',
+    },
+    {
+        # And the same rule for a directory that does not exist yet: the check is derived from what
+        # the modules resolve, so a new read has to be published rather than remembered.
+        'rule': 'a module that reads a new directory fails until the manifest names it',
+        'file': 'lib/validate.js',
+        'old': "new URL('../schemas/', import.meta.url)",
+        'new': "new URL('../schemas-2/', import.meta.url)",
+        'suite': 'test/package.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

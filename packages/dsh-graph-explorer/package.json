@@ -1,6 +1,6 @@
 {
     "name": "@webtestagent/dsh-graph-explorer",
-    "version": "0.1.22",
+    "version": "0.1.24",
     "private": true,
     "description": "Turns a dsh-browser exploration into append-only observations and the beginnings of an application behaviour graph.",
     "license": "MIT",
@@ -14,6 +14,7 @@
     "files": [
         "lib",
         "test",
+        "schemas",
         "cordis.patch.yml",
         "README.md"
     ],
