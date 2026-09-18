@@ -33,6 +33,7 @@
     "scripts": {
         "test": "node test/run.mjs",
         "prove:schema": "node test/prove-schema.mjs",
-        "profile:abm": "node test/abm-baseline.mjs"
+        "profile:abm": "node test/abm-baseline.mjs",
+        "profile:protocol": "node test/protocol-coverage.mjs"
     }
 }

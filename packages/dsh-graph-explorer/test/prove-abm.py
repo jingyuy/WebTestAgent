@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Break one Phase-1 or Phase-2 rule at a time and check the suite notices.
+"""Break one Phase-1, Phase-2 or Phase-3 rule at a time and check the suite notices.
 
 Each case: an exact string in a source file, the edit that removes the rule, and the suite that has
 to fail. A rule whose removal leaves the suite green is a rule nobody is testing — and Phase 1's
@@ -11,6 +11,13 @@ Phase 2's cases are different in kind and are listed separately: there the artif
 document*, and the way to earn its acceptance without earning it is to write less of it — an empty
 model is schema-valid and has no findings. So each Phase-2 case removes one rule that the two
 documents owe each other and checks that `test/abm-commit.test.mjs` notices.
+
+Phase 3's artifact is neither a document nor a log: it is a *sentence*. No tool can require a
+behaviour-first reading — the tool that records a step takes the same call whichever one it was —
+so the only thing holding the rule down is the text the model is handed. Each case below breaks one
+sentence that asks for it and checks that `test/protocol.test.mjs` notices, including the case that
+puts the previous version's clause *back*: a rewrite that leaves the old instruction available has
+not rewritten anything.
 
 Same protocol as `test/prove-generate.py`: break the rule, not a clause the code already treats as
 equivalent. Restores every file it touches, including on the exception path, and leaves the tree
@@ -193,12 +200,107 @@ CASES = [
         'new': "    model: check(null, 'abm/0.2/application-model.schema.json', 'application-model.json'),",
         'suite': 'test/abm-commit.test.mjs',
     },
+    # --- Phase 3: the protocol, which is a sentence rather than an artifact ---
+    {
+        # §5's first edit: the reading comes before the walk, and before the loop that records it.
+        # The order is the phase — a vocabulary decided one action at a time is a vocabulary of
+        # controls — so this case removes the heading the order is asserted on, and both the naming
+        # check and the ordering check go with it.
+        'rule': 'the application is understood before it is walked',
+        'file': 'lib/protocol.js',
+        'old': '**Understand the application before you walk it.**',
+        'new': '**Understand the application while you walk it.**',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # D3. A per-element interaction is the *default* thing a call does; the exception is a call a
+        # user would ask for by name. Flip the default and the model goes back to recording the walk
+        # as a list of capabilities. (The live run the suite was written against took the old clause's
+        # other half and reported a sign-in as three behaviours.)
+        'rule': 'a per-element interaction is recorded as a step unless a user would ask for it',
+        'file': 'lib/protocol.js',
+        'old': 'is the *default* thing a call does',
+        'new': 'is one of the things a call does',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # The case that matters most for a rewrite: put the previous version's instruction back and
+        # check the suite notices it is available again. A protocol that offers both readings is a
+        # protocol whose rule depends on which sentence the model read last. (Written without
+        # backticks around the phrase: this text lands inside the protocol's own template literal, and
+        # an unescaped backtick would end the string and make the case "broken" for a parse error.)
+        'rule': 'the previous composite-clause is gone, not merely followed by a better one',
+        'file': 'lib/protocol.js',
+        'old': 'claims to *be* a behaviour',
+        'new': 'claims to *be* a behaviour — record both kinds, with capability_kind: composite on the one that is the behaviour',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # D5. A behaviour is what a user asks for; a step is one interaction. A behaviour described
+        # as a group of interactions is the demotion in a sentence, and the model writes what it
+        # reads.
+        'rule': 'a behaviour is what a user asks for, not a group of interactions',
+        'file': 'lib/protocol.js',
+        'old': 'a **behaviour** is what a user asks for',
+        'new': 'a **behaviour** is a group of interactions',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # And the edge: recorded once, when the behaviour completes. An edge per step is the walk's
+        # log, and the unit the model counts stops being what a user asks for.
+        'rule': 'the edge is recorded once, when the behaviour completes',
+        'file': 'lib/protocol.js',
+        'old': 'recorded once, when the behaviour completes',
+        'new': 'recorded once for each step of the behaviour',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # D6, and the key that looks right: `graph_observe` refuses `confidence` on an affordance by
+        # name, so a protocol that offers one asks the model to make a call the tool refuses.
+        'rule': 'an affordance is recorded without the confidence the tool refuses',
+        'file': 'lib/protocol.js',
+        'old': '"expected_behavior"',
+        'new': '"expected_behavior", "confidence"',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # The grounding paragraph. A behaviour inferred with no evidence behind it is a hallucination
+        # and the profile says so; soften the sentence and the honesty it asks for goes with it.
+        'rule': 'a behaviour with no evidence behind it is reported as a hallucination',
+        'file': 'lib/protocol.js',
+        'old': 'behind it is a hallucination',
+        'new': 'behind it is a claim like any other',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # §5's last edit: keep every existing refusal sentence verbatim. Each one is a failure mode
+        # paid for in a live run, and a rewrite that reflows the paragraphs around them is exactly
+        # the edit that drops one.
+        'rule': 'the refusal sentences the rewrite had to keep are still there',
+        'file': 'lib/protocol.js',
+        'old': 'A negative result is a result.',
+        'new': 'A negative result is not a result.',
+        'suite': 'test/protocol.test.mjs',
+    },
+    {
+        # The seam between the loop and the tools: an argument nobody describes is an argument the
+        # model will not use, so adding one to a recording tool is a decision rather than an
+        # omission. This case adds one and checks that the suite asks why.
+        'rule': 'every argument a recording tool declares is named in the loop',
+        'file': 'lib/index.js',
+        'old': "            confidence: { type: 'number', description: '0..1 confidence in this reading' },",
+        'new': "            confidence: { type: 'number', description: '0..1 confidence in this reading' },\n            mystery: { type: 'string', description: 'a reading the protocol never asks for' },",
+        'suite': 'test/protocol.test.mjs',
+    },
 ]
+
+broken = survived = invalid = skipped = 0
 
 for case in CASES:
     path = ROOT / case['file']
     original = path.read_text()
     if case['old'] not in original:
+        skipped += 1
         print(f'SKIP  {case["rule"]}\n      the string to break is not in {case["file"]}')
         continue
     path.write_text(original.replace(case['old'], case['new'], 1))
@@ -208,13 +310,28 @@ for case in CASES:
         path.write_text(original)
     failed = run.returncode != 0
     first = next((line for line in run.stdout.splitlines() if line.startswith('FAIL')), '')
+    # A case that stops the file parsing fails every suite for a reason that is not the rule, and
+    # counting it would let a badly written case look like a proof. The bracket for the string it
+    # injects is the usual culprit: these edits land inside template literals.
+    unparsed = any(word in run.stderr for word in ('SyntaxError', 'Unexpected identifier', 'Unexpected token'))
+    if failed and not first and unparsed:
+        invalid += 1
+        print(f'INVALID  {case["rule"]}')
+        print(f'        the edit does not parse ({run.stderr.strip().splitlines()[0][:110]})')
+        continue
+    if failed:
+        broken += 1
+    else:
+        survived += 1
     print(f'{"BROKEN" if failed else "SURVIVED"}  {case["rule"]}')
     if failed:
         print(f'        {first[:150]}')
     else:
         print(f'        the suite stayed green with the rule removed — nothing tests it')
 
+print(f'\n{len(CASES)} cases: {broken} BROKEN, {survived} SURVIVED, {invalid} INVALID, {skipped} SKIPPED')
+
 # Prove the tree is back where it started.
 verify = subprocess.run(['node', 'test/run.mjs'], cwd=ROOT, capture_output=True, text=True)
-print('\nafter restoring:', verify.stdout.strip().splitlines()[-1] if verify.stdout.strip() else verify.stderr[-200:])
-sys.exit(0 if verify.returncode == 0 else 1)
+print('after restoring:', verify.stdout.strip().splitlines()[-1] if verify.stdout.strip() else verify.stderr[-200:])
+sys.exit(0 if verify.returncode == 0 and not survived and not invalid and not skipped else 1)

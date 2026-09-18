@@ -18,10 +18,11 @@ export const SECTION_ORDER = 150;
 
 export const protocolText = (config) => `## Application-behaviour exploration (graph-explorer)
 
-This session turns a browsing session into a machine-readable application behaviour
-graph: application, features, states (with their elements and detection) and the
-transitions between them — and, from that graph, a Playwright test for one of its
-journeys. The browser is driven by the \`browser_*\` tools.
+This session reads a browsing session as an **application behaviour model**: what an actor can be
+asked to do here, under what conditions, and what changes when it is. One run is read twice — the
+model, and beside it the observation graph the browser's evidence supports (application, features,
+states with their elements and detection, and the edges between them) — and, from that graph, a
+Playwright test for one of its journeys. The browser is driven by the \`browser_*\` tools.
 
 **Evidence is collected for you.** Around every \`browser_*\` call that can change the
 page, the harness records the URL, title, headings, interactive elements, form values,
@@ -44,6 +45,30 @@ You never need to collect that, and you must never invent it. Read
 
 **Your job is the part the harness cannot do: deciding what the page MEANS.**
 
+**Understand the application before you walk it.** A walk is evidence, and evidence gathered before
+you know what the product is *for* is a transcript with no question behind it. Nothing below is
+recorded by a tool — this is the reading you do first, and again whenever a page surprises you:
+
+1. **What application is this, and who acts on it?** The task says what to achieve; the pages say
+   what the product does. Every claim you make below is a claim about the *application*, not about
+   this visit to it.
+2. **Which actor, and what does the application remember?** An **actor** is who the walk is being
+   performed as — \`anonymous\`, \`authenticated\`, \`admin\` — which is what \`variant\` names, and it
+   has to be one the application declares: a variant nothing declares is reported rather than
+   accepted. An **entity** is a thing the application holds (a project, an order, a session); a
+   **state variable** is what it remembers across screens (the cart, the filter, the draft, the
+   selected project). You do not write these down in a call of their own — they are what your
+   \`dimensions\`, your \`effects\` and the digest's \`state_variables\` add up to — and naming one now
+   is how you notice that a step changed something no screen can show.
+3. **What are the behaviours?** A **behaviour** is what a user asks for by name: \`login\`,
+   \`add_product_to_cart\`, \`apply_coupon\`. Decide the names before the walk rather than one action
+   at a time: the vocabulary is the thing the run has to get right, and a name chosen while clicking
+   is a name chosen for a control.
+4. **What would prove each one?** For each behaviour: the state it starts from, the state it leaves
+   the application in, and what a test would assert about the second. If you cannot say what would
+   prove it, you do not yet know what it is.
+5. **Then walk it** — the loop below, which is where all of the above becomes evidence.
+
 The first action of a run is a step, not a transition. Nothing came before it, so there is
 no state for it to have moved between — read the state it arrived in with
 \`${config.observeTool}\`, and record transitions from the second action onward. The tool
@@ -59,7 +84,9 @@ For every step:
    - \`page_type\` — the coarse semantic kind: \`home\`, \`login\`, \`project_list\`,
      \`settings\`, \`error\`, … Stable across routes and users.
    - \`variant\` — the actor/session variant (\`anonymous\`, \`authenticated\`, \`admin\`)
-     when it changes what the page offers.
+     when it changes what the page offers. It has to be an actor the *application* declares:
+     a variant nothing declares is reported, because an actor vocabulary nothing can check is
+     a word the walk invented.
    - \`dimensions\` — the few facts that separate two states that share a route:
      \`{"projects":"empty"}\`, \`{"form_error":"duplicate_name"}\`. This is what keeps
      "the projects page" from collapsing five genuinely different states into one.
@@ -98,41 +125,73 @@ For every step:
      contradicts is refused, so name the screen the page is on *now* — after an action
      that moved it, a detection describing the screen you left is refuted by your own
      evidence, and the tool will not record the reading.
+   - \`affordances\` — what this surface OFFERS and the walk is not exercising:
+     \`[{"element":"element_reset_password","expected_behavior":"reset_password"}]\`. Recording one is
+     the only way the model can say what the application *can* do and this walk did **not** — every
+     other claim in the document is about something that happened, and a walk that only ever names
+     what it did has no way to say what it left undone. It is a claim about a *surface*, so it is
+     made while the surface is on screen and it cannot be made later: the element must be one this
+     reading declares in \`elements\`, and the surface must have a \`page_type\`, because a claim with
+     nothing to be checked against outlives the page that supports it. The first committed step that
+     performs one retires it. It is not a coverage note: say nothing rather than listing what you
+     did not get round to.
    - \`summary\` — one sentence, from the user's point of view.
-3. Call \`${config.transitionTool}\` to record what that action DID: which capability
-   you applied, and what it changed. A state says where the app is; a transition says
-   how it got there, and a journey is a walk over transitions. Fields:
-   - \`capability\` — the behaviour in snake_case, **not** the element you clicked:
-     \`login\`, \`add_product_to_cart\`, \`apply_coupon\`. Reuse the exact name you used
-     before for the same behaviour: the vocabulary is what makes a capability a
-     reusable helper rather than a one-off. If the tool returns \`vocabulary_notes\`, it
-     saw a name close to one already in use — converge on one of them.
+3. Call \`${config.transitionTool}\` to record what that action DID: which behaviour it took a
+   step of, and what it changed. A state says where the app is; an edge says how it got
+   there, and a journey is a walk over edges. Three things are being told apart here, and the
+   whole reading depends on keeping them apart:
 
-     One of those notes means the opposite, and the difference is the difference
-     between a behaviour and a step. A **composite** is the behaviour a user would ask
-     for (\`login\`); a **step** is one interaction that serves it
-     (\`fill_login_email\`), and a composite contains its steps. So \`login\`
-     overlapping \`fill_login_email\` is the shape a composite and its sub-capability
-     are supposed to have, not a collision: record both, with
-     \`capability_kind: composite\` on the one that is the behaviour and the step's own
-     kind on the other, and do not rename the composite after one of its steps —
-     \`login\` renamed to \`fill_login_email\` is the whole sign-in reported as one
-     keystroke. Converge when the two names are two ways of saying *one* behaviour:
-     \`add_to_cart\` and \`add_item_to_cart\` are one capability, and so are \`search\`
-     and \`search_product\`. When the note offers a name from the schema's vocabulary for
-     a behaviour you recognise, that name wins — the vocabulary is the list the graph is
-     being converged onto.
+   - a **step** is one interaction with one control — \`fill_login_email\`, \`click_submit\`. It is
+     what the walk did, and it is mechanism, not meaning.
+   - a **behaviour** is what a user asks for by that name — \`login\`, \`apply_coupon\`. It is what
+     the model is *about*, and it is what a test is written against.
+   - an **edge** is one behaviour applied between two states — \`login\`: the home page → the
+     project list.
 
-     A composite that absorbs the interaction that finishes it is the failure this is
+   So a sign-in performed with three calls is **three steps, one behaviour and one edge**. The
+   edge is recorded once, when the behaviour completes, and it starts where the behaviour was
+   asked for rather than where its last step happened to start: a page that types twice and clicks
+   once has one edge, and an edge that says \`fill_login_email\` is a record of a keystroke standing
+   where a behaviour belongs. Fields:
+   - \`capability\` — the behaviour this call is, in snake_case: \`login\`,
+     \`add_product_to_cart\`, \`apply_coupon\`. Reuse the exact name you used before for the
+     same behaviour: the vocabulary is what makes a behaviour a reusable helper rather
+     than a one-off. If the tool returns \`vocabulary_notes\`, it saw a name close to one
+     already in use — converge on one of them.
+
+     A name that says what the mouse did (\`fill_login_email\`, \`click_submit\`) is a **step's**
+     name, and a step is recorded as a step rather than as a behaviour with a mechanism for
+     a name. A per-element interaction is the *default* thing a call does: pass \`capability\`
+     naming the interaction and \`capability_behaviour\` naming the behaviour it serves, and
+     with them the \`realization\` that says what the browser actually did — the verb, the
+     element, the value, and the step's \`purpose\` in the behaviour's own words. That one
+     call records the step *and* attaches it to the behaviour, which is the only moment the
+     action and its meaning are both in hand; recording it afterwards, from memory, is how a
+     sign-in ends up as three behaviours in a row. A call with no \`capability_behaviour\`
+     claims to *be* a behaviour — right when a user really would ask for it by that name
+     (\`apply_coupon\` is one click), wrong when it only serves one.
+
+     \`login\` overlapping \`fill_login_email\` is therefore not a collision to resolve but the
+     shape a behaviour and its steps are supposed to have: do not rename either of them, and
+     do not record the step as a behaviour of its own. Converge when two names are two ways
+     of saying *one* behaviour: \`add_to_cart\` and \`add_item_to_cart\` are one behaviour, and
+     so are \`search\` and \`search_product\`. When the note offers a name from the schema's
+     vocabulary for a behaviour you recognise, that name wins — the vocabulary is the list
+     the graph is being converged onto.
+
+     A behaviour that absorbs the interaction that finishes it is the failure this is
      written against: \`login\` recorded as a composite over \`fill_login_email\` and
      \`fill_login_password\`, with the click that submits the form folded into it. The
-     click is a capability of its own *and* a step of \`login\`, so record it in the same
-     call that performs it — \`capability: "submit_login"\` with
+     click is a step of its own *and* a step of \`login\`, so record it in the same call
+     that performs it — \`capability: "submit_login"\` with
      \`capability_behaviour: "login"\` — and the step is appended to \`login\`'s
      \`composed_of\`, in the order they are performed:
-     \`["fill_login_email", "fill_login_password", "submit_login"]\`. A composite whose
+     \`["fill_login_email", "fill_login_password", "submit_login"]\`. A behaviour whose
      steps do not include the one that does the work is a claim the walk does not
      support, and the generator reports the mismatch instead of writing a test from it.
+     \`capability_composed_of\` is for a behaviour genuinely built out of *other
+     behaviours*, where each member is something a user could ask for on its own — never
+     for the interactions that perform one.
    - \`effects\` — what changed, one entry each. \`navigation\`, \`url_changed\` and
      \`state_entered\` need \`to\`; \`value_changed\` and \`visibility_changed\` need
      \`target\` and \`to\`; \`message\` needs \`message\`; \`request\` needs \`api\`; and
@@ -156,6 +215,20 @@ For every step:
      inferred is a weaker claim, and it should say so.
    - \`arguments\` — the concrete values used this time, e.g. \`{"coupon_code":"SAVE10"}\`.
    - \`guard\` — the condition that made this transition possible, if there is one.
+   - \`realization\` — for a step: \`{action, element, value, purpose, arguments, effects,
+     optional, timeout_ms}\`, the shape the schema uses for one step of a behaviour and the one it
+     will expand the behaviour with. \`action\` is the browser verb, from the schema's own list
+     (\`fill\`, \`click\`, \`press\`, \`goto\`, …), and it is the only key a step cannot do
+     without: a realisation with no verb is not a step, and the capability's name is not the verb —
+     \`fill_login_email\` is how a capability is spelled, not what the browser did. \`element\` is
+     an element id (\`element_email_input\`), the same form \`target\` takes. \`value\` is a
+     literal or a \`"{{param}}"\` template bound to the behaviour's input. \`purpose\` is the
+     step's part in the behaviour, in the behaviour's own words (\`enter_credentials\`,
+     \`submit\`) — it is what still means something after the element is renamed, so write one for
+     every step: a step with no purpose is a step the model cannot describe. \`effects\` are this
+     step's own, in the same shape as the transition's, because a behaviour that types twice lands
+     its state only on the step that finishes it, and without them nothing in the document says
+     which step did the work.
    - \`journey_name\` — what the walk is a journey *towards*, in the user's own words:
      \`"Sign in and see the project list"\`. A journey is derived from walk order, so this
      is the one thing about it the machinery cannot see. Without a claim the journey
@@ -175,14 +248,17 @@ For every step:
    one more look before moving on.
 4. Repeat until the goal in the task is reached, is proven impossible, or you are out
    of steps.${config.maxSteps ? `\n   You have at most ${config.maxSteps} steps.` : ''}
-5. Call \`${config.commitTool}\` when the walk is over. This is where the run becomes a
-   graph. Everything you did until now is *evidence*, and evidence is allowed to be
+5. Call \`${config.commitTool}\` when the walk is over. This is where the run becomes
+   documents. Everything you did until now is *evidence*, and evidence is allowed to be
    wrong — a reading can be reinterpreted, a step can turn out to belong to a different
-   transition, an edge can turn out to be a duplicate. The commit is the only step that
-   reads the whole run at once and decides what is knowledge: it writes
-   \`graph.json\` next to a \`commit_report.json\` that says what it committed, what it
-   refused and why. Nothing you record is retracted by it — the raw logs stay exactly
-   as written.
+   transition, an edge can turn out to be a duplicate, a step can turn out not to be a step of
+   the behaviour you attached it to. The commit is the only step that reads the whole run at
+   once and decides what is knowledge: it writes \`graph.json\` and, beside it, the
+   \`application-model.json\` — the same run read as the behaviour model this protocol is
+   about — next to a \`commit_report.json\` that says what it committed, what it refused and
+   why. The report keeps the two verdicts apart: a rule about the graph blocks the run, and a
+   rule about the model withholds the model and leaves the graph alone. Nothing you record is
+   retracted by it — the raw logs stay exactly as written.
 6. Call \`${config.generateTool}\` to turn the committed graph into a Playwright spec, and read
    what it reports. It is the last thing a run does, and it changes nothing: the graph is
    its only input, so the spec is reproducible from \`graph.json\` alone — the run is not
@@ -195,7 +271,9 @@ For every step:
    turn into an action, so it would pass without performing it. Fix what the gaps name
    and generate again.
 
-Rules that matter:
+**Validate as you go, and prefer the refusal.** Each rule below is checked while the page that
+supports it is still on screen, and each one names what has to change — so read them as the way a
+run gets corrected rather than as a list of ways it can fail:
 
 - **A negative result is a result.** If the goal cannot be reached, or the app
   misbehaves, observe and report exactly that. Never retry a failed attempt more than
@@ -221,6 +299,12 @@ Rules that matter:
   form is gone.
 - **Do not claim what you did not see.** If a value, message or element was not in the
   evidence, leave it out. Confidence, not decoration, is what the graph is for.
+- **A behaviour you inferred is a claim, and \`confidence\` is the honest report of how well
+  grounded it is.** A behaviour is a reading of the application, not a fact about it, so it carries
+  the evidence that made you think so — the observation, the state, the edge the step was taken on
+  — and it does not claim the standing of something that was watched. A behaviour with no evidence
+  behind it is a hallucination, and the profile reports it as one: name the basis, or leave the
+  claim out. Nothing becomes verified by being written down.
 - **\`${config.observeTool}\` is the only way states reach the graph.** A browser action
   with no \`${config.observeTool}\` after it produces evidence nobody interpreted, and the
   step is lost. Read the state *while the page is showing it*: a reading cannot be made

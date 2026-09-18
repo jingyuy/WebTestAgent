@@ -41,7 +41,7 @@ One page, one owner. Never mount both.
 | --- | --- | --- |
 | Recorder | `ctx.on('tools/execute', (exec, next))` | Capture evidence around every browser action that can change the page |
 | Semantic tools | `ctx.tools.register(defineTool({...}))` | `graph_observe` and `graph_transition` — the only paths by which a state or an edge reaches the candidate graph |
-| Protocol | `ctx.systemPrompt.section({...})` | The act → observe → record loop the model follows |
+| Protocol | `ctx.systemPrompt.section({...})` | The behaviour-first loop the model follows: understand the application, name its actors and behaviours, then walk it — and record each action as a step of the behaviour it serves |
 | Reconciliation | `ctx.tools.register(defineTool({...}))` | `graph_commit` — the only path from candidate records to a committed graph |
 | Generation | `ctx.tools.register(defineTool({...}))` | `graph_test` — the graph is its only input, so a spec is reproducible from `graph.json` alone |
 
@@ -1365,11 +1365,63 @@ where the recorded graph has the margin.
    rather than left a fragment. `test/prove-generate.py` breaks each rule in the source and
    requires the suite to fail — nine rules, including these two.
 
+15. **Superseded, not closed: the `composite` reading item 13 taught.** Item 13's fix was content
+   in the protocol, and it worked — the 0.1.21 run produced `submit_login` as a behaviour *and* as
+   a step, which is what the graph needs. What the later runs showed is that asking the model to
+   choose between two kinds of capability is a question with no wrong answer and therefore no
+   stable one: the dial-in run recorded a three-call sign-in as three capabilities in a row, all
+   of them "a behaviour". The direction this repo is moving in replaces the question rather than
+   answering it again — an interaction is a *step* unless a user would ask for it by name, and the
+   behaviour it serves is named on the same call (`capability_behaviour`) — so the
+   `capability_kind: composite` clause is **gone from the protocol**, and `composed_of` is for a
+   behaviour genuinely built out of other behaviours. The generator rules above are unaffected:
+   `composite_part_never_walked` and `composite_step_targets_a_different_element` are about what a
+   document says, and both still fire. See [`docs/abm-pivot.md`](../../docs/abm-pivot.md), which is
+   the plan these changes are being made under; the item is marked superseded rather than closed
+   because its *symptom* — a model that names mechanism where the product has a word — is the thing
+   the new protocol is meant to remove, and a live run under it is still owed.
+
 ## Tests
 
 ```sh
-npm test        # 9 suites, no browser and no harness
+npm test        # 13 suites, no browser and no harness
 ```
+
+The protocol gets a suite of its own, `test/protocol.test.mjs`, because the section is the only
+place a behaviour-first reading can be *asked* for — no tool schema can require one, since the tool
+that records a step takes the same call whichever reading it came from. It renders the section the
+way `apply()` does and pins **72** claims: the section's name and order (150), the rendered text
+equal to `protocolText(...)` for the live config, the reading that comes before the walk, the
+step/behaviour/edge definitions, the absent composite clause it replaced, the affordance bullet's
+deliberately missing `confidence`, all fifteen refusal sentences **verbatim one by one**, and the
+seam to the tools — every argument `graph_observe` and `graph_transition` declare is either named in
+the loop or on one spelled-out exemption list, which is itself guarded against a rename silently
+widening it. Its matchers collapse whitespace: the section is wrapped prose, so a needle written on
+one line otherwise asserts the wrapping instead of the sentence.
+
+Two harnesses are opt-in, never part of `npm test`, and the reason is the same in both cases — they
+need a run directory this repo does not ship:
+
+| Script | What it answers |
+| --- | --- |
+| `npm run prove:schema` | Validates a committed document against the normative schemas with `ajv` (outside the repo, so `npm test` stays dependency-free) |
+| `npm run profile:abm` | Profiles a real run's projection and refuses it for the reason the pivot exists |
+| `npm run profile:protocol` | The Phase-3 acceptance: reads a run's **log** and answers the four questions it can answer there |
+
+`profile:protocol` measures the log rather than the document for a reason worth stating: the
+projection *demotes* a capability that is a step of a behaviour, so a step never becomes a behaviour
+in `application-model.json` and a rule about the behaviours in the model has nothing to count there.
+Its four verdicts are: no capability recorded with no behaviour attached; every step of every
+behaviour recorded as a realisation; every realisation naming the browser action and the step's
+purpose; and every edge resolving to a capability the run recorded. **A verdict with nothing to
+check prints `n/a` and is left out of the tally** — a green result is evidence of a positive and
+never of a negative — so a run with no realisations in it reports that fact rather than passing.
+
+Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
+the failure. `test/prove-abm.py` is that file for this work — 26 mutations, all 26 refused, the tree
+restored byte-identically and `13/13 suites passed` reprinted afterwards. It distinguishes *BROKEN*
+from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
+reason that is not the rule and would otherwise look like a proof.
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
 objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, record

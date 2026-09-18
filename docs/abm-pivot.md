@@ -1,7 +1,7 @@
 # Pivot: generate an Application Behavior Model beside the graph
 
-Status: **Phase 0a, 0b, 1 and 2 DONE; Phase 3 next — the protocol is where the pivot is actually
-made.**
+Status: **Phase 0a, 0b, 1, 2 and 3 DONE; Phase 4 next — the model generates the test, which is the
+milestone.**
 Baseline: plugin `0.1.22`, branch
 `fix/graph-explorer-lossless-and-state-entered` (`8738f52`), deployed to the `graph` and
 `web` profiles. Work happens on **`feat/application-behavior-model`**, branched off `8738f52`
@@ -878,6 +878,77 @@ D13 the projection demotes the step capabilities, so they never become behaviour
 findings are about the names that *are* behaviours. The log is where the protocol's output is visible,
 and a projection cannot move it.
 
+**DONE.** `lib/protocol.js` rewritten (240 → 306 lines), with two artifacts this phase owes and
+neither of which existed before: `test/protocol.test.mjs`, an offline suite that pins the text, and
+`test/protocol-coverage.mjs` (`npm run profile:protocol`), the log-level acceptance as a harness.
+`npm test` is **13 suites**.
+
+What the rewrite did, in the phase's own terms:
+
+- **The prologue is new, and it is the phase.** The procedure used to open with `act → observe →
+  record`; it now opens with *understand the application before you walk it*, five questions — what
+  application this is, which actor and what it remembers, what the behaviours are, what would prove
+  each one, and only then the walk. **No tool records the answer to any of them**, which is exactly
+  why it has to be in the prompt: a walk is evidence, and evidence gathered before you know what the
+  product is *for* is a transcript with no question behind it.
+- **The old composite clause is *gone*, not overridden.** The 0.1.18 text offered two homes for an
+  action and asked the model to choose; the rewrite offers one. `capability_kind: composite` no longer
+  appears anywhere in the section, and the suite asserts its absence — a protocol that still contains
+  the old instruction is a protocol whose rule depends on which sentence was read last.
+- **D5 is stated as three definitions and one worked number**: a **step** is one interaction with one
+  control, a **behaviour** is what a user asks for by that name, an **edge** is one behaviour applied
+  between two states — so *a sign-in performed with three calls is three steps, one behaviour and one
+  edge*, and the edge is recorded once, when the behaviour completes, starting where the behaviour was
+  asked for rather than where its last step happened to start.
+- **The `realization` record is now the instruction, not an inference.** One call passes `capability`
+  (the interaction), `capability_behaviour` (the behaviour it serves) and `realization` (the verb, the
+  element, the value and the step's `purpose`) together, because that is the only moment the action and
+  its meaning are both in hand. A call with no `capability_behaviour` claims to *be* a behaviour —
+  right for `apply_coupon`, wrong for a single keystroke.
+- **D6's affordance bullet**: recording one is the only way the model can say what the application
+  *can* do and this walk did **not**, it is a claim about a surface so it cannot be made later, and
+  the bullet deliberately never mentions `confidence` — the tool refuses that key by name.
+- **The grounding paragraph** ends the rules: a behaviour is a reading rather than a fact, so it
+  carries the evidence that made you think so, and one with no evidence behind it is a hallucination
+  the profile reports as one.
+- **All 15 refusal sentences survive verbatim.** Each encodes a failure mode paid for in a live run,
+  and a rewrite that reflows the paragraphs around them is precisely the edit that drops one, so they
+  are asserted one by one rather than by a count.
+
+What the two artifacts hold down, and why the measure is where it is:
+
+- `test/protocol.test.mjs` pins **72 claims** and is offline and dependency-free like the rest of
+  `npm test`: the section's name and order (150), the rendered text equal to `protocolText(...)` for
+  the live config, each rule above, the seam between the loop and the tools — **every argument
+  `graph_observe` and `graph_transition` declare is either named in the loop or on the one spelled-out
+  exemption list**, with a guard that a rename cannot silently widen the list — and the substitutions
+  themselves (renamed tools do not leave their old names behind). Its matchers collapse whitespace,
+  because the section is wrapped prose: a needle written on one line otherwise asserts the wrapping
+  rather than the sentence.
+- `test/protocol-coverage.mjs` is the acceptance, and it reads the **log**, for D13's reason. Four
+  verdicts: no capability recorded with no behaviour attached; every step of every behaviour is
+  recorded as a realisation; every realisation names the browser action and the step's purpose; every
+  edge resolves to a capability the run recorded. It is a harness and not a suite — absent a run
+  directory it prints `SKIP` and exits 0 — and **a verdict with nothing to check prints `n/a` and is
+  left out of the tally**, because a green result is evidence of a positive and never of a negative.
+  It is deliberately *not* in `npm test`: it fails by design on any pre-Phase-3 run.
+- Measured on the two baselines this machine had, and this is the honest state of the evidence: the
+  0.1.22 dial-in run records **3 capabilities, 0 behaviours, 0 realisations**, every one of them a
+  behaviour in its own right (`fill_login_email`, `fill_login_password`, `login`) — verdict 1 fails;
+  and the later `/login` run records **4 capabilities, 1 behaviour, 3 steps, 0 realisations** —
+  verdict 1 passes, verdict 2 fails at `login: 0/3 steps realised`. **No live run on this machine has
+  ever written a `realization_step` record**, because the record kind postdates all of them. The
+  decisive number therefore does not exist yet: it needs a 0.1.23 run, and until then the acceptance
+  is *owed*, not met.
+- `test/prove-abm.py` gained the **nine** Phase-3 cases that hold the rewrite down: the reading
+  before the walk, the step-is-the-default sentence, the behaviour definition, the once-per-behaviour
+  edge, the affordance's missing `confidence`, the hallucination sentence, a kept refusal sentence, an
+  argument added to a recording tool, and — the case that matters most after a rewrite — **the old
+  composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
+  **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
+  is not the rule, and counting it would let a badly written case look like a proof); all **26 cases
+  are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 13/13.
+
 ### Phase 4 — the model generates the test (D10)
 
 `generate.js` (`graph_test`). Today it matches `composed_of` against committed transitions
@@ -932,13 +1003,15 @@ and lowers `confidence`, which is what the schema's `effect.observed` already me
 
 Each of these is load-bearing, not ceremony:
 
-1. `npm test` — currently **11** suites (0a/0b added `test/abm.test.mjs`, Phase 1 added
-   `test/realization.test.mjs`); every phase adds a suite
+1. `npm test` — currently **13** suites (0a/0b added `test/abm.test.mjs`, Phase 1 added
+   `test/realization.test.mjs`, Phase 2 added `test/abm-commit.test.mjs`, Phase 3 added
+   `test/protocol.test.mjs`); every phase adds a suite
    or a case, never only a claim.
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the Phase-1 instance (11 mutations, all 11 refused); break the *rule*, not a
+   `test/prove-abm.py` is the running instance (26 mutations, all 26 refused; 17 through Phase 2, 9
+   more for Phase 3); break the *rule*, not a
    clause the code already treats as equivalent
    (removing `cutParameter &&` proved nothing — behaviourally identical).
    **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded
