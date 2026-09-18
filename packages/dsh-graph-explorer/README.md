@@ -1533,8 +1533,25 @@ because the walk had put that one in `arguments`. A document the model writes th
 cannot read is the pivot described rather than performed, and the reason is stated in the acceptance
 sentence of Phase 4: the spec is to be written from `realization[]`, which keeps the `value`.
 
+**Reading that model rather than the prose about it found one more defect, and in the document the
+pivot exists to produce.** `application-model.json`'s `journeys[0].steps` named
+`transition_submit_login` **three times** while the very same edge's
+`metadata.extra.collapsed.invocations` said `1` and its `collapsed.calls` listed the three calls the
+behaviour was made of. The projection remapped each *call* of the invocation onto the edge that
+absorbed it, and every one of them became a turn of the walk — so the document told its reader the
+behaviour had been performed three times, one line above the field that said once. A turn of a
+journey is a **move**, a move is an **invocation**, and the calls an invocation was made of are the
+behaviour's own `realization[]`, which the document already carries; naming them again as turns is a
+second place to say one thing, which is the shape D5 exists to prevent, reached from the other side.
+Fixed in 0.1.31, keyed on the invocation rather than the call — because the other direction is a
+rule too, and it is the one that bites the other way: a walk that signs in, leaves and signs in again
+performed two moves, and keying on the behaviour alone would collapse them into one turn while
+`invocations` said two. The same disagreement, opposite sign. `graph.json` had it right all along —
+its `journey.transitions` lists the three *calls* — which is worth saying, because the graph is
+supposed to be the lossy one.
+
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 43 mutations, all 43 refused, the tree
+the failure. `test/prove-abm.py` is that file for this work — 45 mutations, all 45 refused, the tree
 restored byte-identically and `14/14 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.

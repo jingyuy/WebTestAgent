@@ -333,12 +333,17 @@ check('no step named a journey, so the walk is one, and it says it is not a stat
   [model.journeys.length, model.journeys[0].name.startsWith('Derived walk'), model.journeys[0].goal_stated,
     'criticality' in model.journeys[0]],
   [1, true, false, false]);
-// The walk made two calls and the behaviour is one edge, so both of the journey's steps name the same
-// edge — the count is the walk's and the edge is the model's, and a journey that named two edges for
-// one move would be claiming a transition the document does not have.
-check('and every step of it names an edge the model has',
+// The walk made two calls and the behaviour is one edge, and the two calls were one invocation of
+// it — so the journey has one turn, naming that one edge. This assertion used to read
+// `[['transition_submit_login', true], ['transition_submit_login', true]]`, on the reasoning that
+// "the count is the walk's and the edge is the model's". The count was the *calls*', not the walk's:
+// a turn of a journey is a move, a move is an invocation, and this walk invoked `login` once. Two
+// turns naming one edge is a document that tells a reader the behaviour was performed twice, one
+// line above an edge whose `collapsed.invocations` says once. The calls are not lost — they are the
+// behaviour's `realization[]`, which is where a reader goes to check them.
+check('and it is one turn naming an edge the model has, because the two calls were one invocation',
   model.journeys[0].steps.map((step) => [step.transition, model.transitions.some((transition) => transition.id === step.transition)]),
-  [['transition_submit_login', true], ['transition_submit_login', true]]);
+  [['transition_submit_login', true]]);
 
 // The model re-read from the run, which clause 4 also needs: the same candidates the projection
 // took, so the fallback below and the drift test above are both about the document that was written.

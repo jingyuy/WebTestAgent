@@ -469,6 +469,32 @@ CASES = [
         'new': "     the rule is wherever the value reads best.\n",
         'suite': 'test/protocol.test.mjs',
     },
+    # --- a turn of a journey is a move, and a move is an invocation --------------------------------
+    # Measured on the live 0.1.30 run, and in the projected document the pivot produces rather than in
+    # the graph: `journeys[0].steps` named `transition_submit_login` three times while the very same
+    # edge's `collapsed.invocations` said one, because the projection remapped each *call* of the
+    # invocation onto the edge that absorbed it and every one of them became a turn. The document
+    # therefore told a reader the behaviour was performed three times. The two mutations below are
+    # the two ways of saying it wrong, and they are different rules: one turn per call over-counts,
+    # one turn per behaviour under-counts a walk that genuinely performed it twice.
+    {
+        'rule': 'the calls of one invocation are one turn of the journey, not one turn each',
+        'file': 'lib/abm.js',
+        'old': "        if (namedInvocation.has(invocation)) continue;\n",
+        'new': "        if (false) continue;\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The other direction, and the reason the key is the invocation rather than the behaviour: a
+        # walk that signs in, leaves and signs in again performed two moves. Keying by the behaviour
+        # alone would collapse them into one turn while `collapsed.invocations` said two — the same
+        # disagreement in the opposite direction, and the same defect.
+        'rule': 'and two invocations of one behaviour are two turns, not one',
+        'file': 'lib/abm.js',
+        'old': "        const key = `${ownerId}|${invocation[0].id}`;\n",
+        'new': "        const key = `${ownerId}`;\n",
+        'suite': 'test/abm.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

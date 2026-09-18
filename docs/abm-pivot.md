@@ -1103,7 +1103,7 @@ What the two artifacts hold down, and why the measure is where it is:
   argument added to a recording tool, and — the case that matters most after a rewrite — **the old
   composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
   **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
-  is not the rule, and counting it would let a badly written case look like a proof); all **43 cases
+  is not the rule, and counting it would let a badly written case look like a proof); all **45 cases
   are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 14/14.
 
 ### Phase 4 — the model generates the test (D10)
@@ -1182,11 +1182,12 @@ Each of these is load-bearing, not ceremony:
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (43 mutations, all 43 refused; 17 through Phase 2, 9
-   more for Phase 3, and 17 for the defects the deploy and the live runs found — four from the two
+   `test/prove-abm.py` is the running instance (45 mutations, all 45 refused; 17 through Phase 2, 9
+   more for Phase 3, and 19 for the defects the deploy and the live runs found — four from the two
    early deploys, three from the recorder defect, one from the instruction sentence, five from the
    value template the walk was never told how to declare, three from the arguments placement the
-   walk was never told the rule of, and one from the two readings of one log); break the
+   walk was never told the rule of, one from the two readings of one log, and two from the turn of a
+   journey that was counted per call rather than per invocation); break the
    *rule*, not a clause the code already treats as equivalent
    (removing `cutParameter &&` proved nothing — behaviourally identical).
    **P12 gets this treatment explicitly, and for a measured reason.** Before D5 the rule demanded

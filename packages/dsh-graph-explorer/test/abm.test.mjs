@@ -590,6 +590,71 @@ console.log('\n# P12 walk preservation, both directions');
   ok('and the journey follows the collapse: it names the move, not the calls it was made of',
     collapsed.model.journeys[0].steps.length === 1);
 }
+
+// --- one move is one turn of the walk -----------------------------------------------------------
+// The live 0.1.30 walk, which is where this came from: one behaviour whose realization recorded
+// three calls (fill, fill, click), committed as three edges and collapsed into one move. The
+// projection remapped every *call* onto the edge that absorbed it, so the journey named the move
+// three times — three turns, every one of them `transition_submit_login` — and the document told a
+// reader the behaviour was performed three times while the same edge's
+// `metadata.extra.collapsed.invocations` said one. A turn of a journey is a move, and a move is an
+// *invocation*: the calls it was made of are the behaviour's own `realization[]`, which the
+// document already holds, so naming them again as turns is a second place to say one thing — the
+// exact shape D5 exists to prevent.
+
+console.log('\n# one move is one turn of the walk');
+{
+  const realized = candidates();
+  realized.capabilities.find((entry) => entry.id === 'cap_login').steps = [
+    { action: 'fill', element: 'element_email_input', value: 'test@example.com' },
+    { action: 'fill', element: 'element_password_input', value: '[set]' },
+    { action: 'click', element: 'element_login_button' },
+  ];
+  const model = modelFromCandidates(realized);
+  check('one invocation of a three-call behaviour is one turn of the journey, not three',
+    [model.journeys[0].steps.map((step) => step.transition),
+      model.transitions.map((entry) => entry.id),
+      model.transitions[0].metadata.extra.collapsed.invocations],
+    [['transition_submit_login'], ['transition_submit_login'], 1]);
+  check('and the calls it was made of are the behaviour\'s own steps, where a reader can check them',
+    model.behaviors.find((entry) => entry.id === 'behavior_login').realization.map((step) => [step.action, step.element]),
+    [['fill', 'element_email_input'], ['fill', 'element_password_input'], ['click', 'element_login_button']]);
+}
+{
+  // The other direction, because a rule that only ever collapses is a rule that would merge two
+  // real invocations into one: the walk performs the behaviour, leaves, and performs it again from
+  // the same state. Two invocations, two turns — the edge is one edge and the walk names it twice.
+  const twice = candidates();
+  const call = (id, capability, target, from, to, extra = {}) => ({
+    id, from_state: from, to_state: to,
+    action: { capability, target },
+    effects: [], evidence: THREE_ROLES,
+    metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
+    ...extra,
+  });
+  const login = 'state_login_anonymous';
+  const projects = 'state_project_list_authenticated_projects_populated';
+  const walk = [
+    call('transition_fill_email', 'cap_fill_login_email', 'element_email_input', login, login),
+    call('transition_fill_password', 'cap_fill_login_password', 'element_password_input', login, login),
+    call('transition_submit_login', 'cap_submit_login', 'element_login_button', login, projects),
+    call('transition_fill_email_again', 'cap_fill_login_email', 'element_email_input', login, login),
+    call('transition_fill_password_again', 'cap_fill_login_password', 'element_password_input', login, login),
+    call('transition_submit_login_again', 'cap_submit_login', 'element_login_button', login, projects),
+  ];
+  twice.capabilities.find((entry) => entry.id === 'cap_login').steps = walk.map((entry) => ({
+    action: entry.action.capability === 'cap_submit_login' ? 'click' : 'fill',
+    element: entry.action.target,
+  }));
+  twice.transitions = walk;
+  twice.journeys[0].transitions = walk.map((entry) => entry.id);
+  const model = modelFromCandidates(twice);
+  check('two invocations of one move are two turns, both naming the edge that carries them',
+    [model.transitions.map((entry) => entry.id),
+      model.transitions[0].metadata.extra.collapsed.invocations,
+      model.journeys[0].steps.map((step) => step.transition)],
+    [['transition_submit_login_again'], 2, ['transition_submit_login_again', 'transition_submit_login_again']]);
+}
 {
   const { model, source } = projected();
   model.transitions = model.transitions.filter((entry) => entry.id !== 'transition_fill_login_password');

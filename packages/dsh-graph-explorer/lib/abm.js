@@ -421,6 +421,12 @@ export function modelFromCandidates({
   };
   const absorbed = new Map(); // an absorbed call's id -> the id of the edge that carries it
   const survivorById = new Map(); // the surviving edge's id -> the merged edge
+  // Which invocation a call belonged to, for the calls that are one of several. A journey turn is a
+  // *move*, and the move is the invocation: the calls it took are the behaviour's `realization[]`,
+  // which the document already carries, so a turn per call would name one move as many times as it
+  // happened to take DOM steps. Two invocations of one behaviour between the same two states are
+  // still two turns, which is why this is keyed by invocation and not by call or by pair.
+  const invocationOf = new Map();
   for (const behaviour of realized) {
     const ownerId = behaviour.id ?? behaviour.capability_id;
     const order = [ownerId, ...rows(behaviour.composed_of).filter((member) => typeof member === 'string')];
@@ -448,6 +454,13 @@ export function modelFromCandidates({
       const final = group[group.length - 1];
       const last = final[final.length - 1];
       const carried = group.flatMap((invocation) => invocation).slice(0, -1);
+      // Every call of one invocation is one move, so the key is the invocation's own first call
+      // rather than each call's id — the last call of the last invocation is not in `carried` and
+      // is not absorbed, and it has to share the key of the calls that are.
+      for (const invocation of group) {
+        const key = `${ownerId}|${invocation[0].id}`;
+        for (const call of invocation) invocationOf.set(call.id, key);
+      }
       for (const call of carried) absorbed.set(call.id, last.id);
       if (!carried.length) continue;
       survivorById.set(last.id, {
@@ -799,10 +812,20 @@ export function modelFromCandidates({
   const projectedJourneys = walkedJourneys.map((journey, index) => {
     // The walk's per-call ids are remapped onto the edges that carry them, so a journey names the
     // behaviour it walked. Two calls of one behaviour between the same two states are one edge
-    // walked twice, and the journey names it twice (D5/D12).
-    const steps = journeySteps(journey, transitionById).map((step) => (
-      absorbed.has(step.transition) ? { ...step, transition: absorbed.get(step.transition) } : step
-    ));
+    // walked twice, and the journey names it twice (D5/D12) — but the calls of *one* invocation are
+    // one move, so they become one turn however many of them there were, and the turn they become
+    // is placed where the invocation began. Keeping the first call of each invocation as it is
+    // encountered also keeps the walk order the log wrote, which is the one thing a journey is for.
+    const steps = [];
+    const namedInvocation = new Set();
+    for (const step of journeySteps(journey, transitionById)) {
+      const invocation = invocationOf.get(step.transition);
+      if (invocation !== undefined) {
+        if (namedInvocation.has(invocation)) continue;
+        namedInvocation.add(invocation);
+      }
+      steps.push(absorbed.has(step.transition) ? { ...step, transition: absorbed.get(step.transition) } : step);
+    }
     const startState = journey.start_state ?? steps[0]?.from_state ?? null;
     const actor = startState ? variantOfState(startState) : null;
     const endState = [...steps].reverse().map((step) => transitionById.get(step.transition)?.to_state)[0] ?? null;
