@@ -118,6 +118,77 @@ export const identityKey = ({ page_type, variant, dimensions }) => {
   return JSON.stringify([String(page_type ?? ''), variant ? String(variant) : '', dims]);
 };
 
+/**
+ * The two readings a recorded step was made from, in the roles the recorder writes them
+ * in: the surface as it stood when the action was taken, then the one the action produced.
+ *
+ * A step is *one action read from two readings*, and this is that sentence as a value.
+ * Nothing else about two records of one edge is stable enough to identify a step by: the
+ * walk has no other way to tell "I said this again" from "I did it again", and the
+ * readings are the browser's own ids rather than anything the model supplied. Two records
+ * naming one edge out of one pair of readings are one step stated twice, however far apart
+ * in time they were written.
+ *
+ * `null` for a reading that is not there, so a record with no evidence cannot compare equal
+ * to another by accident: a caller compares each reading with the one it is looking for
+ * rather than trusting the absence of both.
+ */
+const stepReadings = (record) => {
+  const evidence = Array.isArray(record?.evidence) ? record.evidence : [];
+  const reading = (role) => {
+    const reference = evidence.find((ref) => ref?.role === role);
+    return typeof reference?.observation === 'string' && reference.observation ? reference.observation : null;
+  };
+  return [reading('identity'), reading('action')];
+};
+
+/**
+ * Whether `statement` is `previous` stated again: the same edge out of the same two readings.
+ *
+ * The rule is here, in one function, because two readers have to agree on it and only one of them
+ * was there when it happened. The store asks it as it records, against the walk's last step; the
+ * commit asks it of the log, against the record written before this one. Both are asking about the
+ * same two facts — the edge id and the pair of the browser's own reading ids — so both get the same
+ * answer, and a log written by a version that did not know the rule gives the same answer as one
+ * written by this one. That is the point: *what the log says* decides, and the `restatement` field
+ * on the record is the recorder's own note about what it did, not the evidence a later commit needs.
+ *
+ * `before` has to be a real reading. `stepReadings` answers `null` for a reading a record does not
+ * have, and two records that both have none must not compare equal — a step with no readings is not
+ * a step this question can be asked about at all.
+ */
+export const isRestatement = (previous, { id, before, after }) => {
+  if (!previous) return false;
+  if ((previous.transition_id ?? previous.id) !== id) return false;
+  if (typeof before !== 'string' || !before) return false;
+  const [previousBefore, previousAfter] = stepReadings(previous);
+  return previousBefore === before && previousAfter === after;
+};
+
+/**
+ * Which records of a log are the walk stating a step again — one flag per record, in log order.
+ *
+ * The walk's last step is always the record written most recently (a step stated again replaces the
+ * walk's account of that step rather than adding one), so the step a record was measured against is
+ * the record before it in the log. A commit that arrives later has nothing but the log, and this is
+ * the log read for that fact.
+ *
+ * Deriving it rather than trusting the `restatement` field is what lets the commit read a log that
+ * this version did not write. The field is what the recorder believed at the time; the records are
+ * what happened. A run recorded before the field existed — or before the rule existed, when a
+ * corrective re-record was written as a *step* — commits as one step and one walk anyway, because
+ * two records naming one edge out of one pair of readings are one step stated twice whenever they
+ * were written.
+ */
+export const restatementsOf = (records) => records.map((record, index) => {
+  const [before, after] = stepReadings(record);
+  return isRestatement(index ? records[index - 1] : null, {
+    id: record?.transition_id ?? record?.id,
+    before,
+    after,
+  });
+});
+
 export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onStoreError = null }) {
   const dir = join(cwd, runDirName);
   const evidenceDir = join(dir, 'evidence');
@@ -170,7 +241,12 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
   let affordanceCount = 0;
   const transitionIdByKey = new Map();
   const transitionIds = new Set();
-  /** Every recorded transition, in walk order. Duplicates kept: a walk may repeat an edge. */
+  /**
+   * Every step of the walk, in the order the steps were taken. An edge may be walked twice, so
+   * the same id can appear twice — but a step *stated* twice is one step holding the walk's
+   * latest account of itself, and replaces its entry here rather than adding one. The log keeps
+   * both records either way; see `recordTransition`.
+   */
   const walk = [];
 
   /**
@@ -623,6 +699,16 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
      * A repeated walk of the same edge reuses the transition id (no duplicate
      * identities, invariant 1) but is still appended to the walk, because a journey
      * is a sequence of steps and two adds to one cart are two steps.
+     *
+     * A step stated again is the one thing that is not a step. The record names the edge
+     * it moves along and the two readings it was made from, and those readings are the
+     * step's evidence: the same edge out of the same pair is one action, and one action is
+     * one step — a walk cannot be in the same place twice without moving. So a second
+     * statement about it replaces the walk's account of that step, in the position it was
+     * taken, and cannot break a chain, because nothing moved. The log keeps both records:
+     * the earlier one is the record of what was said the first time, which is what makes
+     * "evidence is allowed to be wrong" actionable — a step whose own account was wrong is
+     * corrected by stating it again, and the machinery reads the walk's last word about it.
      */
     recordTransition({
       from_state,
@@ -667,8 +753,18 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
       // previous step must have ended in the state this one starts from. A break is
       // recorded rather than refused, because re-opening a page mid-run legitimately
       // starts a new strand, and only the model knows which happened.
+      //
+      // A step stated again is not a step, so it is measured against nothing: the walk is
+      // where it was, and the record's `from_state` is the state that step started from
+      // rather than where the run stands. Reading that as a break is what turned one
+      // corrected step into a second journey strand.
+      //
+      // The rule itself is `isRestatement`, which is also what the commit reads the log with.
+      // A walk that decided this one way while the commit decided it another is how a
+      // correction gets recorded and then ignored.
       const previous = walk.length ? walk[walk.length - 1] : null;
-      const chain_break = previous && previous.to_state !== from_state
+      const restated = isRestatement(previous, { id, before: before_observation, after: after_observation });
+      const chain_break = previous && !restated && previous.to_state !== from_state
         ? { previous_transition: previous.id, previous_to_state: previous.to_state, from_state }
         : null;
 
@@ -731,18 +827,28 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
         observed_change: observed_change ?? null,
         notes: notes ?? [],
         chain_break,
+        // Whether this record is the walk stating a step it has already taken, out of the same
+        // two readings. It is the only record here that is not a step: it holds the step's
+        // position rather than taking one, so a reader that cuts the walk into journeys has to
+        // obey this flag the way it obeys `chain_break` — the record is evidence, and what it is
+        // evidence *of* is one step that did not move.
+        restatement: restated,
       };
 
       // The walk advances only once the step is in the log, for the same reason the
       // indexes are: a step the commit cannot see must not decide what the next step's
-      // chain_break is measured against.
+      // chain_break is measured against. A restatement moves nothing — it takes the place of
+      // the step it restates, which is the step the walk is already standing on, so the next
+      // step is measured against the account the walk now holds and not against the one it
+      // replaced.
       if (!append(transitionsPath, { kind: 'transition', ...record, repeated: !minted })) return null;
       if (minted) {
         transitionIdByKey.set(key, id);
         transitionIds.add(id);
       }
-      walk.push(record);
-      return { id, minted, chain_break, record };
+      if (restated) walk[walk.length - 1] = record;
+      else walk.push(record);
+      return { id, minted, chain_break, restatement: restated, record };
     },
 
     stateCount: () => stateRecordById.size,
@@ -798,9 +904,17 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
      * question the digest asks about a step: what did it *change*. The effects are the only place
      * the run says that, and a variable moved three steps ago is still a variable the graph has to
      * be able to hold — so the records are exposed rather than only the counters.
+     *
+     * One entry per step: a step the walk stated again holds the latest account of itself here,
+     * and the account it replaced is in the log rather than in this list. The list is what the
+     * run *is* — where the walk stands and what each step of it changed — and the log is what was
+     * said, which is the difference between the two.
      */
     transitions: () => [...walk],
-    /** Steps walked, which is not `transitionCount` once an edge is walked twice. */
+    /**
+     * Steps walked, which is not `transitionCount` once an edge is walked twice — and which a
+     * restatement does not change at all, because a step said again is the same step.
+     */
     walkLength: () => walk.length,
     /**
      * The feature names the run has claimed, in the order they were first used.

@@ -67,7 +67,7 @@ import {
   TRANSITION_DECISIONS,
   UNKNOWN_NOTE_SEVERITY,
 } from './schema.js';
-import { slugify } from './session.js';
+import { slugify, restatementsOf } from './session.js';
 import { loadSchemas, validateDocument, DEFAULT_SCHEMA_ROOT } from './validate.js';
 // The application model is a second *reading* of the same run (D1), so the commit assembles it here,
 // from the graph it has just decided, and the projection itself lives in `abm.js` where its own
@@ -162,13 +162,26 @@ export function readRun(dir) {
     throw new Error(`${dir} is not a run directory: no run.json. Point this at the directory the exploration wrote (the configured runDirName).`);
   }
   const run = JSON.parse(readFileSync(runPath, 'utf8'));
+  const transitions = readJsonl(join(dir, 'transitions.jsonl'));
+  // Which of these records are the walk stating a step again is a fact about the *records* — one
+  // edge, one pair of readings — and it is derived here rather than read off the `restatement`
+  // field, so that a log this version did not write commits under the rule this version applies.
+  // The field is the recorder's note about what it believed at the time; the log is the evidence,
+  // and a run recorded before the rule existed wrote the correction as an ordinary step. Trusting
+  // the field there would commit one corrected step as two steps and a second journey strand — the
+  // 0.1.29 defect, preserved in the evidence by the reader that was supposed to fix it. See
+  // `restatementsOf`.
+  const restated = restatementsOf(transitions);
+  for (const [index, record] of transitions.entries()) {
+    if (record && typeof record === 'object') record.restatement = restated[index];
+  }
   return {
     dir,
     run,
     observations: readJsonl(join(dir, 'observations.jsonl')),
     states: readJsonl(join(dir, 'states.jsonl')),
     capabilities: readJsonl(join(dir, 'capabilities.jsonl')),
-    transitions: readJsonl(join(dir, 'transitions.jsonl')),
+    transitions,
   };
 }
 
@@ -1237,6 +1250,18 @@ export const journeyNameFromGoal = (goal) => {
   return (lastSpace > 20 ? clipped.slice(0, lastSpace) : clipped).trim() + '…';
 };
 
+/**
+ * The name the model gave the walk, when the record carries one.
+ *
+ * One reading of one field, used wherever a step's own words are taken — including for a step
+ * stated again, where the later claim is the walk's current one and a record that names nothing
+ * leaves the name that is already there in place: saying the same step again is not a way to
+ * unname a walk.
+ */
+const journeyNameOf = (record) => (typeof record?.journey_name === 'string' && record.journey_name.trim()
+  ? record.journey_name.trim()
+  : null);
+
 export function assembleJourneys({ transitions = [], edges = [], stateIds = new Set(), generatedAt = null, instruction = null }) {
   const byId = new Map(edges.map((edge) => [edge.id, edge]));
   const strands = [];
@@ -1249,6 +1274,21 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
     if (!id) continue;
     const edge = byId.get(id);
     const previous = current?.steps.length ? current.steps[current.steps.length - 1] : null;
+    // A step stated again is not a step, and it is the one thing here that cannot be judged by
+    // where the walk stands: the record names the state its step started from and that is not
+    // where the run is. Judged that way it looks like a jump back to a state the walk left — which
+    // is how one corrected step became a second, one-step journey. So it is answered here, before
+    // the edge is looked at: it holds the place of the step it restates, in this strand and at the
+    // position it already has, and only its own name for the walk can change, because the walk did
+    // not move and nothing about the step's endpoints can differ (the id is minted from them).
+    if (record.restatement === true) {
+      const at = current ? current.steps.findIndex((step) => step.id === id) : -1;
+      if (at >= 0) {
+        const restated = journeyNameOf(record);
+        if (restated) current.steps[at] = { ...current.steps[at], journey_name: restated };
+      }
+      continue;
+    }
     const joinable = edge && stateIds.has(edge.from_state) && stateIds.has(edge.to_state);
     if (!joinable) {
       if (previous) {
@@ -1284,9 +1324,7 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
       // one. Carried per step rather than per journey because the walk is cut into strands here and
       // the model was naming the thing it was doing, not the numbers this function draws: which
       // strand a claim belongs to is decided below, from which steps made it.
-      journey_name: typeof record.journey_name === 'string' && record.journey_name.trim()
-        ? record.journey_name.trim()
-        : null,
+      journey_name: journeyNameOf(record),
     });
   }
 
@@ -1910,12 +1948,21 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     }
 
     // A group exists because the same edge was walked more than once, or because two records
-    // claimed the same id. The best candidate is the one to keep: a clean walk of an edge is
-    // stronger evidence for it than a version of the same edge the recorder complained about.
+    // claimed the same id. The best candidate is the one to keep, decided by two things in order:
+    // a clean walk of an edge is stronger evidence for it than a version of the same edge the
+    // recorder complained about, and between two candidates of equal standing the *later* one
+    // stands. Later wins because the walk's last word about a step is what the walk means — a
+    // step stated again out of the same readings is the run correcting its own account of one
+    // step, and taking the earlier one is taking the mistake. It is also the only rule a
+    // correction can take effect through: the record the walk replaced is the record it was
+    // replacing.
+    //
+    // A record with no `recorded_at` cannot be shown to be the later statement, so it sorts after
+    // every record that has one, the way an unordered realisation step sorts before every ordered
+    // one: the tie is broken towards the position that cannot be guessed into being last.
     const rank = (item) => [
       item.decision === 'committed' ? 0 : 1,
       item.findings.filter((finding) => finding.severity === 'warning').length,
-      item.record.recorded_at ?? '',
     ];
     const ordered = [...judged].sort((a, b) => {
       const left = rank(a);
@@ -1924,7 +1971,10 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         if (left[index] < right[index]) return -1;
         if (left[index] > right[index]) return 1;
       }
-      return 0;
+      const leftAt = a.record.recorded_at ?? '';
+      const rightAt = b.record.recorded_at ?? '';
+      if (leftAt === rightAt) return 0;
+      return leftAt > rightAt ? -1 : 1;
     });
     const [winner, ...rest] = ordered;
 
@@ -1937,9 +1987,15 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         to_state: loser.record.to_state ?? null,
         decision: 'superseded',
         superseded_by: winner.record.recorded_at ?? null,
-        reason: loser.decision === 'rejected'
-          ? 'the same edge was walked again without the recorder’s objection'
-          : 'a repeat of the same edge; the step is in the walk, but one edge is one edge',
+        // Why this candidate is not the one the graph got. A step stated again is the first case
+        // because it is the one that says what the run was doing: the walk replaced its own
+        // account of one step, and this record is the account it replaced. The other two are a
+        // re-walk, with and without the recorder's objection to the version that lost.
+        reason: winner.record.restatement === true
+          ? 'the walk stated this step again out of the same two readings; one step has one account, and the later one is the walk’s'
+          : loser.decision === 'rejected'
+            ? 'the same edge was walked again without the recorder’s objection'
+            : 'a repeat of the same edge; the step is in the walk, but one edge is one edge',
         findings: loser.findings,
         // A superseded candidate is not a rejection, so there is no reason to give — but the
         // key has to be here all the same. `decisions[]` is one table with one shape, and a row

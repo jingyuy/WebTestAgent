@@ -2339,12 +2339,15 @@ export function apply(ctx, config) {
                         step: step.record,
                         repeated: step.repeated,
                         position: step.record.walk_index,
-                        note: step.repeated
-                            ? 'This edge was already a step of this behaviour, so the step was re-recorded at its new walk position: '
-                                + 'a behaviour\'s steps are performed in the order they were performed, and the newest position is where '
-                                + 'the walk is now.'
-                            : 'Recorded as this step of the behaviour — the verb, the element and the value the browser used, beside the '
-                                + 'composition that says which capabilities the behaviour contains.',
+                        note: recorded.restatement
+                            ? 'This edge is already a step of this behaviour, and the walk has just stated it again out of the same '
+                                + 'two readings: the step keeps its position, and the account of it the walk holds is the one recorded now.'
+                            : step.repeated
+                                ? 'This edge was already a step of this behaviour, so the step was re-recorded at its new walk position: '
+                                    + 'a behaviour\'s steps are performed in the order they were performed, and the newest position is where '
+                                    + 'the walk is now.'
+                                : 'Recorded as this step of the behaviour — the verb, the element and the value the browser used, beside the '
+                                    + 'composition that says which capabilities the behaviour contains.',
                     }
                     : {
                         behaviour: { capability_id: behaviour.id, name: behaviourName },
@@ -2373,9 +2376,19 @@ export function apply(ctx, config) {
                     // from one that acts on nothing.
                     target: actionTarget ?? null,
                     target_note: targetNote ? targetNote.detail : null,
-                    note: recorded.minted
-                        ? 'Recorded a new edge.'
-                        : 'This edge was already recorded — reused its id and appended the step to the walk.',
+                    // Whether this call was the walk stating a step it had already taken, out of the
+                    // same two readings. A restatement is not a step: it takes the place of the one
+                    // it restates, which is why it reports no `chain_break` — the walk did not move.
+                    // The model has to be able to see that its correction was taken, because the
+                    // alternative reading of a silent success is that it recorded the step twice.
+                    restatement: recorded.restatement === true,
+                    note: recorded.restatement
+                        ? 'The walk had already taken this step, out of these same two readings, and has now stated it again: this '
+                            + 'replaces the account the walk held of that step — which is still in `transitions.jsonl`, the log being '
+                            + 'append-only — and the walk has not moved.'
+                        : recorded.minted
+                            ? 'Recorded a new edge.'
+                            : 'This edge was already recorded — reused its id and appended the step to the walk.',
                     // The reading the action produced, and the reading it started from. Named here
                     // because a step is only attributable to a reading if the caller can see which
                     // reading that is: `action_id` is the reading's own id, written on it when it

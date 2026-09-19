@@ -348,6 +348,30 @@ previous step ended somewhere other than where this one starts, the walk has a
 discontinuity. Re-opening a page mid-run legitimately starts a new strand, and only the
 model knows which happened.
 
+**A step's own account is corrected by stating the step again.** A step is the edge it
+moved along plus the two readings it was made from, and that pair is what identifies it:
+calling `graph_transition` again for the step you have *just* taken — the same capability,
+the same two readings — is the walk saying that one step again. No step is added, the
+walk does not move, and the later statement **replaces** what the walk says about that
+step, which is how a value attached to the wrong edge, or a target misread, stops being
+the walk's account of a step. The timing is not decoration: a statement made after the
+next action is a different step rather than a correction of this one, because the readings
+are what identify it. The earlier statement stays in `transitions.jsonl` — the log is
+append-only, and the mistake beside the correction is what makes the exception an
+exception rather than a retraction — and the report lists it as `superseded` beside the
+one that stands. It also cannot break the chain it is standing on: a restatement names
+the state its step *started* from, which is never where the walk stands, so reading it as
+an ordinary step would report a discontinuity that never happened on the step that is
+being corrected.
+
+Both readers of that rule — the store as it records, and the commit reading a log — ask
+the same exported function rather than each holding half of it, and **the commit derives
+which records are restatements from the log rather than trusting the `restatement` field
+on them**. The field is the recorder's note about what it believed at the time; the log is
+the evidence. A run recorded before the rule existed wrote the correction as an ordinary
+step, with no field on it at all, and a commit that needed the field would commit that run
+exactly as the version that had the defect did.
+
 Calling `graph_transition` with **no capability** is the read-only report: where the
 walk stands, what the vocabulary is, and — for any other argument that was supplied —
 a note naming what was read and ignored. The absence of a capability is the signal, so a
@@ -472,7 +496,10 @@ Per candidate, and recorded in `report.decisions[]`:
   self-loop then a clean re-walk, say. The best candidate is committed and the others are
   `superseded` with `candidates: N` and the reason, never deleted. Prefer a candidate with
   endpoint evidence and no self-contradiction; `superseded` is not the same verdict as
-  `rejected`, and the report keeps them apart.
+  `rejected`, and the report keeps them apart. A **restatement** is superseded with its own
+  reason, because it is not merely a repeat: between two statements of one step the later
+  one is the one the walk means, and the report says which of the two it is keeping and
+  why.
 
 ### Journeys are derived, not decided
 
@@ -1460,13 +1487,13 @@ where the recorded graph has the margin.
 ## Tests
 
 ```sh
-npm test        # 14 suites, no browser and no harness
+npm test        # 15 suites, no browser and no harness
 ```
 
 The protocol gets a suite of its own, `test/protocol.test.mjs`, because the section is the only
 place a behaviour-first reading can be *asked* for — no tool schema can require one, since the tool
 that records a step takes the same call whichever reading it came from. It renders the section the
-way `apply()` does and pins **73** claims: the section's name and order (150), the rendered text
+way `apply()` does and pins **79** claims: the section's name and order (150), the rendered text
 equal to `protocolText(...)` for the live config, the reading that comes before the walk, the
 step/behaviour/edge definitions, the absent composite clause it replaced, the affordance bullet's
 deliberately missing `confidence`, all fifteen refusal sentences **verbatim one by one**, the
@@ -1584,8 +1611,9 @@ readers import.
 What that run did *not* settle is whether a wrong `arguments` can be retracted: re-recording the edge
 did not clear the finding, and it split a second one-step journey strand. The protocol's commit step
 tells the walk that evidence is allowed to be wrong, so this is a machine instruction that cannot be
-acted on — a defect by the same argument as the two above — but the fix is a question about commit
-semantics rather than a sentence, and it is left open rather than guessed at.
+acted on — a defect by the same argument as the two above. It was left open rather than guessed at,
+and it is the question the last story in this section answers — with that run's own log as the
+witness.
 
 **The 0.1.30 run then wrote the model — the first live run whose `application-model.json` is both
 written and valid — and found the defect that says most about where the pivot still is.** Its walk
@@ -1643,9 +1671,44 @@ reading writes all three actions, from the value the walk recorded. That is D1 i
 pivot intends — the graph is the lossy projection, the model keeps what the walk recorded — and it is
 why both documents are still written on every commit.
 
+**The question that run left open is answered in 0.1.34, and its answer is that a step is a pair.**
+A step is identified by the edge it moved along *and* the two readings it was made from, so stating
+one step again — the same capability, the same two readings, before the next action — is the walk
+saying that step again: no step is added, the walk does not move, and the later statement is the one
+the walk means. That is what makes a wrong `arguments` retractable at all, and it needs no new tool
+and no retraction verb: the walk says the step twice and the second account stands. The first stays
+in `transitions.jsonl`, because the log is append-only and a mistake beside its correction is what
+makes the exception an exception; the report lists it as `superseded`, with a reason that says the
+step was *stated again* rather than merely repeated. It also cannot cut the walk it is standing on:
+a restatement names the state its step started from, which is never where the walk stands, so
+reading it as an ordinary step reported a discontinuity that never happened — and that is what turned
+one corrected step into a second one-step journey.
+
+**The fix is proved on the run that found the defect, and proving it that way is what caught the real
+bug.** The 0.1.29 log was replayed through the new commit; the first replay *did not take the
+correction*. The rule was in the recorder, the record carried the recorder's own `restatement` field,
+and the commit still read the two statements as two steps and refused the model exactly as 0.1.29 had
+— because the commit's reader is stateless and the log was written before the rule existed, so there
+was no field on it to trust. **A written field is a note, not evidence.** The rule now lives in one
+exported function that both readers ask, and the commit derives which records are restatements from
+the records themselves: one edge, one pair of readings. Replayed again, the same log gives three
+committed edges, `superseded: 1` with the restatement reason, one journey, no breaks, no errors, and
+`application-model.json` written — the run that produced the defect, commuting under the rule written
+to answer it.
+
+**And reading that replay's model rather than its report found one more, one document further along.**
+The corrected edge carried no `arguments` and the journey step naming it still did: the projection
+remaps an absorbed call onto the edge that carries it, and it was keeping the *call's* values on the
+*turn*. A turn is a turn of the edge it names, so a turn saying the invocation carried an `email`
+while that edge carries none is the same claim the graph had just refused, arriving through the
+journey — two documents disagreeing about one edge, which is the defect the pivot is against. The
+turn's `arguments` are now the turn's edge's arguments, and nothing is lost with them: the value is on
+the call's own edge, where the walk recorded it, and the model's `realization[]` still carries the
+parameter a spec is generated from.
+
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 50 mutations, all 50 refused, the tree
-restored byte-identically and `14/14 suites passed` reprinted afterwards. It distinguishes *BROKEN*
+the failure. `test/prove-abm.py` is that file for this work — 59 mutations, all 59 refused, the tree
+restored byte-identically and `15/15 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.
 
@@ -1716,7 +1779,7 @@ first attempt at that last one proved nothing and is the reason the file is wort
 the `cutParameter &&` gate is *behaviourally* identical, because a connector can only dangle when a
 parameter was cut, so the proof breaks the rule instead — a connector set that includes the `in` of
 "sign in" — and the suite catches it. It runs on `python3`, changes nothing that survives, and
-prints `after restoring: 14/14 suites passed` when it is done.
+prints `after restoring: 15/15 suites passed` when it is done.
 
 The race between an action and the reading taken after it gets a suite that reproduces it,
 `test/settle.test.mjs`, because it is the one failure the recorder was built to catch and

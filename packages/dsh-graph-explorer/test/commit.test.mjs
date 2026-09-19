@@ -1254,6 +1254,41 @@ const restart = assembled(
 check('two walks between the same states are two journeys', restart.journeys.map((journey) => journey.id), ['journey_a_to_b', 'journey_a_to_b_2']);
 check('and a second one is still a walk of one distinct edge', restart.journeys.map((journey) => journey.metadata.extra.distinct_transitions), [1, 1]);
 
+// The same two records again, with the second one flagged as a restatement: one step of one walk,
+// stated twice out of the same two readings, which is how a run corrects its own account of a step.
+// The records are otherwise identical, and that is the point — what makes one a repeated walk and the
+// other not is not the shape of the record but a fact only the recorder can know, written down as a
+// flag, and the two cases above and below are the test of the flag.
+//
+// It is the 0.1.29 defect in miniature. That run recorded `transition_submit_login` with the address
+// it had typed, the commit refused the edge for an argument nobody had watched, and the run recorded
+// it again without the argument. The correction was invisible in the graph and visible only as a
+// second, one-step journey at a step nobody had walked twice.
+const restated = assembled(
+  [step('transition_go', 'state_a', 'state_b'), { ...step('transition_go', 'state_a', 'state_b'), restatement: true }],
+  [edge('transition_go', 'state_a', 'state_b')],
+);
+check('a step stated again is not a second journey', restated.journeys.map((journey) => journey.transitions), [['transition_go']]);
+check('and does not cut the walk it is in', restated.breaks, []);
+
+// A restatement holds the place the step already has, and the one field it can change is the step's
+// own account of itself — including the name the model gave the walk, which is carried per step
+// precisely so that a walk named once is named that way for every step of it.
+const renamed = assembled(
+  [
+    step('transition_go', 'state_a', 'state_b'),
+    step('transition_away', 'state_b', 'state_c'),
+    { ...step('transition_go', 'state_a', 'state_b'), restatement: true, journey_name: 'Sign in' },
+  ],
+  [edge('transition_go', 'state_a', 'state_b'), edge('transition_away', 'state_b', 'state_c')],
+);
+check('a restated step keeps its place in the walk it is in',
+  [renamed.journeys.length, renamed.journeys[0].transitions], [1, ['transition_go', 'transition_away']]);
+check('and the name on it names that walk',
+  [renamed.journeys[0].name, renamed.journeys[0].metadata.extra.name_source_kind,
+    renamed.journeys[0].metadata.extra.name_stated],
+  ['Sign in', 'model', true]);
+
 const orphan = assembled(
   [step('transition_go', 'state_a', 'state_b'), step('transition_away', 'state_b', 'state_c')],
   [edge('transition_go', 'state_a', 'state_b')],

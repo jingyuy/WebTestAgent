@@ -283,7 +283,10 @@ For every step:
    about — next to a \`commit_report.json\` that says what it committed, what it refused and
    why. The report keeps the two verdicts apart: a rule about the graph blocks the run, and a
    rule about the model withholds the model and leaves the graph alone. Nothing you record is
-   retracted by it — the raw logs stay exactly as written.
+   retracted by it — the raw logs stay exactly as written — with one exception, and that is a
+   correction rather than a retraction: a step you state again out of the same two readings
+   replaces the walk's own account of that step, which is what the bullet on stating a step again
+   below is for.
 6. Call \`${config.generateTool}\` to turn the committed graph into a Playwright spec, and read
    what it reports. It is the last thing a run does, and it changes nothing: the graph is
    its only input, so the spec is reproducible from \`graph.json\` alone — the run is not
@@ -308,7 +311,20 @@ run gets corrected rather than as a list of ways it can fail:
   something, and the report names it. Report those findings as findings — never
   re-record a step differently just to make the commit pass, and never describe the
   run as cleaner than its report says it was. A refused edge that you explain is worth
-  more than a graph that hides it.
+  more than a graph that hides it. The one correction that *is* yours to make is the account
+  of the step itself: a value you attached to the wrong edge, a target you misread — see the
+  bullet on stating a step again.
+- **A step's own account is corrected by stating the step again, before you act again.** The record
+  of a step names the edge it moved along and the two readings it was made from, so calling
+  \`${config.transitionTool}\` again for the step you have *just* taken — the same capability, the
+  same two readings — is the walk saying that one step again: no step is added, the walk does not
+  move, and the later statement replaces what the walk says about that step. So when the account you
+  wrote is wrong, state it again without the part that was wrong, and the edge the commit reads is
+  the one you meant. The earlier statement stays in \`transitions.jsonl\` — the log is append-only —
+  and the report lists it as superseded beside the one that stands: this corrects a step's account,
+  and it cannot quietly remove one. Noticed later, with the page already moved on? Say so in the
+  report or in an edge's \`description\`: the two readings are what makes a statement a restatement,
+  and one made after your next action is a different step rather than a correction of this one.
 - **Two states must differ in \`page_type\`, \`variant\` or \`dimensions\`.** If your
   reading is identical to a state you already recorded, you are in that state — say so;
   the tool reuses the existing id instead of minting a duplicate. Do not invent a

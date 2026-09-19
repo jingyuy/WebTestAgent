@@ -827,7 +827,19 @@ export function modelFromCandidates({
         if (namedInvocation.has(invocation)) continue;
         namedInvocation.add(invocation);
       }
-      steps.push(absorbed.has(step.transition) ? { ...step, transition: absorbed.get(step.transition) } : step);
+      // A step's `arguments` are the arguments of the edge the step names, because a turn is a turn of
+      // that edge and the document must not have the turn saying one thing about an edge while the
+      // edge says another. An absorbed call names the edge that carries it, so its own values are not
+      // the turn's: the values the walk supplied are on the behaviour's `realization[]` (where the
+      // generator reads them), and a call's `arguments` kept here would put a value on the turn's edge
+      // that the edge does not carry. Not hypothetical — `P5` refuses an edge carrying an argument no
+      // effect of that edge reports, and the correction the protocol offers for it removes the
+      // argument from the edge, so keeping the opening call's would leave the model still claiming it
+      // on the very edge the correction was made about.
+      const carried = absorbed.get(step.transition);
+      steps.push(carried === undefined
+        ? step
+        : prune({ transition: carried, arguments: transitionById.get(carried)?.action?.arguments }));
     }
     const startState = journey.start_state ?? steps[0]?.from_state ?? null;
     const actor = startState ? variantOfState(startState) : null;

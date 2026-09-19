@@ -560,6 +560,126 @@ CASES = [
         'new': "        .flatMap((id) => [id]),\n",
         'suite': 'test/abm.test.mjs',
     },
+
+    # --- a step stated again: the one correction a run may make ---------------
+    # The refusal sentences say what a run must not do when the commit refuses it, and the one thing
+    # it *may* do is correct a step's own account by stating that step again. That correction is a
+    # rule in three places and a sentence in a fourth, and each of the four is separately losable:
+    #   - the recorder has to recognise the statement as the same step (otherwise the correction is
+    #     a second step and the mistake it was meant to fix is still what the commit reads),
+    #   - the commit has to let the later statement stand (otherwise the correction is recorded and
+    #     then discarded in favour of the record it was correcting),
+    #   - the walk has to keep the corrected step in place (otherwise one corrected step cuts the
+    #     walk into a second strand the run never walked),
+    #   - and the model has to be told that this is the correction available to it, because the rule
+    #     the refusal bullet leaves it with is "never re-record a step differently just to make the
+    #     commit pass" — which, without the exception, is the sentence that forbids the fix.
+    # Removing any one of them leaves a tree that still passes everything else: the run records,
+    # commits, and writes a model, and what it writes is the mistake.
+    {
+        # The rule that makes a statement a restatement is the *pair of readings* the step was made
+        # from, not the edge alone: the same edge out of a different pair is a second step, and it is
+        # a step that can break the chain. Removing the whole recognition is the honest mutation —
+        # the correction is then an ordinary step, and the account the walk holds is the wrong one.
+        'rule': 'a statement repeating the walk\'s last step out of the same two readings is that step, not a new one',
+        'file': 'lib/session.js',
+        'old': "      const restated = isRestatement(previous, { id, before: before_observation, after: after_observation });\n",
+        'new': "      const restated = false && isRestatement(previous, { id, before: before_observation, after: after_observation });\n",
+        'suite': 'test/session-schema.test.mjs',
+    },
+    {
+        # The rule has two halves and the step is the *pair*: the edge it moved along and the two
+        # readings it was made from. Dropped to the edge alone, a re-walk of one edge out of a
+        # different pair of readings is folded into the step before it — a call the walk took a
+        # second time, recorded as the same step, which is a graph missing a step.
+        'rule': 'the readings are half of what identifies a step, and the edge alone is not enough',
+        'file': 'lib/session.js',
+        'old': "  if ((previous.transition_id ?? previous.id) !== id) return false;\n",
+        'new': "  if (false && (previous.transition_id ?? previous.id) !== id) return false;\n",
+        'suite': 'test/session-schema.test.mjs',
+    },
+    {
+        # And the two readings have to be *there*. `stepReadings` answers `null` for a reading a
+        # record does not have, so without this the absence of both compares equal — and every
+        # consecutive pair of records with no evidence becomes one step stated twice.
+        'rule': 'two records with no readings do not compare equal by both having none',
+        'file': 'lib/session.js',
+        'old': "  if (typeof before !== 'string' || !before) return false;\n",
+        'new': "  if (false && (typeof before !== 'string' || !before)) return false;\n",
+        'suite': 'test/session-schema.test.mjs',
+    },
+    {
+        # A turn of a journey names an edge, so its `arguments` have to be that edge's. An absorbed
+        # call is not the turn's edge: it is one of the calls the move was made of, and its values
+        # are on the behaviour's `realization[]`, which is where the generator reads them. Keeping
+        # them here puts a value on the turn's edge that the edge does not have — in the live run
+        # that found this, the value `P5` had just been refused on `transition_submit_login` came
+        # back onto that very edge through the journey, with the graph saying otherwise.
+        'rule': 'a turn of a journey carries the arguments of the edge the turn names',
+        'file': 'lib/abm.js',
+        'old': "      steps.push(carried === undefined\n        ? step\n        : prune({ transition: carried, arguments: transitionById.get(carried)?.action?.arguments }));\n",
+        'new': "      steps.push(carried === undefined ? step : { ...step, transition: carried });\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The commit reads a log it did not write: what tells it which records are one step stated
+        # again is the records themselves, not the `restatement` field the recorder leaves on them.
+        # A run recorded before the rule existed wrote the correction as an ordinary step, and a
+        # commit that trusted the field would commit that run exactly as the 0.1.29 commit did — one
+        # corrected step as two steps, a second journey strand, and the model withheld by the rule
+        # the correction was answering.
+        'rule': 'the commit derives which records are restatements from the log, not from the record field',
+        'file': 'lib/commit.js',
+        'old': "  const restated = restatementsOf(transitions);\n",
+        'new': "  const restated = transitions.map((record) => record?.restatement === true);\n",
+        'suite': 'test/restatement.test.mjs',
+    },
+    {
+        # Between two candidates for one edge the later one stands, and that is the only rule a
+        # correction can take effect through: the record the correction replaced is the record it was
+        # replacing. Reversed, the walk is recorded correcting itself and the commit keeps what it
+        # corrected — the superseded row is then the corrected one, which is the 0.1.29 defect with
+        # the sign flipped.
+        'rule': 'between two statements of one step the later one is the one the graph gets',
+        'file': 'lib/commit.js',
+        'old': "      return leftAt > rightAt ? -1 : 1;\n",
+        'new': "      return leftAt > rightAt ? 1 : -1;\n",
+        'suite': 'test/restatement.test.mjs',
+    },
+    {
+        # And the reason on the superseded row has to name the correction rather than the repeat: it
+        # is the only place the report says which of two records the walk meant, and a model that
+        # corrected a step is told, by the wrong branch, that it merely walked the edge again.
+        'rule': 'the reason on a superseded row says the step was stated again, not merely repeated',
+        'file': 'lib/commit.js',
+        'old': "        reason: winner.record.restatement === true\n",
+        'new': "        reason: false && winner.record.restatement === true\n",
+        'suite': 'test/restatement.test.mjs',
+    },
+    {
+        # A restatement is answered before the edge is looked at, because the record names the state
+        # its step *started* from and that is not where the walk stands: judged by where the walk
+        # stands it looks like a jump back to a state the walk left. So the step keeps its place in
+        # the walk it is in — and without this branch it is placed again, one step late, in a strand
+        # of its own.
+        'rule': 'a restated step keeps its place in the walk, and adds no strand',
+        'file': 'lib/commit.js',
+        'old': "    if (record.restatement === true) {\n",
+        'new': "    if (false && record.restatement === true) {\n",
+        'suite': 'test/commit.test.mjs',
+    },
+    {
+        # The sentence above the mechanics. The protocol has to say that the attempt is made *by
+        # stating the step again*, and that stating it again adds nothing, or the only instruction
+        # the model has about a refused step is the one forbidding it to fix the record. Broken here
+        # by making the bullet describe the opposite move — a new step that happens to replace the
+        # old one — which is a sentence a model would follow.
+        'rule': 'the protocol says a step is corrected by stating it again, and adds no step',
+        'file': 'lib/protocol.js',
+        'old': "  same two readings — is the walk saying that one step again: no step is added, the walk does not\n  move, and the later statement replaces what the walk says about that step.",
+        'new': "  same two readings — is the walk saying that one step again: the step is added like any other,\n  and the later statement replaces what the walk says about that step.",
+        'suite': 'test/protocol.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

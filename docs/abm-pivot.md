@@ -899,7 +899,8 @@ neither of which existed before: `test/protocol.test.mjs`, an offline suite that
 `test/protocol-coverage.mjs` (`npm run profile:protocol`), the log-level acceptance as a harness.
 `npm test` is **13 suites** after the rewrite, and **14** after the deploy that followed it added
 `test/package.test.mjs` — a suite for a rule about the *package* rather than the code, because the
-first defect that a deployed 0.1.24 had and no suite in the tree could see was a `files` entry.
+first defect that a deployed 0.1.24 had and no suite in the tree could see was a `files` entry. It is
+**15** now, after 0.1.34 added `test/restatement.test.mjs`.
 
 What the rewrite did, in the phase's own terms:
 
@@ -1075,7 +1076,8 @@ What the two artifacts hold down, and why the measure is where it is:
   is a machine instruction that cannot be acted on, which is a defect by the same argument as the
   seventh and the tenth. But its fix is a question about commit semantics — does a re-recorded edge
   replace its arguments or union them? — rather than a sentence, and guessing at commit semantics
-  under a deadline is how the seventh defect happened. It is written down and left open.
+  under a deadline is how the seventh defect happened. It is written down and left open — and it was
+  answered in **0.1.34** by the run that raised it; see the bullet at the end of this section.
 - **A sixth defect came from the same live run, and it is a deploy-only class of its own.** The
   sentence that tells a person what to export before the spec will run read *"Set [object Object]
   before running it"*: `requires` holds records (`{env, element, purpose, reason}` — the reason is
@@ -1106,8 +1108,32 @@ What the two artifacts hold down, and why the measure is where it is:
   argument added to a recording tool, and — the case that matters most after a rewrite — **the old
   composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
   **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
-  is not the rule, and counting it would let a badly written case look like a proof); all **50 cases
-  are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 14/14.
+  is not the rule, and counting it would let a badly written case look like a proof); all **59 cases
+  are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 15/15. (The nine are this
+  phase's; Phase 4 added the adapter's rules, and 0.1.34 added the restatement rule, the commit's
+  derivation of it from the log, and the collapse's argument provenance.)
+- **The open question is answered (0.1.34), and the answer is that a step is a pair.** *Does a
+  re-recorded edge replace its arguments or union them?* Neither, because the question assumed the
+  re-record is an edge: a step is identified by the edge it moved along **and the two readings it was
+  made from**, so a second statement of the same step out of the same readings is the walk saying one
+  step again — no step is added, the walk does not move, and the later statement replaces what the
+  walk says about that step. Re-recording is not a retraction verb the walk may use whenever it likes
+  either: a statement made after the next action is a different step, because the readings are what
+  identify it. The earlier statement stays in `transitions.jsonl` (append-only), the report lists it
+  as `superseded` with a reason that says *stated again*, and the corrected edge carries no
+  `arguments` — the value the walk typed was never lost, because it was recorded on the call that
+  typed it and on that call's `realization`, not smuggled onto the edge that was wrong.
+  **The fix is proved on the run that found the defect, which is the part worth keeping.** 0.1.29's
+  own `graph-run` replayed through the new commit takes the correction: three committed edges,
+  `superseded: 1` with the restatement reason, one journey, no breaks, no errors, and
+  `application-model.json` written. That replay is also what found the real bug in the first fix: the
+  recorder knew the rule and the commit did not, because the commit's reader is stateless and the log
+  was written before the rule existed — **a written field is a note, not evidence**. The rule now
+  lives in one exported function that both readers ask, and the commit derives which records are
+  restatements from the records themselves. Reading the replayed model rather than its report found
+  one more: the corrected edge had no `arguments` while the journey step naming it still did, because
+  the projection remapped an absorbed call onto the invocation's edge and kept the *call's* values on
+  the *turn*. A turn's `arguments` are now the arguments of the edge the turn names.
 
 ### Phase 4 — the model generates the test (D10) — **DONE**
 
@@ -1272,21 +1298,26 @@ and lowers `confidence`, which is what the schema's `effect.observed` already me
 
 Each of these is load-bearing, not ceremony:
 
-1. `npm test` — currently **14** suites (0a/0b added `test/abm.test.mjs`, Phase 1 added
+1. `npm test` — currently **15** suites (0a/0b added `test/abm.test.mjs`, Phase 1 added
    `test/realization.test.mjs`, Phase 2 added `test/abm-commit.test.mjs`, Phase 3 added
-   `test/protocol.test.mjs`, and the first deploy after it added `test/package.test.mjs`); every
-   phase adds a suite
+   `test/protocol.test.mjs`, the first deploy after it added `test/package.test.mjs`, and 0.1.34
+   added `test/restatement.test.mjs`); every phase adds a suite
    or a case, never only a claim.
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (50 mutations, all 50 refused; 17 through Phase 2, 9
-   more for Phase 3, and 24 for the defects the deploy and the live runs found — four from the two
+   `test/prove-abm.py` is the running instance (59 mutations, all 59 refused; 17 through Phase 2, 9
+   more for Phase 3, and 33 for the defects the deploy and the live runs found — four from the two
    early deploys, three from the recorder defect, one from the instruction sentence, five from the
    value template the walk was never told how to declare, three from the arguments placement the
    walk was never told the rule of, one from the two readings of one log, two from the turn of a
    journey that was counted per call rather than per invocation, and five from the model read back
-   into the shape the generator reads); break the *rule*, not a clause the code already treats as
+   into the shape the generator reads, plus the nine 0.1.34 added for the answer to the open
+   question — the recorder's recognition of a restatement, the readings being half of what identifies
+   a step, two records with no readings not comparing equal, the three commit rules that read that
+   recognition (ranking, the superseded reason, the restatement's place in the walk), the commit
+   deriving it from the log rather than the field, the protocol sentence, and the turn's arguments
+   being the turn's edge's); break the *rule*, not a clause the code already treats as
    equivalent (removing `cutParameter &&` proved nothing — behaviourally identical).
    **The template has grown with the instance and now has a total of its own**: 16 generate cases
    (9 from the generator's first suite, 4 from Phase 4, and 3 for the 0.1.32 live run's references —

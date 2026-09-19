@@ -239,6 +239,23 @@ const SURVIVING = [
 ];
 for (const sentence of SURVIVING) has(`refusal survives: ${JSON.stringify(sentence.slice(0, 46))}`, text, sentence);
 
+// --- the one correction a run is allowed to make ---------------------------
+// The exception to that fifth step is a correction, and it is only usable if the model is told how
+// to make it. The machinery can hold the rule (a restatement is one step, stated again, and it
+// replaces the walk's account of that step) and the model still needs the *instruction*, in the
+// section it reads, or the run's honest response to a refusal is the one thing it was told never to
+// do: re-record the step to make the commit pass. Both halves are asserted, because the sentence
+// without the mechanics is advice and the mechanics without the sentence are unreachable.
+has('a step is corrected by stating it again', text, '**A step\'s own account is corrected by stating the step again, before you act again.**');
+has('and stating it again adds no step', text, 'no step is added, the walk does not move');
+has('and the earlier statement stays in the log', text, 'The earlier statement stays in `transitions.jsonl` — the log is append-only');
+has('and the report counts it as superseded', text, 'the report lists it as superseded beside the one that stands');
+has('and the timing is stated, because the readings are what identifies the step',
+  text, 'one made after your next action is a different step rather than a correction of this one');
+has('and the bullet on correcting a step comes after the bullet that refuses',
+  order('the correction is offered with the refusal, not before it', text,
+    '**Let the commit refuse.**', '**A step\'s own account is corrected by stating the step again'));
+
 // --- the seam: an argument cannot be declared and never mentioned ----------
 // The protocol is the loop, and the tools declare what the loop is allowed to say. A new argument
 // that the loop never names is an argument the model will not use; this is the check that makes

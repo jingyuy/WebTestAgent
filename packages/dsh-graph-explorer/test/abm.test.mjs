@@ -620,6 +620,15 @@ console.log('\n# one move is one turn of the walk');
   check('and the calls it was made of are the behaviour\'s own steps, where a reader can check them',
     model.behaviors.find((entry) => entry.id === 'behavior_login').realization.map((step) => [step.action, step.element]),
     [['fill', 'element_email_input'], ['fill', 'element_password_input'], ['click', 'element_login_button']]);
+  // A turn's `arguments` are the arguments of the edge the turn names. The call that opened the
+  // invocation is not the turn's edge — `transition_fill_login_email` is an edge this document does
+  // not have, and the value it was walked with is on the realisation above, which is where the
+  // generator reads it. Copying the opening call's argument onto the turn put a value on
+  // `transition_submit_login` that the edge does not carry, and the live run that found this had
+  // exactly that: the corrected edge carrying no `email` while the turn naming it still did.
+  check('and the turn carries the arguments of the edge it names, not of the call that opened it',
+    model.journeys[0].steps.map((step) => [step.transition, step.arguments ?? null]),
+    [['transition_submit_login', null]]);
 }
 {
   // The other direction, because a rule that only ever collapses is a rule that would merge two

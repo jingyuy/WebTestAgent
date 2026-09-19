@@ -1,7 +1,7 @@
 import { readFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRun } from '../lib/session.js';
+import { createRun, restatementsOf } from '../lib/session.js';
 import { normalizeApplication, normalizeActors, vocabularyNotes, EFFECT_REQUIRED, CAPABILITY_NAME_PATTERN } from '../lib/schema.js';
 
 let fails = 0;
@@ -50,6 +50,13 @@ check('no chain break on a contiguous walk', t2.chain_break, null);
 const t3 = run.recordTransition({ from_state: 'state_home_anonymous', to_state: 'state_login', capability_id: 'cap_login', capability_name: 'login', before_observation: 'obs_0001', after_observation: 'obs_0002', observed_change: {} });
 check('walking an edge again reuses its id', [t3.id, t3.minted], ['transition_login', false]);
 check('re-walk still counts as a step', [run.walkLength(), run.transitionCount()], [3, 2]);
+// And it is a step rather than a restatement, on both halves of the rule: the edge is one this walk
+// has already taken, but it was taken out of a *different* pair of readings (this one starts from
+// obs_0001, the step before it ended at obs_0003) — so it is a second step, and it is a step that
+// does not start where the walk ended, which is a chain break the run is told about rather than a
+// correction quietly folded into the step before it.
+check('a re-walk out of a different pair of readings is a step, and a break',
+  [t3.restatement, t3.chain_break && t3.chain_break.from_state], [false, 'state_home_anonymous']);
 check('lastTransition is the newest step', run.lastTransition().from_state, 'state_home_anonymous');
 
 // The walk now ends at state_login, so starting from home_authenticated breaks it.
@@ -74,6 +81,45 @@ check('evidence roles say what each observation is evidence for', trans[0].evide
 check('observed_change kept beside claimed effects', trans[3].observed_change, null);
 check('chain_break is written to the log, not just returned', [trans[3].chain_break && trans[3].chain_break.previous_transition, trans[4].chain_break], ['transition_login', null]);
 check('claimed effects default to empty', trans[0].effects, []);
+
+// --- a step stated again is the same step, not a second one -----------------
+// A record named by the edge it moves along and the two readings it was made from is a statement
+// about one step, and the step *is* that pair: the same edge out of the same two readings is the
+// walk saying one step again, which is the only way a run can correct its own account of a step.
+// It is not a second step — a walk cannot be in the same place twice without moving — so it takes
+// the place of the record it restates, and it cannot break the chain it is standing on. Note that
+// the break would otherwise be certain rather than possible: a restatement names the state its
+// step *started* from, which is never where the walk stands, since the step it restates is the one
+// that moved it. That is what turned one corrected step into a second one-step journey.
+const before = run.walkLength();
+const restated = run.recordTransition({
+  from_state: 'state_login', to_state: 'state_home_auth_anonymous', capability_id: 'cap_login',
+  capability_name: 'login', before_observation: 'obs_0002', after_observation: 'obs_0001',
+  description: 'the step again, without the claim that was wrong',
+});
+const restatedLog = lines('transitions.jsonl');
+check('a step stated again reuses its edge',
+  [restated.id, restated.minted, restated.restatement], ['transition_login_home_auth_anonymous', false, true]);
+check('and moves the walk nowhere', run.walkLength(), before);
+check('and cannot break the chain it is standing on', restated.chain_break, null);
+check('the account the walk holds is the one just recorded',
+  [run.lastTransition().description, run.lastTransition().restatement],
+  ['the step again, without the claim that was wrong', true]);
+check('and the statement it replaced is still in the log, which is append-only',
+  [restatedLog.length, restatedLog[4].description, restatedLog[4].restatement, restatedLog[5].restatement],
+  [6, null, false, true]);
+check('every other record says it is not a restatement',
+  restatedLog.map((record) => record.restatement), [false, false, false, false, false, true]);
+
+// The edge is half of what identifies the step and the readings are the other half. A *different*
+// edge out of the same two readings is a step of its own: the walk is claiming a call it did not
+// move for, which is a claim the graph has to be able to refuse. Only the pair makes a restatement.
+const second = run.recordTransition({
+  from_state: 'state_login', to_state: 'state_home_anonymous', capability_id: 'cap_add_product_to_cart',
+  capability_name: 'add_product_to_cart', before_observation: 'obs_0002', after_observation: 'obs_0001',
+});
+check('a different edge out of the same readings is a step, not a restatement',
+  [second.minted, second.restatement, run.walkLength()], [true, false, before + 1]);
 
 // --- a composition that arrives after the name ---------------------------
 // The store is append-only, so a later claim about a capability is a second record naming the
@@ -194,6 +240,42 @@ check('the declared application reaches run.json',
   { id: 'app_acme', name: 'Acme', actors: [{ id: 'anonymous' }, { id: 'authenticated', credentials_ref: 'TEST_USER' }] });
 check('an undeclared application is written as null, so the commit can refuse',
   JSON.parse(readFileSync(join(run.dir, 'run.json'), 'utf8')).application, null);
+
+// --- the rule, asked of records the store did not write ---------------------
+// The store asks `isRestatement` as it records, and the commit asks it of a log, so the rule is asked
+// here on records of the shape a log has rather than through a store that already knows the answer.
+// Two ways of getting it wrong are pinned, because both were: comparing by the *edge* alone (a
+// re-walk of one edge would be folded into the step before it) and comparing two records that have no
+// readings at all (both answer `null`, and `null === null` is exactly how a step with no evidence
+// would come to mean "one step stated twice").
+const statement = (id, before, after) => ({
+  kind: 'transition',
+  id,
+  transition_id: id,
+  evidence: before
+    ? [{ observation: before, role: 'identity' }, { observation: after, role: 'action' }]
+    : [],
+});
+check('a log\'s first record has nothing to be a restatement of',
+  restatementsOf([statement('transition_login', 'obs_0001', 'obs_0002')]), [false]);
+check('one edge out of one pair of readings is the step before it, stated again',
+  restatementsOf([statement('transition_login', 'obs_0001', 'obs_0002'), statement('transition_login', 'obs_0001', 'obs_0002')]),
+  [false, true]);
+check('and the same edge out of a different pair of readings is a step of its own',
+  restatementsOf([statement('transition_login', 'obs_0001', 'obs_0002'), statement('transition_login', 'obs_0002', 'obs_0003')]),
+  [false, false]);
+check('and a different edge out of the same pair is a step of its own',
+  restatementsOf([statement('transition_login', 'obs_0001', 'obs_0002'), statement('transition_submit', 'obs_0001', 'obs_0002')]),
+  [false, false]);
+check('and two records with no readings do not compare equal by both having none',
+  restatementsOf([statement('transition_login'), statement('transition_login')]), [false, false]);
+check('and a restatement does not become the step the next record is measured against',
+  restatementsOf([
+    statement('transition_login', 'obs_0001', 'obs_0002'),
+    statement('transition_login', 'obs_0001', 'obs_0002'),
+    statement('transition_login', 'obs_0001', 'obs_0002'),
+  ]),
+  [false, true, true]);
 
 console.log(fails ? `\n${fails} FAILED` : '\nALL PASSED');
 process.exit(fails ? 1 : 0);
