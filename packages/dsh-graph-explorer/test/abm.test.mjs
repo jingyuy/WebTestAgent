@@ -449,6 +449,27 @@ console.log('\n# P5 parameters bind, concrete values were observed');
   ok('a value the model typed and the run never read back is refused',
     withRule(profileFindings(model, {}), 'P5').some((finding) => finding.code === 'unobserved_argument'));
 }
+// The third reader of the shared `{{param}}` rule, and the one that had no test under it until the
+// mutation was tried: the recorder and the generator were each pinned to `templateParameter` from
+// their own side, the projection reads it through `isPlaceholder`, and a mutation that made that
+// reader answer "no string is a template" left all fifteen suites green. It is the same rule the
+// first block above exercises from the *realisation* side, and that is exactly why the gap survived
+// a reading of the file: the rule looked tested. It was tested twice, and read three times.
+//
+// The edge an argument sits on cannot declare an input — `input` is the behaviour's, and the walk
+// writes the argument in a tool call — so the projection is the only caller in a position to say
+// what a template on an edge *means*: a reference to a parameter, which is not a value the run was
+// obliged to read back. A live 0.1.32 walk wrote `fill("{{password}}")` and had it refused.
+{
+  const { model } = projected();
+  model.transitions[0].arguments.email = '{{email}}';
+  check('a parameter written onto an edge is a reference, not a value the run failed to read back',
+    withRule(profileFindings(model, {}), 'P5').length, 0);
+  model.transitions[0].arguments.email = 'user-{{email}}@example.com';
+  ok('but a value that merely contains a template is not a reference: only the whole value is one',
+    withRule(profileFindings(model, {}), 'P5').some((finding) => finding.code === 'unobserved_argument'),
+    JSON.stringify(withRule(profileFindings(model, {}), 'P5')));
+}
 // The rescue P5 depends on, and it had no test until the protocol started telling the walk to rely
 // on it. A live 0.1.28 walk wrote a template and declared no input; the section had never said that
 // writing one obliges you to declare it, and the machinery's own answer — a behaviour's input is

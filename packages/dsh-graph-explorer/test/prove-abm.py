@@ -680,6 +680,29 @@ CASES = [
         'new': "  same two readings — is the walk saying that one step again: the step is added like any other,\n  and the later statement replaces what the walk says about that step.",
         'suite': 'test/protocol.test.mjs',
     },
+    {
+        # The third reader of the shared `{{param}}` rule. The recorder and the generator each have
+        # their own case above and each is pinned from its own side; the projection reads the same
+        # rule through `isPlaceholder`, and this mutation — "no string is a template" — left all
+        # fifteen suites green. The rule was read in three places and tested in two, which is the
+        # shape of gap a shared rule invites: it looks tested from either end.
+        'rule': 'the projection reads a whole template on an edge as a reference, not as a typed value',
+        'file': 'lib/abm.js',
+        'old': "const isPlaceholder = (value) => templateParameter(value) !== null;\n",
+        'new': "const isPlaceholder = (value) => false;\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # And the boundary of that reader, which the schema states in as many words: *the whole
+        # value, not a substring*. A reader that asks whether the braces appear anywhere turns a
+        # typed value into a reference, and the value it was holding to the observed-value rule
+        # stops being held to anything.
+        'rule': 'a value that merely contains a template is not a reference',
+        'file': 'lib/abm.js',
+        'old': "const isPlaceholder = (value) => templateParameter(value) !== null;\n",
+        'new': "const isPlaceholder = (value) => typeof value === 'string' && value.includes('{{');\n",
+        'suite': 'test/abm.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

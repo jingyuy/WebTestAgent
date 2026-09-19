@@ -1108,7 +1108,7 @@ What the two artifacts hold down, and why the measure is where it is:
   argument added to a recording tool, and — the case that matters most after a rewrite — **the old
   composite clause put back**, which must fail. The harness now distinguishes *BROKEN* from
   **SURVIVED** from **INVALID** (a case whose edit does not parse fails every suite for a reason that
-  is not the rule, and counting it would let a badly written case look like a proof); all **59 cases
+  is not the rule, and counting it would let a badly written case look like a proof); all **61 cases
   are caught, 0 survived, 0 invalid, 0 skipped**, and the tree restores to 15/15. (The nine are this
   phase's; Phase 4 added the adapter's rules, and 0.1.34 added the restatement rule, the commit's
   derivation of it from the log, and the collapse's argument provenance.)
@@ -1134,6 +1134,42 @@ What the two artifacts hold down, and why the measure is where it is:
   one more: the corrected edge had no `arguments` while the journey step naming it still did, because
   the projection remapped an absorbed call onto the invocation's edge and kept the *call's* values on
   the *turn*. A turn's `arguments` are now the arguments of the edge the turn names.
+- **A fresh live walk under 0.1.34 was made, and the honest reading of it is that it does not exercise
+  the fixed path.** `~/tmp/live-034` is 0.1.29's task, run against the deployed 0.1.34:
+  `{candidates: 3, distinct: 3, committed: 3, rejected: 0, superseded: 0}`, `ok: true`, no gates, one
+  journey assembled and three steps walked with **0 breaks**, eight `info` findings and no rule finding
+  at all, both documents written and schema-valid, one behaviour with three realisations, one edge and
+  one journey turn. Three records, three `restatement: false`. **Nothing was stated again, so the run
+  cannot be offered as evidence that the restatement path works live** — a live run is evidence of a
+  positive, never of a negative. What it does evidence is the rule that made a correction unnecessary:
+  every value landed on the call that typed it (`email` on the email fill's own edge, `[set]` on the
+  password fill's, nothing on the submit edge), where 0.1.29 put an `email` on `transition_submit_login`
+  and needed a second statement to take it off. Whether a live correction occurs is a property of the
+  *task*: the demo app's success path clears the password field, so a pre-submit re-observe differs
+  from its own reading and nothing forces a restatement — the branch that forces one is the refusal
+  (wrong password, *Invalid email or password.*, correction, submit). Recorded as a limitation rather
+  than counted as a pass.
+- **The fix was then proved against the artifact that ships it rather than the working tree.** The
+  0.1.29 log, untouched, re-committed through `~/.dsh/profiles/graph/node_modules/@webtestagent/
+  dsh-graph-explorer` (`version: 0.1.34`): four records become three committed edges with
+  `superseded: 1`, the reason says the step was *stated again*, the journey walks three steps with
+  **0 breaks**, and **P5 reports nothing**. The residue is named rather than waved at: the literal
+  survives at the goal prose, the observation metadata, a state description, the reading an effect
+  points at and `transition_fill_login_email.action.arguments.email` (that call's own value), while the
+  retracted `transition_submit_login.arguments.email` is in neither document. A replay that dropped the
+  value everywhere would look stronger and prove less.
+- **And the prover was read against the source, which found the one rule with no case under it.** The
+  `{{param}}` rule is one function read in three places (the recorder's diff, the generator's value
+  handling, the projection's `isPlaceholder`); two had a mutation under them and
+  `const isPlaceholder = (value) => false;` left **15/15 suites green**. A rule read in three places
+  and tested in two looks tested from either end — the *realisation* fixture proves the projection asks
+  the rule, not that it asks it where an edge's `arguments` are judged. Two cases now hold it: a whole
+  template on an edge is a reference, and a value that merely *contains* one is still a value the run
+  must have observed. **A shared rule needs a case under each reader, and "the rule is tested" is a
+  statement about readers, not about rules.** The two cases are a change to `test/` rather than to
+  `lib/`, and they still move the version to **0.1.35**: a redeploy of the same `0.1.34` was accepted
+  as *already installed* and left the profile holding the old file, which is a version number doing
+  its job — one version, one set of bytes. The runtime bytes are unchanged; the proof is not.
 
 ### Phase 4 — the model generates the test (D10) — **DONE**
 
@@ -1306,18 +1342,21 @@ Each of these is load-bearing, not ceremony:
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (59 mutations, all 59 refused; 17 through Phase 2, 9
-   more for Phase 3, and 33 for the defects the deploy and the live runs found — four from the two
+   `test/prove-abm.py` is the running instance (61 mutations, all 61 refused; 17 through Phase 2, 9
+   more for Phase 3, and 35 for the defects the deploy and the live runs found — four from the two
    early deploys, three from the recorder defect, one from the instruction sentence, five from the
    value template the walk was never told how to declare, three from the arguments placement the
    walk was never told the rule of, one from the two readings of one log, two from the turn of a
-   journey that was counted per call rather than per invocation, and five from the model read back
-   into the shape the generator reads, plus the nine 0.1.34 added for the answer to the open
+   journey that was counted per call rather than per invocation, five from the model read back
+   into the shape the generator reads, nine that 0.1.34 added for the answer to the open
    question — the recorder's recognition of a restatement, the readings being half of what identifies
    a step, two records with no readings not comparing equal, the three commit rules that read that
    recognition (ranking, the superseded reason, the restatement's place in the walk), the commit
    deriving it from the log rather than the field, the protocol sentence, and the turn's arguments
-   being the turn's edge's); break the *rule*, not a clause the code already treats as
+   being the turn's edge's — and the two that a review found by reading the prover against the
+   source rather than by running anything: the projection's own reading of the shared `{{param}}`
+   rule, and the boundary that says only a whole value is a reference, each of which the two proved
+   readers had made look proved); break the *rule*, not a clause the code already treats as
    equivalent (removing `cutParameter &&` proved nothing — behaviourally identical).
    **The template has grown with the instance and now has a total of its own**: 16 generate cases
    (9 from the generator's first suite, 4 from Phase 4, and 3 for the 0.1.32 live run's references —

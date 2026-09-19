@@ -1706,8 +1706,38 @@ turn's `arguments` are now the turn's edge's arguments, and nothing is lost with
 the call's own edge, where the walk recorded it, and the model's `realization[]` still carries the
 parameter a spec is generated from.
 
+**A fresh live walk under 0.1.34 was made, and the honest reading of it is that it does not exercise
+the fixed path.** `~/tmp/live-034` is 0.1.29's own task, run against the *deployed* 0.1.34: `ok: true`,
+no gates, `candidates: 3, distinct: 3, committed: 3, rejected: 0`, **`superseded: 0`**, one journey
+assembled and three steps walked with no breaks, eight `info` findings and not one rule finding, both
+documents written and schema-valid, one behaviour with three realisations, one edge and one journey
+turn — and a spec generated from it. But `transitions.jsonl` holds three records, three is all there
+are, and all three carry `restatement: false`: **the walk never stated a step again, so this run cannot
+be offered as evidence that the restatement path works live.** A live run is evidence of a positive,
+never of a negative, and the earlier form of this same honesty is the 0.1.19 note — *the live walk
+never repeated an edge.* What the run does show is the rule that made a correction unnecessary: each
+value landed on the call that typed it, `email` on the email fill's own edge, `[set]` on the password
+fill's, nothing at all on the submit edge — where 0.1.29 put an `email` on the submit edge and needed a
+second statement to take it off. Whether a *live* correction happens is a property of the task rather
+than of the rule: the demo app's success path clears the password field, so a pre-submit re-observe
+differs from its own reading and nothing forces a restatement; what forces one is the refusal — sign in
+with a wrong password, read *Invalid email or password.*, correct it, submit again. Recorded as such
+rather than chased.
+
+**The fix was then read by the artifact that ships it, not by the working tree.** The 0.1.29 log,
+untouched and written by a version that knew nothing of the rule, was re-committed through the package
+installed in a profile — `~/.dsh/profiles/graph/node_modules/@webtestagent/dsh-graph-explorer`, whose
+`version` is `0.1.34`: four records become three committed edges with `superseded: 1`, the reason reads
+*"the walk stated this step again out of the same two readings; one step has one account, and the later
+one is the walk's"*, the journey has three walked steps and **0 breaks**, and P5 reports **nothing**.
+The residue was then named exactly rather than waved at: `test@example.com` does survive in the model —
+in the goal prose, the observation metadata, a state description, the reading an effect points at and
+`transition_fill_login_email.action.arguments.email`, which is *that call's own value* — while the
+retracted claim, `transition_submit_login.arguments.email`, is in neither document. A replay that had
+dropped the value everywhere would look like a stronger proof and would be a weaker one.
+
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 59 mutations, all 59 refused, the tree
+the failure. `test/prove-abm.py` is that file for this work — 61 mutations, all 61 refused, the tree
 restored byte-identically and `15/15 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.
@@ -1719,6 +1749,21 @@ time it was run, because the test marked one call of the move and the rule is ab
 the dedupe was never exercised. The test now gives all three calls the same `collapsed` record,
 which is what the adapter actually hands over, and the mutation is refused. A mutation that survives
 is not a mutation to delete; it is a test that was not testing what it said.
+
+**The prover was then read against the source, which found the one rule that had no case under it.**
+`{{param}}` is read in three places — the recorder's diff, the generator's value handling and the
+projection's `isPlaceholder` — and two of the three had a mutation under them. The third did not:
+`const isPlaceholder = (value) => false;` left **all fifteen suites green**. A rule read in three
+places and tested in two looks tested from either end, and that is the gap a shared rule invites: the
+fixture that exercises it through a *realisation* proves the projection reads the rule, not that it
+reads it where an edge's `arguments` are judged. Two cases now hold it down — a whole template on an
+edge is a reference rather than a value the run failed to read back, and a value that merely *contains*
+a template is not a reference at all — bringing `test/prove-abm.py` to 61 cases, all 61 refused. **That
+is a change to `test/` and not to `lib/`, and it still moves the version to 0.1.35**, because a
+version number that names two different byte sets is a version number that cannot be checked: the
+first attempt to redeploy the new tests under `0.1.34` was accepted as "already installed" and left the
+profile holding the old file, which is the mechanism working as designed. The deployed runtime bytes
+are unchanged by this release; the proof harness is not, and both are in the tarball.
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
 objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, record
