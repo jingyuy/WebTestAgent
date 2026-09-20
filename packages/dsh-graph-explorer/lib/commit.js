@@ -462,7 +462,41 @@ export function normalizeAssertion(entry, ctx) {
     return { dropped: 'element_assertion_has_nothing_to_check' };
   }
 
-  // Everything else (`value`, `message`, `api`, `effect`, `custom`) is a semantic path or
+  if (type === 'value') {
+    // A `value` assertion is where a walk records a *dimension*: `target` is the semantic path
+    // the state's identity declares apart from its sibling, and `element` is the surface a
+    // browser reads it on. The schema's assertion permits both, and the surface is the half
+    // that makes the check runnable — a value assertion naming a dimension and no element is a
+    // claim nothing can evaluate, which is what the ABM refuses to call a detection (P7).
+    //
+    // So an `element` that resolves is carried, and one that resolves to nothing is refused
+    // rather than written as a check whose only content is a word. The purpose is the form the
+    // walk writes (it is the element's identity); an id the commit itself minted is accepted
+    // too, because an imported graph names elements by id and re-committing one would otherwise
+    // strip the surface off a claim that already had it.
+    if (entry.element !== undefined) {
+      const raw = purposeOf(entry.element);
+      const element = raw === null ? null
+        : ctx.elementIdByPurpose.get(raw) ?? (ctx.elementIds?.has(raw) ? raw : null);
+      if (!element) {
+        return {
+          dropped: 'element_reference_does_not_resolve',
+          detail: `no committed state declares an element with semantic_purpose ${JSON.stringify(raw ?? null)}`,
+        };
+      }
+      assertion.element = element;
+    }
+    if (entry.target !== undefined) assertion.target = entry.target;
+    if (value !== undefined) {
+      assertion.operator = OPERATORS.has(entry.operator) ? entry.operator : 'equals';
+      assertion.expected = value;
+    } else if (OPERATORS.has(entry.operator)) {
+      assertion.operator = entry.operator;
+    }
+    return { assertion };
+  }
+
+  // Everything else (`message`, `api`, `effect`, `custom`) is a semantic path or
   // free text, which the schema allows as `target`. Carried as written.
   if (entry.target !== undefined) assertion.target = entry.target;
   if (value !== undefined) {
@@ -1372,14 +1406,27 @@ export function assembleJourneys({ transitions = [], edges = [], stateIds = new 
 
     // Evidence is observations and only observations: `common.schema.json#/$defs/evidenceRef`
     // points at a raw reading and at nothing else. So a journey's evidence is the readings its
-    // steps were made from, deduplicated by reading and role.
+    // steps were made from — kept per step rather than deduplicated across the whole walk. Every
+    // step carries the same three notes ("the surface as it stood when the action was taken", and
+    // so on), so a union of them is a list in which the reader can see that nine readings are
+    // involved and cannot see which step any of them documents; §P1's "inference traceable" is
+    // precisely that, a reference a reader can follow from the journey to the step it belongs to.
+    // Two steps made from the same reading therefore produce two references to it: one reading,
+    // two steps it is evidence for, which is the truth rather than a duplicate to collapse. The key
+    // is the reference's whole content and not just the reading and the role it was read in, for
+    // the reason the edges key the same way: one reading can be evidence for two different claims —
+    // the surface that was left behind *and* the storage that was written — and those are two
+    // references, which a key of `observation:role` would silently reduce to one.
     const evidence = new Map();
-    for (const step of strand.steps) {
-      for (const ref of byId.get(step.id)?.evidence ?? []) {
-        const key = `${ref.observation}:${ref.role}`;
-        if (!evidence.has(key)) evidence.set(key, ref);
+    strand.steps.forEach((step, stepIndex) => {
+      const edge = byId.get(step.id);
+      for (const ref of edge?.evidence ?? []) {
+        const key = `${step.id}:${ref.observation}:${ref.role}:${ref.note ?? ''}`;
+        if (evidence.has(key)) continue;
+        const attribution = `read for step ${stepIndex + 1} of this journey (${step.id}${edge?.action?.capability ? `, ${edge.action.capability}` : ''})`;
+        evidence.set(key, { ...ref, note: ref.note ? `${ref.note} — ${attribution}` : attribution });
       }
-    }
+    });
 
     const stated = Boolean(goalText);
     // The name is derived from the goal rather than being the goal: `goal` is the run's sentence and
@@ -1504,11 +1551,22 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   // graph can say how often a state was confirmed, and by which readings.
   const observationsByState = new Map();
   const sightingsByState = new Map();
+  // The record a reading was written in, so the reference can say what the reading was *for*
+  // rather than only which reading it was (§P1: "preconditions / realization / outcome /
+  // persistence" are four different things to be told apart, and a bare observation id tells none
+  // of them). `addState` writes one record per reading — `kind: "state"` for the reading that
+  // minted the id, `kind: "sighting"` for a later reading of the same surface — and the record
+  // already carries the store's own word for which one it is in `evidence`
+  // (`session.js:528`: `'first_observation'` / `'repeat_observation'`). The note below is written
+  // out of those two fields, never out of this commit's opinion, so a reader can check every state
+  // reference against `states.jsonl` and find the log disagreeing with the document if it ever does.
+  const readingRecordByObservation = new Map();
   for (const record of [...canonicalStates, ...sightings]) {
     if (!record.state_id || !record.observation_id) continue;
     const list = observationsByState.get(record.state_id) ?? [];
     if (!list.includes(record.observation_id)) list.push(record.observation_id);
     observationsByState.set(record.state_id, list);
+    readingRecordByObservation.set(record.observation_id, record);
     if (record.kind !== 'state') {
       const repeats = sightingsByState.get(record.state_id) ?? [];
       repeats.push(record);
@@ -2046,6 +2104,13 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     // construction: keep the refs that name a reading this run actually has, in a role the schema
     // knows. A ref to a reading that is not in the log is reported rather than carried, because a
     // pointer into nothing is worse than no pointer.
+    //
+    // The key a reference is deduped by is the whole reference and not just `observation:role`: one
+    // reading can be evidence for two different claims — the live 0b run's last reading is where the
+    // step's effect was seen *and* where the application's memory was read — and a key that stopped
+    // at the role would keep the first claim and silently drop the second. Two references that say
+    // the same thing about the same reading are still collapsed; two that say different things are
+    // two claims and both survive.
     const edgeEvidence = [];
     const seenEvidence = new Set();
     const candidateEvidence = Array.isArray(winner.record.evidence) ? winner.record.evidence : [];
@@ -2063,13 +2128,14 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         continue;
       }
       const role = typeof ref === 'object' && EVIDENCE_ROLES.has(ref.role) ? ref.role : 'unknown';
-      const key = `${observationId}:${role}`;
+      const note = typeof ref?.note === 'string' && ref.note ? ref.note : '';
+      const key = `${observationId}:${role}:${note}`;
       if (seenEvidence.has(key)) continue;
       seenEvidence.add(key);
       edgeEvidence.push({
         observation: observationId,
         role,
-        ...(typeof ref?.note === 'string' && ref.note ? { note: ref.note } : {}),
+        ...(note ? { note } : {}),
       });
     }
     // `before_observation` / `after_observation` are the other way the recorder has named an
@@ -2077,11 +2143,12 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     for (const [field, role] of [['before_observation', 'identity'], ['after_observation', 'action']]) {
       const observationId = winner.record[field];
       if (!observationId || !observationsById.has(observationId)) continue;
-      const key = `${observationId}:${role}`;
+      const key = `${observationId}:${role}:`;
       if (seenEvidence.has(key)) continue;
       seenEvidence.add(key);
       edgeEvidence.push({ observation: observationId, role });
     }
+
 
     // What this step actually called. Two things can say: the model may name endpoints (the
     // `apis` argument of `graph_transition`), and the reading taken after the step shows the
@@ -2121,6 +2188,46 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     }
     const stepApis = distinct([...declaredApis, ...observedForStep]);
 
+    // The fourth thing a reading can be evidence for, and the one neither schema's role vocabulary
+    // has a word for: persistence. A `storage_changed` effect is a claim about what the application
+    // *remembers*, and the surface a step produced is not its evidence — the reading's captured
+    // storage is, because `capture.js` samples the keys on every reading. So the reference is built
+    // from the readings the machinery itself compared, and only for the keys those readings
+    // actually disagree about: `observed_change.storage` is the machinery's own account,
+    // `capture.storage` on the named reading is what a reader can check it against, and the two
+    // have to agree before this commit says a word about either.
+    //
+    // Keys, never values, and deliberately: a storage sample holds whatever the application put
+    // there — the live 0b run's key held the address the walk signed in with — so the reference
+    // names the key that makes the claim checkable and never repeats the value, which stays in the
+    // reading it was captured in.
+    const storageOf = (observation) => (
+      observation?.capture && typeof observation.capture.storage === 'object' && observation.capture.storage
+        ? observation.capture.storage
+        : null
+    );
+    const observedStorageKeys = Object.keys(winner.record.observed_change?.storage ?? {});
+    const declaredStorage = (Array.isArray(winner.effects) ? winner.effects : [])
+      .filter((effect) => effect?.type === 'storage_changed');
+    if (observedStorageKeys.length && declaredStorage.length && afterObservation) {
+      const afterStorage = storageOf(observationsById.get(afterObservation)) ?? {};
+      const seenInThisReading = observedStorageKeys.filter((storageKey) => Object.hasOwn(afterStorage, storageKey));
+      const beforeReading = winner.record.before_observation ?? readingWithRole('identity');
+      const beforeStorage = storageOf(observationsById.get(beforeReading)) ?? {};
+      const absentBefore = seenInThisReading.filter((storageKey) => !Object.hasOwn(beforeStorage, storageKey));
+      if (seenInThisReading.length) {
+        const keys = seenInThisReading.map((storageKey) => JSON.stringify(storageKey)).join(', ');
+        const only = absentBefore.length === seenInThisReading.length
+          ? ', which the reading taken before this step did not hold'
+          : '';
+        edgeEvidence.push({
+          observation: afterObservation,
+          role: 'effect',
+          note: `the reading that shows what the application wrote down: its captured storage holds ${keys}${only}, and that is what the edge's \`storage_changed\` effect is evidenced by — a key is named and the value it held is not, because what a session remembers can be a credential.`,
+        });
+      }
+    }
+
     // The variables this step moved, split by what the movement is *evidence of*.
     //
     // This is the third answer to a difference the model can see and the page cannot: a step that
@@ -2152,7 +2259,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         code: 'state_variable_not_in_state_identity',
         severity: 'info',
         basis: 'evidence_check',
-        detail: `this step changed ${named}, and neither ${winner.record.from_state} nor ${winner.record.to_state} records it as a dimension. A collection the screen is showing is a state variable: if it is what makes the destination a different situation, name it in that state's identity.dimensions ({${example}: non_empty}) and pin the same name in its detection with an assertion a browser can actually evaluate — {"type":"value","target":"${example}","operator":"greater_than","expected":0} when the evidence counted the rows, since a reader of the page cannot tell "three projects" from "one project" without counting. A dimension nothing asserts cannot be checked, and one state per value reports a three-valued variable as three screens. If nothing downstream reads it, it belongs in the effect and nowhere else.`,
+        detail: `this step changed ${named}, and neither ${winner.record.from_state} nor ${winner.record.to_state} records it as a dimension. A collection the screen is showing is a state variable: if it is what makes the destination a different situation, name it in that state's identity.dimensions ({${example}: non_empty}) and pin the same name in its detection with an assertion a browser can actually evaluate — {"type":"value","target":"${example}","element":"<the element that lists the rows>","operator":"greater_than","expected":0} when the evidence counted the rows, since a reader of the page cannot tell "three projects" from "one project" without counting. The surface is what makes it evaluable: a value assertion that names a dimension and no element is a check nothing can run, which is why the model refuses one. A dimension nothing asserts cannot be checked, and one state per value reports a three-valued variable as three screens. If nothing downstream reads it, it belongs in the effect and nowhere else.`,
       });
     }
     if (persistenceVariables.length) {
@@ -2331,13 +2438,17 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       const wantsZero = ['empty', 'none', 'no_items'].includes(word);
       if (wantsRows && countable.items > 0) {
         addCandidate(
-          { type: 'value', target: name, operator: 'greater_than', expected: 0 },
+          // The element is what makes the count evaluable, and the projection reads the candidate
+          // to build the state variable's detection (`detectionFor` in lib/abm.js). A candidate that
+          // named only the dimension would be a check no browser can run — the same
+          // dimension-shaped claim the profile refuses.
+          { type: 'value', target: name, element: countable.element, operator: 'greater_than', expected: 0 },
           'dimension',
           `${winner.record.to_state} declares the dimension ${JSON.stringify(name)} as ${JSON.stringify(value)}, and the reading at the end of the step counted ${countable.items} row(s) in ${countable.element} — so the dimension is checkable as a count.`,
         );
       } else if (wantsZero && countable.items === 0) {
         addCandidate(
-          { type: 'value', target: name, operator: 'equals', expected: 0 },
+          { type: 'value', target: name, element: countable.element, operator: 'equals', expected: 0 },
           'dimension',
           `${winner.record.to_state} declares the dimension ${JSON.stringify(name)} as ${JSON.stringify(value)}, and the reading at the end of the step counted no rows in ${countable.element} — so the dimension is checkable as a count.`,
         );
@@ -2654,16 +2765,24 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     // what the test checks and the state is provable; the assertion is a `value` target, which the
     // schema carries as a semantic path (see `normalizeAssertion`).
     const dimensions = dimensionNamesOf(record.identity);
-    const unassertedDimensions = dimensions.filter((name) => !detection.some(
+    // An assertion that names the dimension and reads nothing is not an assertion *about* the
+    // dimension: a browser can be asked what an element shows, and it cannot be asked what
+    // "projects" means. So the check is two-sided — the name, and the surface the name is read on —
+    // and both halves are named here, because the remedy has to be a detection the model can carry
+    // rather than one its own profile will refuse (P7/`detection_reads_no_surface`).
+    const dimensionAssertion = (name) => detection.find(
       (entry) => entry?.type === 'value' && sameVariableName(entry.target, name),
-    ));
+    );
+    const readsSomething = (entry) => Boolean(entry && (entry.element || entry.route));
+    const unassertedDimensions = dimensions.filter((name) => !readsSomething(dimensionAssertion(name)));
     if (unassertedDimensions.length) {
+      const named = dimensionAssertion(unassertedDimensions[0]);
       findings.push({
         scope: record.state_id,
         code: 'state_dimension_not_asserted',
         severity: 'info',
         basis: 'vocabulary',
-        detail: `this state's identity declares ${unassertedDimensions.map((name) => JSON.stringify(name)).join(', ')} in \`identity.dimensions\`, and no detection entry asserts it. A dimension is what tells this state apart from the sibling that shares its route, and only an assertion can check it: add {"type":"value","target":${JSON.stringify(unassertedDimensions[0])},"operator":"equals","expected":"<the value>"} to \`detection\` — the same name, so the graph's word for the difference and the test's check for it are one thing. A dimension nothing can read at runtime is a description, not an identity.`,
+        detail: `this state's identity declares ${unassertedDimensions.map((name) => JSON.stringify(name)).join(', ')} in \`identity.dimensions\`, and no detection entry reads it${named ? ` (the entry that names it asserts a value with no element and no route, which is the same label in another spelling)` : ''}. A dimension is what tells this state apart from the sibling that shares its route, and only a check a browser can evaluate can decide it at runtime: add {"type":"value","target":${JSON.stringify(unassertedDimensions[0])},"element":"<the element that shows it>","operator":"equals","expected":"<the value>"} to \`detection\` — the same name, so the graph's word for the difference and the test's check for it are one thing — or, where the screen does not spell the value out, the count the reading can take: {"type":"value","target":${JSON.stringify(unassertedDimensions[0])},"element":"<the element that lists the rows>","operator":"greater_than","expected":0}. A dimension nothing can read at runtime is a description, not an identity.`,
       });
     }
 
@@ -2696,7 +2815,15 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       ...(outgoing.length ? { outgoing_transitions: outgoing } : {}),
       detection,
       ...(observationIds.length
-        ? { evidence: observationIds.map((observationId) => ({ observation: observationId, role: 'identity' })) }
+        ? {
+          evidence: observationIds.map((observationId) => ({
+            observation: observationId,
+            role: 'identity',
+            ...(stateReadingNote(readingRecordByObservation.get(observationId))
+              ? { note: stateReadingNote(readingRecordByObservation.get(observationId)) }
+              : {}),
+          })),
+        }
         : {}),
       metadata: commitMetadata({
         // A state is the commit's reading of one or more captures, not a capture: the capture is
@@ -2772,11 +2899,27 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   // a raw Observation and nothing else, so a capability's evidence is the readings its committed
   // edges were made from — the transition ids live in `report.capabilities.attempts`, which is the
   // commit's own account and not part of the graph.
+  //
+  // The reference is copied whole rather than rebuilt as `{ observation, role }`, which is what this
+  // did and what the review's §P1 named: the note is the half of a reference that says what the
+  // reading is evidence *for*, and the walk writes one per reading (session.js:808-822 — "the
+  // surface as it stood when the action was taken (from_state)" and its two siblings). Dropping it
+  // put the three roles on a behaviour with nothing to tell a reader which reading is the
+  // precondition and which the outcome, while the same three claims stayed labelled on the edge it
+  // was made from: one behaviour, two accounts, and the unlabelled one is the one the model's
+  // `behaviors[].evidence[]` is built from (abm.js, `capability.evidence`). A note the reading wrote
+  // is a claim of the reading's, so it travels with the reference, and an absent one stays absent —
+  // nothing is minted here.
   const evidenceByCapability = new Map();
   for (const edge of committedEdges) {
     const list = evidenceByCapability.get(edge.action.capability) ?? [];
     for (const ref of edge.evidence ?? []) {
-      if (ref.observation) list.push({ observation: ref.observation, role: ref.role });
+      if (!ref.observation) continue;
+      list.push({
+        observation: ref.observation,
+        role: ref.role,
+        ...(typeof ref.note === 'string' && ref.note ? { note: ref.note } : {}),
+      });
     }
     evidenceByCapability.set(edge.action.capability, list);
   }
@@ -3700,6 +3843,28 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
 }
 
 const observationIdsForState = (map, stateId) => map.get(stateId) ?? [];
+
+/**
+ * What one reading of a state was *for*, in the store's own words.
+ *
+ * A state's `evidence[]` is the readings the state was seen in, and the readings are not
+ * interchangeable: the first one is the reading the state was minted from and whose identity tuple
+ * the id is named after, and every later one is a re-confirmation of the same surface. The log
+ * separates them (`session.js#addState`: `kind: "state"` against `kind: "sighting"`, with the same
+ * distinction repeated as a word in `evidence`), so the reference can say which is which without
+ * this commit inventing anything — and where the log carries no word to quote, the reference says
+ * nothing rather than something it cannot support.
+ *
+ * `null` means "the log does not say", which is a different answer from "the first reading".
+ */
+const stateReadingNote = (record) => {
+  if (!record) return null;
+  const word = typeof record.evidence === 'string' && record.evidence ? ` (the store wrote it as ${JSON.stringify(record.evidence)})` : '';
+  if (record.kind === 'state') {
+    return `the reading that made this a state: the first time the surface was seen, and the reading whose identity this state is named for${word}`;
+  }
+  return `a later reading of the surface, recognised as the same state and recorded as a re-confirmation${word}`;
+};
 
 /**
  * The invariants from §14 that this graph can be checked against.

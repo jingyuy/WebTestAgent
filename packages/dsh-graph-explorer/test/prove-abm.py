@@ -703,6 +703,248 @@ CASES = [
         'new': "const isPlaceholder = (value) => typeof value === 'string' && value.includes('{{');\n",
         'suite': 'test/abm.test.mjs',
     },
+    # --- §2 of the Phase-0b review: a state variable is measured or it is a claim ----------
+    # The four cases below are one defect read in four places. The projector used to take whatever
+    # element the state's own `detection` happened to mention and write the dimension's declared
+    # *word* into `expected`, so the live-034 state whose only reading was "the sign-in button is
+    # absent" claimed `element_sign_in_button equals "seeded"` — a three-way failure: the document
+    # said a state variable was verified when nothing had verified it, `P7`'s two surface rules
+    # could never fire because the fabricator always produced a surface, and the remedy the model
+    # was handed (write the name into an element check) asked for less than the truth. The repair is
+    # a detector that has to name the dimension *and* a surface, and a walk that can write one down.
+    {
+        # A detector is the state's *own* `detection` entry, and `target` is what makes it that
+        # entry. Take any entry that mentions a surface instead — which is what the projector did —
+        # and "the sign-in button is absent" is a detector for the project list's dimension again.
+        'rule': 'a dimension detector is the state\'s own detection entry that names it',
+        'file': 'lib/abm.js',
+        'old': "  const named = rows(state.detection).find((entry) => entry?.target === name) ?? recorded.get(name) ?? null;\n  if (!named || named.expected === undefined) return null;\n",
+        'new': "  const named = rows(state.detection).find((entry) => entry?.element || entry?.route) ?? recorded.get(name) ?? null;\n  if (!named) return null;\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The other half, and the half §2 is actually about: an entry that names the dimension and
+        # reads no surface is not a detector, so nothing is carried and `P7` says so. Borrow the
+        # state's first element instead — the shape the projector had — and every such state is
+        # verified again by a check over some other element, with the finding unreachable.
+        'rule': 'a dimension named with no surface to read it on carries no detector',
+        'file': 'lib/abm.js',
+        'old': "  // The entry names the dimension and no surface reads it: a value assertion over a semantic path\n  // or a storage key is a dimension-shaped claim nothing can evaluate, and carrying it would put a\n  // check in the document that no generator could turn into a line of a test.\n  return null;\n",
+        'new': "  const borrowed = rows(state.elements)[0]?.id ?? null;\n  return borrowed ? prune({ type: 'value', element: borrowed, operator: named.operator, expected: named.expected }) : null;\n",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # And the count the commit watched pass has to say which surface counted it, or the check it
+        # proposes reaches the projection as a dimension-shaped claim with no surface — the walk saw
+        # the dimension measured and the model reports that nothing measured it.
+        'rule': 'the count a reading took is offered as an assertion over the element it counted',
+        'file': 'lib/commit.js',
+        'old': "          { type: 'value', target: name, element: countable.element, operator: 'greater_than', expected: 0 },",
+        'new': "          { type: 'value', target: name, operator: 'greater_than', expected: 0 },",
+        'suite': 'test/commit.test.mjs',
+    },
+    {
+        # The same thing one layer down, which is where the design has to be writable at all: a
+        # `value` assertion is the walk's way of recording a dimension, and the element is the half
+        # that makes it runnable. Drop it in `normalizeAssertion` — the one place every reader of the
+        # graph passes through — and no walk can record a checkable dimension, so P7's refusal is
+        # permanent rather than a thing the model can answer.
+        'rule': 'a value assertion that names a surface carries it into the graph',
+        'file': 'lib/commit.js',
+        'old': "    if (entry.element !== undefined) {\n      const raw = purposeOf(entry.element);\n",
+        'new': "    if (false && entry.element !== undefined) {\n      const raw = purposeOf(entry.element);\n",
+        'suite': 'test/commit.test.mjs',
+    },
+    {
+        # P0-1: the collapsed edge's prose. The merge re-derives `from_state`, `action`, `effects`,
+        # `apis` and `evidence` from every call it absorbed, and it used to leave `name` and
+        # `description` describing the call that *ended* the move — so an edge whose `behavior` was
+        # `behavior_login`, with a three-action `realization[]`, was named and described after its
+        # last click. Keeping the survivor's prose is the defect; putting it back has to be visible.
+        'rule': 'the edge a collapse leaves is named and described after the behaviour, not the last call',
+        'file': 'lib/abm.js',
+        'old': r"""        name: behaviourName,
+        description:
+          `${behaviourName} performed as one move from ${final[0].from_state} to ${last.to_state} — ` +
+          `${moveSteps.length} recorded call(s): ${callNames.join(', ')}. ` +
+          'The calls are this behaviour\'s realization[]; the edge is the move they add up to.',""",
+        'new': """        name: last.name,
+        description: last.description,""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # P0-1b: the other half of D14. The composition is dropped from a behaviour the run realized
+        # (its members are its steps), and `kind` used to be copied verbatim — so a behaviour the walk
+        # asked for as a composite came out declaring `kind: "composite"` with `composed_of: []`. The
+        # schema gives that word one meaning, "the behaviour is defined only by composed_of", so the
+        # document was contradicting the value it wrote. Putting the copy back has to be visible.
+        'rule': 'a behaviour this run realized is not declared a composite',
+        'file': 'lib/abm.js',
+        'old': "      const kind = BEHAVIOR_KINDS.has(capability.kind) && !(steps.length && capability.kind === 'composite')\n        ? capability.kind\n        : undefined;",
+        'new': "      const kind = BEHAVIOR_KINDS.has(capability.kind) ? capability.kind : undefined;",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # P0-3: a journey is "an ordered walk over transitions" (journey.schema.json), and a walk is
+        # a path. The reviewed document's journey named one edge three times — three turns, each
+        # saying "walk this edge", while only the first of them stood where that edge begins — and
+        # nothing in the model said so, because `transitions[]` is a set and a step is deliberately
+        # thin so the order lives in one place. With the check gone the document reads as a
+        # repetition the graph cannot perform.
+        'rule': 'a journey step begins where the step before it ended',
+        'file': 'lib/abm.js',
+        'old': r"""      const previous = transitionById.get(rows(journey.steps)[index - 1].transition);
+      if (!previous || previous.to_state === transition.from_state) continue;""",
+        'new': r"""      const previous = transitionById.get(rows(journey.steps)[index - 1].transition);
+      if (true) continue;""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The other end of the same walk: the journey's declared `start_state` is the surface the
+        # walk stood on before its first turn, and the schema says it is the first step's `from_state`
+        # when it is omitted. A journey that starts somewhere its first step does not is a goal
+        # attached to a surface the walk never stood on.
+        'rule': 'a journey starts where its first step starts',
+        'file': 'lib/abm.js',
+        'old': r"""      if (index === 0) {
+        if (typeof journey.start_state !== 'string' || journey.start_state === transition.from_state) continue;""",
+        'new': r"""      if (index === 0) {
+        if (true) continue;""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # P0-3, the reference half: `journeyStep` allows `arguments` and states the one rule for
+        # them — "Keys must be the behaviour's declared input names" — because the step is a
+        # reference to the behaviour, not a second place to describe it. A key nothing declares is
+        # the journey disagreeing with the semantic model about how the behaviour is called, and it
+        # is the same class of defect as an unbound `{{param}}`: a run that cannot start.
+        'rule': 'a journey step binds only names the behaviour declares',
+        'file': 'lib/abm.js',
+        'old': r"""      const keys = Object.keys(step.arguments ?? {});
+      if (!keys.length) continue;""",
+        'new': r"""      const keys = Object.keys(step.arguments ?? {});
+      if (keys.length) continue;""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # P1, the credential half. `journey.schema.json` says a `goal` is
+        # never the raw instruction when the instruction carried a
+        # credential, and the only evidence-based reading of that is:
+        # the sentence repeats a value the walk supplied into a field.
+        # Reverting the projection to the quoted sentence is the whole
+        # rule removed -- the goal is the run's own words again, and the
+        # values the walk typed are back in the model's own narrative.
+        'rule': 'a goal that repeats a value the walk supplied is not carried verbatim',
+        'file': 'lib/abm.js',
+        'old': r"""      goal: narrative.goal,
+      goal_stated: narrative.goal_stated,""",
+        'new': r"""      goal: journey.goal,
+      goal_stated: journey.goal_stated,""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # P1, the actor half: `journey.actor` means "role the journey is exercised as", and a role is
+        # a declaration. Reverting the projection to the start state's variant is the conflation the
+        # review named — the model then describes a walk that ends signed in as "walked as anonymous",
+        # which is an authentication state standing in for a role nobody declared.
+        'rule': 'a journey claims a role only where the application declares one',
+        'file': 'lib/abm.js',
+        'old': r"""    const actor = startVariant && declaredIds.has(startVariant) ? startVariant : null;""",
+        'new': r"""    const actor = startVariant;""",
+        'suite': 'test/abm.test.mjs',
+    },
+    # --- P1, the evidence half: a reference says what it is evidence for --------------------------
+    # Six cases, one idea. The review found a document whose references were attached to the right
+    # claims and said nothing: one behaviour whose three roles carried no words, a state whose
+    # evidence was three bare identities, a state variable that borrowed the state's references, a
+    # journey whose references repeated one note with nothing saying which step they documented, and
+    # a `storage_changed` effect with no reading behind it. Each is one edit here, and each edit has
+    # to leave a suite red — the notes are written into a *document*, so a dropped one leaves every
+    # claim intact and the document unreadable, which is exactly the failure that leaves no trace.
+    {
+        # The session wrote a note on every reading it recorded (`session.js` writes "the surface as
+        # it stood when the action was taken (from_state)", and the other two). It is dropped by the
+        # spread that builds the capability's evidence, and the document is then three roles with
+        # nothing to tell them apart.
+        'rule': 'the note the session wrote on each reading is kept on the capability',
+        'file': 'lib/commit.js',
+        'old': r"""        ...(typeof ref.note === 'string' && ref.note ? { note: ref.note } : {}),""",
+        'new': r"""        ...(false && ref.note ? { note: ref.note } : {}),""",
+        'suite': 'test/commit.test.mjs',
+    },
+    {
+        # A state's evidence is the readings the surface was seen in, and the store recorded what it
+        # called each one (`first_observation` / `repeat_observation`). The note quotes it; without
+        # it the reference is a bare identity like the other three.
+        'rule': 'a state\'s evidence says which reading made it a state',
+        'file': 'lib/commit.js',
+        'old': r"""const stateReadingNote = (record) => {
+  if (!record) return null;""",
+        'new': r"""const stateReadingNote = (record) => {
+  if (record) return null;""",
+        'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # A journey's evidence is its steps' readings, and every step carries the same three notes —
+        # so the union is a list of nine references in which nothing says which step any of them
+        # documents. The attribution is what makes the inference traceable; reverted, the journey is
+        # the document the review read.
+        'rule': 'a journey\'s evidence says which step each reading documents',
+        'file': 'lib/commit.js',
+        'old': r"""        evidence.set(key, { ...ref, note: ref.note ? `${ref.note} — ${attribution}` : attribution });""",
+        'new': r"""        evidence.set(key, { ...ref, note: ref.note });""",
+        'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # The persistence reference: the effect is a claim about what the application remembers, and
+        # the reading's own captured storage is what evidences it. Dropped, the edge still claims the
+        # write — which is the one effect a comparison of two surfaces cannot see.
+        'rule': 'a storage_changed effect carries the reading that shows the write',
+        'file': 'lib/commit.js',
+        'old': r"""      if (seenInThisReading.length) {""",
+        'new': r"""      if (false) {""",
+        'suite': 'test/commit.test.mjs',
+    },
+    {
+        # A state variable's evidence has to be about *the variable*. Without the per-claim note the
+        # projection falls back to the state's own `evidence[]` copied whole — prose answering a
+        # question about the state, carried on a claim about a distinction the state draws.
+        'rule': 'a state variable\'s evidence names the reading the distinction was drawn from',
+        'file': 'lib/abm.js',
+        'old': r"""      for (const ref of rows(state.evidence)) {""",
+        'new': r"""      for (const ref of []) {""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The rule itself, first half: a reference that does not say what it is evidence for is
+        # reported. The case above proves the projection writes the words; this one proves something
+        # reads them.
+        'rule': 'a reference that does not say what it is evidence for is reported',
+        'file': 'lib/abm.js',
+        'old': "rule: 'P9', code: 'evidence_without_a_note', severity: 'warning', scope, subject: owner,",
+        'new': "rule: 'P9', code: 'evidence_without_a_note_REMOVED', severity: 'warning', scope, subject: owner,",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # And the second half: a reference that does not say what *kind* of reading it is. The schema
+        # permits the bare observation id as shorthand, which is why this is a warning and not a
+        # refusal — but a document of bare ids is a document where nothing is distinguishable.
+        'rule': 'a reference that does not say what kind of reading it is is reported',
+        'file': 'lib/abm.js',
+        'old': "rule: 'P9', code: 'evidence_without_a_role', severity: 'warning', scope, subject: owner,",
+        'new': "rule: 'P9', code: 'evidence_without_a_role_REMOVED', severity: 'warning', scope, subject: owner,",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The persistence rule reads the *key*, and the edit that keeps the rule's shape while making
+        # it say less is the one worth proving against: any recorded storage sample now satisfies it,
+        # so an effect on a key this step's own reading never wrote goes unreported.
+        'rule': 'a storage_changed effect the recorded change does not name is reported',
+        'file': 'lib/abm.js',
+        'old': r"""      if (keys.some((recordedKey) => recordedKey === effect.target || recordedKey === key)) continue;""",
+        'new': r"""      if (keys.length) continue;""",
+        'suite': 'test/abm.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

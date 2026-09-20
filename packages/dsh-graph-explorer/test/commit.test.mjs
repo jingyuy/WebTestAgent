@@ -1086,8 +1086,8 @@ check('and says which variable, of which kind, and what to do with it',
     (unrecordedVariable?.detail ?? '').includes('neither state_a nor state_b'),
     (unrecordedVariable?.detail ?? '').includes('identity.dimensions ({items: non_empty})')],
   [true, true, true]);
-check('and the dimension it asks for is the countable form, which is the whole arithmetic gap',
-  (unrecordedVariable?.detail ?? '').includes('{"type":"value","target":"items","operator":"greater_than","expected":0}'), true);
+check('and the dimension it asks for is the countable form, on the element that lists the rows',
+  (unrecordedVariable?.detail ?? '').includes('{"type":"value","target":"items","element":"<the element that lists the rows>","operator":"greater_than","expected":0}'), true);
 check('the edge carries the rollup, so the graph says what the step could not hold',
   movedVariable.graph.transitions.find((edge) => edge.id === 'transition_add')?.metadata?.extra?.commit?.state_variables ?? null,
   {
@@ -1142,6 +1142,62 @@ check('and the rollup files it as persistence rather than as an unrecorded dimen
     persistence: ['acme-demo-state'],
   });
 
+// §P1's persistence half: the effect is a claim about what the application *remembers*, and the
+// reading is what evidences it. Both sides have to agree before the commit says a word — the
+// machinery's own account of what changed (`observed_change.storage`, which the store writes) and
+// the capture the reading itself holds — and when they do, the edge carries the reading that shows
+// the write, naming the key and never the value. The key is what makes the claim checkable; the
+// value is what a session remembers, and the live 0b run's key held the address the walk signed in
+// with, so a reference that repeated it would put a credential into the semantic document.
+const wroteToStorage = rule({
+  observations: [
+    OBS('obs_0001', 'http://x/login'),
+    {
+      ...OBS('obs_0002', 'http://x/projects'),
+      capture: { url: 'http://x/projects', interactive: [], storage: { 'acme-demo-state': '{"user":"test@example.com"}' } },
+    },
+  ],
+  states: [
+    STATE(),
+    STATE({
+      id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002',
+      identity: { page_type: 'project_list' }, identity_key: '["project_list","",[]]',
+    }),
+  ],
+  transitions: [EDGE({
+    id: 'transition_login', transition_id: 'transition_login', from_state: 'state_a', to_state: 'state_b',
+    before_observation: 'obs_0001', after_observation: 'obs_0002',
+    effects: [{ type: 'storage_changed', target: 'localStorage.acme-demo-state', observed: true }],
+    observed_change: { appeared: [], disappeared: [], storage: { 'acme-demo-state': '{"user":"test@example.com"}' } },
+  })],
+});
+const persistenceRefs = (wroteToStorage.graph.transitions[0]?.evidence ?? [])
+  .filter((ref) => typeof ref?.note === 'string' && ref.note.includes('captured storage holds'));
+check('a step that wrote to storage carries the reading that shows it, and the reference names the key',
+  persistenceRefs.map((ref) => [ref.observation, ref.role, ref.note.includes('"acme-demo-state"'), ref.note.includes('the reading taken before this step did not hold')]),
+  [['obs_0002', 'effect', true, true]]);
+check('and it does not repeat the value that was written, which stays in the reading',
+  persistenceRefs.map((ref) => ref.note.includes('test@example.com')),
+  [false]);
+
+// The vocabulary's half of the same edit. A capability's evidence is the readings its committed
+// edges were made from, and the note is the half of a reference that says what the reading is
+// evidence *for* — the session writes one per reading, and the graph's `capabilities[].evidence[]`
+// is what the model's `behaviors[].evidence[]` is built from when a behaviour has no steps of its
+// own. Rebuilt as a bare `{ observation, role }` the vocabulary keeps every attribute of the
+// reading except the part a reader can use.
+const SESSION_NOTE = 'the surface as it stood when the action was taken (from_state)';
+const wording = rule({
+  transitions: [EDGE({ evidence: [{ observation: 'obs_0001', role: 'identity', note: SESSION_NOTE }] })],
+});
+check('a capability\'s evidence keeps the words the reading was recorded with',
+  wording.graph.capabilities.map((capability) => (capability.evidence ?? []).map((ref) => ref.note)),
+  [[SESSION_NOTE]]);
+check('and a reading recorded without them stays without them, because nothing is minted here',
+  rule({ transitions: [EDGE()] }).graph.capabilities
+    .map((capability) => (capability.evidence ?? []).map((ref) => [ref.observation, ref.role, ref.note ?? null])),
+  [[['obs_0001', 'identity', null]]]);
+
 // The other half: named as a dimension *and* pinned by an assertion. Now nothing is reported,
 // and that is the whole point — the graph can hold the difference without a second state for it.
 const recordedVariable = rule({
@@ -1152,7 +1208,12 @@ const recordedVariable = rule({
       id: 'state_b', state_id: 'state_b', observation_id: 'obs_0002',
       identity: { page_type: 'cart_with_items', dimensions: { items: 'non_empty' } },
       identity_key: '["cart_with_items","",[["items","non_empty"]]]',
-      detection: [{ type: 'url' }, { type: 'value', target: 'items', operator: 'equal', expected: 'non_empty' }],
+      elements: [{ semantic_purpose: 'cart_items', role: 'list', name: 'Items', locator: '[data-testid="cart-items"]' }],
+      // The assertion names the dimension *and* the surface a browser reads it on. A `value`
+      // assertion that names no element is a check nothing can run, which is the half of the
+      // same rule the ABM refuses (P7/`detection_reads_no_surface`) — so this fixture, which is
+      // about the dimension being *recorded*, now records it in a form that can be checked.
+      detection: [{ type: 'url' }, { type: 'value', target: 'items', element: 'cart_items', operator: 'equals', expected: 'non_empty' }],
     }),
   ],
   transitions: [EDGE({
@@ -1173,6 +1234,25 @@ check('and the rollup says it was recorded rather than lost',
     semantic: ['cart.items'],
     persistence: [],
   });
+// The surface is the half that makes the word checkable, and the commit carries it: the walk
+// names the element by purpose (that is the element's identity), the commit mints the id, and what
+// lands in `detection` names both. Dropping the element here is what made a dimension assertion
+// indistinguishable from a claim nothing can evaluate.
+check('and the assertion the state wrote keeps the surface it is read on',
+  (recordedVariable.graph.states[1]?.detection ?? []).find((entry) => entry.type === 'value') ?? null,
+  { type: 'value', element: 'element_cart_items', target: 'items', operator: 'equals', expected: 'non_empty' });
+// And the other way: a surface no state declares is refused, loudly, rather than written as a
+// value assertion whose only content is the dimension's word.
+const unreadableSurface = rule({
+  states: [STATE({
+    identity: { page_type: 'cart_with_items', dimensions: { items: 'non_empty' } },
+    detection: [{ type: 'url' }, { type: 'value', target: 'items', element: 'cart_items', operator: 'equals', expected: 'non_empty' }],
+  })],
+});
+check('a value assertion on an element nothing declares is refused, and the refusal is reported',
+  [(unreadableSurface.graph.states[0]?.detection ?? []).some((entry) => entry.type === 'value'),
+    (finding(unreadableSurface.report, 'detection_dropped')?.detail ?? '').includes('element_reference_does_not_resolve')],
+  [false, true]);
 
 // A dimension and an assertion are two halves of one thing: the word is the identity, the
 // assertion is what a generated test checks. A dimension with no assertion is a state nothing can
@@ -1181,9 +1261,10 @@ const unassertedDimension = rule({
   states: [STATE({
     identity: { page_type: 'cart_with_items', dimensions: { count: 'non_empty', coupon: 'applied' } },
     identity_key: '["cart_with_items","",[]]',
+    elements: [{ semantic_purpose: 'cart_count', role: 'list', name: 'Items', locator: '[data-testid="cart-items"]' }],
     detection: [
       { type: 'url' },
-      { type: 'value', target: 'count', operator: 'equals', expected: 'non_empty' },
+      { type: 'value', target: 'count', element: 'cart_count', operator: 'equals', expected: 'non_empty' },
     ],
   })],
 });
@@ -1474,8 +1555,8 @@ const countedWalk = ({ rows, dimensions = { projects: 'non_empty' }, elements = 
 const counted = countedWalk({ rows: 3 });
 const countedCommit = counted.graph.transitions[0].metadata.extra.commit;
 const counterCandidate = countedCommit.candidate_assertions.find((candidate) => candidate.basis === 'dimension');
-check('a dimension a reading counted becomes an assertion of the count, not of the model\'s word',
-  counterCandidate?.assertion, { type: 'value', target: 'projects', operator: 'greater_than', expected: 0 });
+check('a dimension a reading counted becomes an assertion of the count, on the element it counted',
+  counterCandidate?.assertion, { type: 'value', target: 'projects', element: 'element_project_list', operator: 'greater_than', expected: 0 });
 check('and the candidate says which reading counted it and how many rows it saw',
   [counterCandidate?.from, (counterCandidate?.detail ?? '').includes('counted 3 row(s) in element_project_list')],
   ['obs_0002', true]);
@@ -1494,7 +1575,7 @@ check('an empty collection is countable too, when that is what the dimension cla
     const commit = countedWalk({ rows: 0, dimensions: { projects: 'empty' } }).graph.transitions[0].metadata.extra.commit;
     return commit.candidate_assertions.find((candidate) => candidate.basis === 'dimension')?.assertion;
   })(),
-  { type: 'value', target: 'projects', operator: 'equals', expected: 0 });
+  { type: 'value', target: 'projects', element: 'element_project_list', operator: 'equals', expected: 0 });
 check('two collections that could be the one named is not a tie broken in private',
   (() => {
     const two = countedWalk({

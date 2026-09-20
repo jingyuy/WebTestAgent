@@ -561,9 +561,28 @@ harness's `agent/pre-step` before the first action — so that is what the commi
   warning stands, because "the run was asked to do nothing" and "nobody said what the run was for"
   are the same graph.
 
-Evidence is carried across from the steps and deduplicated by observation and role. It has
-to be: the schema's `evidenceRef` points at observations, never at transitions, so a
-journey's evidence is the readings its steps rested on.
+Evidence is carried across from the steps, and deduplicated by the whole reference rather than by
+observation and role. It has to be: the schema's `evidenceRef` points at observations, never at
+transitions, so a journey's evidence is the readings its steps rested on — and one reading can back
+two different claims of the same step (the surface the step was offered on, and the key it wrote),
+which a key of `observation:role` would have collapsed into one.
+
+**Every reference says what it is evidence for.** A reference is a reading *plus* the reason it is
+cited, and the reason is the note. The projection keeps the words the session wrote on each reading
+rather than rebuilding `{observation, role}`, which is what a reader of the 0.1.35 artifact found
+behind the three mechanism-named behaviours: nine references that read `{"observation":
+"obs_0001","role":"identity"}` and nothing else, while the edges the same claims were made from
+still said `the surface as it stood when the action was taken (from_state)` — one copy of the
+reason kept, the other dropped. It quotes the store's own word for a state (`the reading that made
+this a state: …`), names the storage key — never the
+value — on a `storage_changed` effect, and on a journey's references names the step each reading
+documents, because nine references over three steps otherwise arrive with three notes and nothing
+saying which step any of them belongs to. Three of these are rules as well: `P9` reports a reference
+with no `role` (`evidence_without_a_role`) or with no `note` (`evidence_without_a_note`), and a
+`storage_changed` effect this step's own reading does not show
+(`persistence_effect_without_a_reading`). All three are **warnings** — the schema's bare observation
+id is legal shorthand, and a hand-written document is not a hallucination — and what they keep is a
+note from going missing in a later edit without anything saying so.
 
 ### The two documents
 
@@ -1737,7 +1756,7 @@ retracted claim, `transition_submit_login.arguments.email`, is in neither docume
 dropped the value everywhere would look like a stronger proof and would be a weaker one.
 
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 61 mutations, all 61 refused, the tree
+the failure. `test/prove-abm.py` is that file for this work — 80 mutations, all 80 refused, the tree
 restored byte-identically and `15/15 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.
@@ -1764,6 +1783,25 @@ version number that names two different byte sets is a version number that canno
 first attempt to redeploy the new tests under `0.1.34` was accepted as "already installed" and left the
 profile holding the old file, which is the mechanism working as designed. The deployed runtime bytes
 are unchanged by this release; the proof harness is not, and both are in the tarball.
+
+**0.1.36 came from a review of the artifact rather than of the code, and nineteen more cases hold it
+down — `test/prove-abm.py` is 80 mutations, all 80 refused.** The review read a committed
+`application-model.json` and filed what it could not check: a behaviour named after the mechanism it
+was performed by, a state variable whose "detection" measured nothing, a journey whose steps and
+whose behaviour's realisation were the same fact written twice with no rule keeping them equal, an
+actor that was really an authentication state, a goal that quoted a credential, and evidence that did
+not say what it was evidence for. Each is now either a projection change or a rule, and the eight
+cases the evidence half finished with are the ones that would otherwise pass by accident: the note
+kept on a capability's evidence,
+the store's word on a state's, a journey's step attribution, the storage reading behind an effect, a
+variable's evidence naming the reading the distinction was drawn from, both new `P9` warnings, and
+the persistence rule asked of the **key** rather than of the presence of a sample — the last of which
+is the edit that keeps the rule's shape while making it say less, so it was worth a case of its own.
+Two of the round's findings are recorded as boundaries instead of code: the behaviour's id stays
+(`login` is the mechanism and the name is the vocabulary, so the prose changed and the id did not),
+and an empty `apis[]`/`entities[]` is kept honest in the schema's own words — the live run has four
+readings and **no** network entry, so the empty list is a statement about the walk, and filling it in
+from the outside would be a claim no reading can be checked against.
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
 objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, record

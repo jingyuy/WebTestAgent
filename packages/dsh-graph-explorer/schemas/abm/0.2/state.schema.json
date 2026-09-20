@@ -73,7 +73,7 @@
         },
         "variant": {
           "type": "string",
-          "description": "Named variant of the same page_type: authenticated, anonymous, admin, mobile, ab_test_b."
+          "description": "Named variant of the same page_type: authenticated, anonymous, admin, mobile, ab_test_b. A variant names a surface and not a role: authenticated and anonymous are authentication states, mobile a presentation and ab_test_b an experiment, and none of the five says who is looking at the page. Roles are declared in application.actors[], and where a declaration names this variant the surface is exercised as that actor."
         },
         "dimensions": {
           "type": "object",

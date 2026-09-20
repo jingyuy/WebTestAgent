@@ -34,7 +34,7 @@
     "actors": {
       "type": "array",
       "minItems": 1,
-      "description": "Roles the application can be exercised as. Referenced by id from state.identity.variant and journey.actor; the id is the join, so both sides must name one of these.",
+      "description": "Roles the application can be exercised as. journey.actor must equal one of these ids, because a role is a declaration: no page shows that \"authenticated\" is something somebody can sign in as. A state.identity.variant is a surface variant rather than a role, and where an entry here names that variant the surface is exercised as that actor; where none does, the variant is still read through this vocabulary and no journey may claim it as an actor.",
       "items": {
         "type": "object",
         "required": ["id"],

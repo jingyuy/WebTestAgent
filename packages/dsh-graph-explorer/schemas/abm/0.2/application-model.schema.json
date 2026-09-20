@@ -28,7 +28,7 @@
       "type": "array",
       "items": { "$ref": "#/$defs/entity" },
       "default": [],
-      "description": "The things the application moves between states: session, project, cart. An entity is what makes a transition's effects meaningful - without it, 'storage_changed on localStorage.acme-demo-state' is a fact about a key, not about a session."
+      "description": "The things the application moves between states: session, project, cart. An entity is what makes a transition's effects meaningful - without it, 'storage_changed on localStorage.acme-demo-state' is a fact about a key, not about a session. Boundary (P2): the projection declares only what the run's readings show. A walk whose readings never named the things being moved yields an empty list, and that is a statement about the walk and not about the application - a name invented here would be a claim no reading can be checked against."
     },
     "state_variables": {
       "type": "array",
@@ -56,7 +56,8 @@
     "apis": {
       "type": "array",
       "items": { "$ref": "api.schema.json" },
-      "default": []
+      "default": [],
+      "description": "The calls the run's readings observed. Boundary (P2): an empty list means no reading captured a network entry - the live 0b run has four readings and none of them carries one - and not that the application exposes no API. The walk is what has to change; the projection does not fill the list in from the outside."
     },
     "journeys": {
       "type": "array",

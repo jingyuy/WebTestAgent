@@ -217,7 +217,7 @@ Nothing is recorded twice by hand, and neither document is a projection of the o
 | The walk | `journeys[].transitions[]`, derived by `assembleJourneys` | `journeys[].steps[]`, referencing `transitions[]` and carrying the call's `arguments` |
 | Unwalked affordances | nothing — `coverage.unmodelled_routes` is a *route* statement, and an SPA has one route | `state.affordances[]` (D6), so "offered but never performed" is representable at all |
 | Product features | `features[]`, assembled from the `feature` argument | **none** — D7 |
-| Actors | `state.identity.variant`, a free string | `actors[]` top-level, referenced by id |
+| Actors | `state.identity.variant`, a free string that doubles as the actor | `actors[]` top-level, the declared role vocabulary; a variant is a surface, not a role |
 | Entities / state variables | implicit (`data_subject`, effect targets, dimensions) | `entities[]` / `state_variables[]` top-level |
 | Epistemic level | `metadata.status` reports whether **the walk** was observed, and an LLM-inferred behaviour *name* shares that one block — measured: `cap_submit_login` reads `status: verified, confidence: 1` while the name is pure inference | D9: the level is a property of **the claim**, not of the record. A behaviour's name is `inferred` even when its edge is `observed`, and P14 refuses the promotion |
 | Consumers | `graph_test` (unchanged today), anything already reading ABG 0.1 | **`graph_test` from Phase 4 (D10)**, plus the PR→test path this pivot exists for |
@@ -309,7 +309,7 @@ against the real schemas, and `npm test` staying dependency-free is preserved by
   "application": {
     "id": "app_acme-demo", "name": "Acme Demo App", "base_url": "http://127.0.0.1:4173/",
     "actors": [                                             // D2: top-level array, populated
-      { "id": "anonymous" },                                // P6: the actor id IS the variant
+      { "id": "anonymous" },                                // P6: a variant is a surface, not a role
       { "id": "authenticated", "credentials_ref": "TEST_USER" }   //   vocabulary the states already
     ]                                                        //   use, so the rule fits the measured
                                                              //   evidence instead of rewriting it
@@ -503,10 +503,10 @@ correctable while the page is still on screen).
 | P3 | `composed_of` may only name **behaviours**, and each must be realised by ≥1 committed step (the existing `composite_part_never_walked` idea, restated over behaviours) | `error` |
 | P4 | Every `realization[].element` **and every element-shaped `effects[].target`** (`value_changed`, `visibility_changed`, `element_created`, `element_destroyed`, `validation_error`) resolves to a declared element **id** — and a realization's element is **derived from the state's declaration, never accepted as typed by the model** | `error` (ABG invariant 3) |
 | P5 | Every `{{param}}` in a `realization[].value` binds to a declared `input` or to a `journeys[].steps[].arguments` key; every concrete value the model records (a step's effect `to`, an edge's `arguments`) was **observed**, and a redacted field is recorded as the honest `[set]` rather than omitted | `error` (extends `withheldByEvidence`, generate.js:345) |
-| P6 | Every `state.identity.variant` and `journeys[].actor` names an `actors[].id`, and that id is **traceable** to a state variant or an observation | `warning` |
+| P6 | A `journeys[].actor` must name an `actors[].id` and be **traceable** to a state variant or an observation. The projection only claims a role where the application declares one: a `state.identity.variant` is a **surface variant** (`authenticated`, `anonymous`, `mobile`, `ab_test_b`) and not a role, so a variant no declaration names is reported as `undeclared_actor` and never becomes a journey's actor — the journey claims none, and `journey_actor_missing` says which variant the run stopped at | `warning` |
 | P7 | Every entry in `identity.dimensions` is declared in `state_variables[]`, each declaration carries a `detection`, and **that `detection` reads an element or a route** — a check over a storage key is a dimension-shaped claim nothing can evaluate | `error` (today a protocol rule only; the graph's own `persistence_evidence_recorded` note already refuses the storage case) |
 | P8 | Every `transitions[].effects[].target` that is a semantic path belongs to a declared `entities[].name`, or to `localStorage`/`sessionStorage`/`cookie` | `warning` |
-| P9 | Every behaviour carries ≥1 `evidence[]` entry, every `transitions[]` entry carries the three evidence roles (`identity`/`action`/`effect`), and every evidence id resolves | `error` — the anti-hallucination rule |
+| P9 | Every behaviour carries ≥1 `evidence[]` entry, every `transitions[]` entry carries the three evidence roles (`identity`/`action`/`effect`), and every evidence id resolves — **and every reference says what it is evidence for**: a reference with no `role` or with no `note`, and a `storage_changed` effect the step's own reading does not show, are reported | `error` for the three existence rules — the anti-hallucination rule; **`warning`** for `evidence_without_a_role`, `evidence_without_a_note` and `persistence_effect_without_a_reading` |
 | P10 | Objects with `metadata.confidence < 0.5` or `status: inferred` cannot back a `criticality: critical` journey | `warning` (ABG invariant 12) |
 | P11 | Every behaviour is the `behavior` of ≥1 `transitions[]` entry, or a member of a walkable behaviour's `composed_of` — a behaviour no edge can perform is a vocabulary entry, not a behaviour | `warning` (supersedes the draft's "every behaviour in a journey") |
 | P12 | **Walk preservation (D4 + D5, with D12 for the sequence form), both directions.** *(a)* every transition `graph.json` committed is accounted for in the ABM — as an edge's behaviour, as a `realization[]` step of a behaviour whose own edge starts where that transition started (and that step's element may be named by the transition's `target` **or** by the element the realisation itself records: `lib/protocol.js` never asks the walk for `target`, so reading only that field is a rule no live run can satisfy — measured on 0.1.26, both `fill` calls), or as a member of the composite whose `composed_of` names it, when the composite's edge is the span of its members' edges in order; *(b)* every `transitions[]` entry is backed by ≥1 committed graph transition — the same `from_state`/`to_state`/behaviour, or that in-order sequence of member transitions for a composite; *(c)* the ABM has ≥1 journey (D4) and every `journeys[].steps[]` entry names a `transitions[]` id | `error` — the D1 coherence check |
@@ -571,6 +571,28 @@ fires on everything a model touched.
 One deliberate asymmetry: an edge that no journey walks is reported the way `reachability`
 already is (`warning`), because a walk that avoided a behaviour is not evidence it cannot be
 performed. The error severities above apply only where the two documents must agree exactly.
+
+**`evidenceRef` has two halves, and the projection had been throwing one of them away.** The
+schema's reference is `{observation, role, note}`, and every rule above asked about `observation`:
+the reading is there, the id resolves, the behaviour carries one. The `note` is the half that says
+what the reading is evidence *for* — and the walk writes one per reading (`session.js`: *"the
+surface as it stood when the action was taken (from_state)"* and its two siblings), so the
+projection rebuilding `{observation, role}` was not filling in a gap, it was discarding a claim the
+recorder had already made. The artifact a reader sees then has three roles on one behaviour with
+nothing to tell a precondition from an outcome, a state whose evidence is three bare identities, a
+journey whose nine references repeat one note with nothing saying which step each documents, and a
+`storage_changed` effect with no reading behind it. All six are fixed in the projection, and the
+three new codes are the rules that notice a note going missing — **warnings**, because the bare id
+is legal shorthand and a hand-written document is not a hallucination, which is exactly the
+distinction P9's error severities are for.
+
+**Two boundaries, taken deliberately rather than by omission.** A behaviour's `id` is the mechanism
+and its `name` is the vocabulary (§P0-1): `login` stays `login`, and only the prose changed, because
+an id is a key other documents point at and renaming it to `sign_in` would be a rename rather than a
+semantic fix. And `entities[]`/`apis[]` stay empty when the run's readings support neither — in the
+live 0b run, four readings and **zero** network entries — so the empty list is left as a true
+statement about the walk and written down as one in `application-model.schema.json` (P2 is a
+coverage gap closed by walking more, not a field filled in from the outside).
 
 ## 4. What does not change
 
@@ -758,6 +780,9 @@ ajv on this machine (ESM `import()` ignores `NODE_PATH`, which is why the schema
   **not** take an `actor` argument — an earlier draft of this plan had it doing so, and the reason it
   does not is D13's reason in miniature: a per-reading actor answers a question nobody asked, while the
   registry is what a journey's `actor` ("must equal", 0.2) and a state's variant both resolve against.
+  A run whose config declares **no** actor yields a model where no journey claims one: the projection
+  keeps the variant on the state, reports `journey_actor_missing`, and refuses to read "anonymous" as a
+  role on the strength of a word a page happened to show (P6).
 - `lib/session.js`: `addRealizationStep(capabilityId, step)`, and append-only records
   (`kind: 'realization_step'`), consistent with "a reading appends a new state or a sighting" — and
   **the commit folds those records into `capabilities[].steps[]`**, which is the field the ABM reads
@@ -1295,6 +1320,81 @@ file, and the pivot had added a description instead of replacing one. From here 
 — and the two readings of one run are still both available, which is what makes the claim checkable
 rather than merely stated.
 
+### Phase 0b, reviewed — the artifact read as a document (0.1.36)
+
+0b was accepted on its own terms — the commit writes both documents, the profile withholds a model it
+cannot stand behind, the acceptance suite walks a real run through the real tools — and then the
+artifact itself was handed to a reader who had not written any of it. The verdict is worth keeping
+verbatim, because it separates the two things the round is often confused about: **"I would rate this
+as a successful Phase 0b projection, but not yet a successful semantic-model generation result."** A
+projection faithfully shows what the log held; a semantic model has to be readable as a description
+of the application, and six of the review's findings were about the difference.
+
+The round's scope was P0 and P1 in full, with two choices made before any code was written. The
+behaviour's **id stays** (`login`, not `sign_in`): an id is a key other documents point at, so the
+name — the vocabulary — is what changed and the key is not. And **credential redaction reaches
+`journeys[].goal` and nothing else** — the goal is the one field where instruction text can arrive
+whole, and redacting the readings themselves would destroy the evidence to protect a value the
+recorder already withholds as `[set]`. Both decisions are the same principle as D6 and P5: the
+artifact may not contain a claim, a value or a renaming that no reading supports.
+
+What the review found, and where each one landed:
+
+- **A behaviour named after its mechanism.** `behavior_login` carried the prose of a three-action
+  realization while its own edge semantics disagreed with it. The realization is the behaviour; the
+  name and description now say so.
+- **A state variable that no detection measured.** `projects` was declared with a detection reading
+  an element or route that could not distinguish its values — a dimension-shaped claim nothing can
+  evaluate, which P7 refuses (and now has a case under it).
+- **A journey, a realization and a transition that were the same fact written three times, with no
+  rule keeping them equal.** P12c checks the third against the first two; the round added the
+  consistency the reviewer asked to make a Phase-2 invariant.
+- **An actor that was really an authentication state.** A `state.identity.variant` is a surface
+  variant, not a role: the projection claims `journey.actor` only where `application.actors[]`
+  declares the id, the variant stays where it was observed, and P6 reports the rest.
+- **A goal that quoted a credential.** The value is withheld from the goal and from the name, the
+  goal is marked as not stated, and the reason travels in the graph's own `goal_source` key rather
+  than in prose.
+- **Evidence that did not say what it was evidence for.** Six fixes, three new P9 warning codes, and
+  the paragraph in §3 that states the rule once: keep the session's words, quote the store's word,
+  name the key and never the value, attribute a journey's references to their step, give a variable
+  the reading its distinction was drawn from, and dedupe by the whole reference so one reading can
+  back two claims.
+
+The evidence is the round's own, measured by projecting the reviewed log — `~/tmp/live-graph/logs-only`,
+the same five files `artifacts/abm-0b/application-model.json` came from — with the code before the
+round and after it:
+
+- `npm test` is **15/15** and `test/prove-abm.py` is **80 mutations, all 80 refused** — nineteen more
+  than the 61 the previous release shipped, eight of them for the evidence half of the round;
+- the artifact is that log projected by `test/abm-baseline.mjs`, and all five of the things this
+  round is about are visible in it: **31 references, 18 of them carrying a note**, and the thirteen
+  without one sit in `states` (4 — the reading that made the surface a state) and in the three
+  capabilities (9 — the walk's own words, which the projection had been dropping). Its
+  `state_variables[0]` is named `projects` and its detection reads
+  `element_current_user`; its goal quotes `password123`; its `journey.actor` is `"anonymous"`, a
+  state variant. The same log **committed** through `commitRun` is refused at `e4abf00` with **6**
+  findings (three P1 mechanism-names, three P2) and refused at 0.1.36 with **7** — the same six plus
+  `P7:dimension_without_detection` on `projects`, which is P0-2 turned into a rule: the projection
+  no longer writes a detection that cannot measure the distinction, so the dimension is reported
+  instead of carried. The withheld model is the honest answer for this walk and it is the same
+  answer before and after;
+- the graph the same log commits moves from **31 references with 18 notes to 33 with 33**: the
+  capabilities keep the walk's own words (0 of 3 noted → 3 of 3, on each of the three), the journey's
+  references go from 9 to 10 and all ten now name the step each reading documents, and the third
+  transition gains the reading that shows the storage key it wrote. The diff is 31 paths — 22 notes,
+  the generated timestamp, those two references and the renumbered warnings — and **not one P9
+  finding**, which is what a warning-level rule is for: nothing this project writes on its own walk
+  trips the three new ones;
+- the model the same log would write is withheld, so the round's effect on it is measured where the
+  refusal is not: projecting `candidatesFromRun` → `modelFromCandidates` past it changes **9 paths**
+  — the `element_current_user` detection is gone, the goal and `goal_stated` are withheld because the
+  instruction repeats two values the walk typed, and one state variable's evidence names the reading
+  its distinction was drawn from. Its 34 references were noted before and after, because **this
+  walk's own log writes a note on every reading already**: what the projection had been discarding
+  was the capability's copy of it, the state's, the edge's and the journey's — which is the half the
+  ledger holds down, not this diff.
+
 ### Phase 5 — actors become schema-native
 
 Phase 1 puts `actor` on the reading and resolves the vocabulary from config beside `application:`,
@@ -1342,7 +1442,7 @@ Each of these is load-bearing, not ceremony:
    `test/run.mjs` auto-discovers `*.test.mjs`.
 2. **Revert-proof each new rule**: break the rule in the source, confirm the suite fails *with
    the diagnostic you expect*, restore, confirm green. `test/prove-generate.py` is the template and
-   `test/prove-abm.py` is the running instance (61 mutations, all 61 refused; 17 through Phase 2, 9
+   `test/prove-abm.py` is the running instance (80 mutations, all 80 refused; 17 through Phase 2, 9
    more for Phase 3, and 35 for the defects the deploy and the live runs found — four from the two
    early deploys, three from the recorder defect, one from the instruction sentence, five from the
    value template the walk was never told how to declare, three from the arguments placement the
@@ -1356,8 +1456,10 @@ Each of these is load-bearing, not ceremony:
    being the turn's edge's — and the two that a review found by reading the prover against the
    source rather than by running anything: the projection's own reading of the shared `{{param}}`
    rule, and the boundary that says only a whole value is a reference, each of which the two proved
-   readers had made look proved); break the *rule*, not a clause the code already treats as
-   equivalent (removing `cutParameter &&` proved nothing — behaviourally identical).
+   readers had made look proved — **and nineteen more for the review of 0b's own artifact (0.1.36),
+   which read the document rather than the code that wrote it**); break the *rule*, not a clause the
+   code already treats as equivalent (removing `cutParameter &&` proved nothing — behaviourally
+   identical).
    **The template has grown with the instance and now has a total of its own**: 16 generate cases
    (9 from the generator's first suite, 4 from Phase 4, and 3 for the 0.1.32 live run's references —
    one per spelling of the rule plus one for the guard that reads it in the disagreement check),

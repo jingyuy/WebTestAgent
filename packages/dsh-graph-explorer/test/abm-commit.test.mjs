@@ -297,9 +297,15 @@ check('and login is still the composite, with its steps in walk order',
 // The ABM's version of the same fact, and the half that is new: `realization[]` is how the behaviour
 // is performed, and the calls that performed it are no longer offered as behaviours of their own.
 const modelLogin = model.behaviors.find((behavior) => behavior.name === 'login');
+// P0-1b: and it is no longer called a composite. The walk asked for `login` as a composite of three
+// capabilities, which is the pre-pivot spelling of the same three calls the model now carries as
+// `realization[]` — and `kind: "composite"` means, in the schema's own words, "the behaviour is
+// defined only by composed_of", which is false of this behaviour: its `composed_of` is empty and its
+// steps are what defines it. The word is dropped with the composition (D14), and the document states
+// no kind of its own, which is where the schema's default applies.
 check('the model re-reads login as one behaviour, named for the goal, and offers no call as a behaviour',
-  [model.behaviors.map((behavior) => behavior.name), modelLogin.composed_of, modelLogin.kind],
-  [['login'], [], 'composite']);
+  [model.behaviors.map((behavior) => behavior.name), modelLogin.composed_of, 'kind' in modelLogin],
+  [['login'], [], false]);
 check('with the two steps the walk performed, in the order it performed them',
   modelLogin.realization.map((step) => [step.action, step.element, step.purpose ?? null]),
   [['fill', 'element_email_input', 'enter_credentials'], ['click', 'element_submit_button', 'submit']]);
@@ -327,6 +333,18 @@ check('the two calls are projected as the one move the behaviour performed, and 
     transition.metadata.extra.collapsed.calls, transition.metadata.extra.collapsed.passed_through]),
   [['state_home_anonymous', 'state_dashboard_authenticated', 'behavior_login',
     ['transition_fill_login_email', 'transition_submit_login'], ['state_login']]]);
+// P0-1, on the walk the tool actually took. The edge's `behavior` is `behavior_login` and its
+// `realization[]` is the two calls above, so an edge still named and described after the call that
+// ended it — `Submit the sign-in form`, the second of the two — is a document whose own two fields
+// disagree. The fix is one line of reasoning: the edge is the move, so its prose is the move's, and
+// the sentence the surviving call was recorded with is kept where the edge's prose came from rather
+// than thrown away.
+check('and the edge is named and described as the move, with the call\'s own sentence kept under the collapse',
+  [model.transitions[0].name, model.transitions[0].description,
+    model.transitions[0].metadata.extra.collapsed.last_call],
+  ['login',
+    'login performed as one move from state_home_anonymous to state_dashboard_authenticated — 2 recorded call(s): fill_login_email, submit_login. The calls are this behaviour\'s realization[]; the edge is the move they add up to.',
+    { id: 'transition_submit_login', description: 'Submit the sign-in form' }]);
 // D4: no step claimed a journey name, so the walk's own path is the journey — and P12c has
 // something to check either way, which is the only reason the fallback exists.
 check('no step named a journey, so the walk is one, and it says it is not a stated goal',
@@ -344,6 +362,23 @@ check('no step named a journey, so the walk is one, and it says it is not a stat
 check('and it is one turn naming an edge the model has, because the two calls were one invocation',
   model.journeys[0].steps.map((step) => [step.transition, model.transitions.some((transition) => transition.id === step.transition)]),
   [['transition_submit_login', true]]);
+// P0-3: that one turn is a turn of a walk, and this is the chain the review asked to be consistent —
+// journey step → transition → behaviour → realization. The journey says it starts at
+// `state_home_anonymous` and the edge it names starts there; the edge names `login`; `login` is the
+// behaviour whose `realization[]` is the two calls the walk made; and the behaviour declares the
+// `email` its realization fills, while the turn binds nothing — the walk's *value* lives on the step
+// the generator reads it from, so a turn that repeated it would be the second place to say it that
+// `journeyStep` refuses to be. Asserted on the recorded walk rather than on a written fixture,
+// because the projection is the half that has to keep it true — and the profile check below is why
+// it cannot quietly stop being true: the two walk rules and the binding rule are all `error`s, so a
+// journey that does not hold together withholds the model instead of annotating it.
+const openingTurn = model.journeys[0].steps[0];
+const openingEdge = model.transitions.find((transition) => transition.id === openingTurn.transition);
+const openingBehavior = model.behaviors.find((behavior) => behavior.id === openingEdge.behavior);
+check('and the turn can be followed all the way down: journey → edge → behaviour → realization',
+  [model.journeys[0].start_state, openingEdge.from_state, openingBehavior.id,
+    openingBehavior.realization.length, openingTurn.arguments ?? null, openingBehavior.input],
+  ['state_home_anonymous', 'state_home_anonymous', 'behavior_login', 2, null, { email: { type: 'string', required: true } }]);
 
 // The model re-read from the run, which clause 4 also needs: the same candidates the projection
 // took, so the fallback below and the drift test above are both about the document that was written.
@@ -363,10 +398,49 @@ const derivedJourney = journeyless.journeys[0] ?? null;
 check('a document with edges and no journey projects as the walk it was, so P12 has one to check',
   [journeyless.journeys.length, derivedJourney?.goal_stated ?? null, derivedJourney?.start_state ?? null,
     (derivedJourney?.steps ?? []).map((step) => step.transition)],
-  // One step, where the admitted walk's journey has two: the graph's journey is what knew the walk
-  // made two calls, and the fallback is built from the edges the projection has, so it says the move
-  // once. That is the same fact at the granularity the model kept (D5/D12).
+  // One step: the fallback is built from the edges the projection has, and the walk's two calls were
+  // one invocation of one move, so it names that move once. That is the same fact at the granularity
+  // the model kept (D5/D12).
   [1, false, 'state_home_anonymous', ['transition_submit_login']]);
+
+// P1, on the recorded run rather than on a fixture, because the set of values a walk supplied is
+// read from the walk: the email this run typed is on the edge's `arguments` (the call's own field to
+// value map, which is where the commit records it), and a goal handed to the projection that quotes
+// it is a goal that repeats test data. A goal has to come from the record to be judged, so the
+// journey candidate is the projected walk's own with a stated goal put on it — everything else,
+// including the supplied set, is the run's.
+const quoting = modelFromCandidates({
+  ...reRead,
+  journeys: [{
+    ...(reRead.journeys[0] ?? {}),
+    goal: 'Sign in as test@example.com.',
+    metadata: {
+      ...(reRead.journeys[0]?.metadata ?? {}),
+      extra: { ...(reRead.journeys[0]?.metadata?.extra ?? {}), goal_stated: true },
+    },
+  }],
+});
+check('a goal that quotes a value the recorded run typed is withheld, by the run\'s own supplied set',
+  [quoting.journeys.length, quoting.journeys[0]?.goal?.startsWith('Derived goal:') ?? null,
+    quoting.journeys[0]?.goal?.includes('test@example.com') ?? null,
+    quoting.journeys[0]?.goal_stated ?? null,
+    quoting.journeys[0]?.metadata?.extra?.goal_source?.startsWith('withheld:') ?? null],
+  [1, true, false, false, true]);
+// The control for the rule being evidence and not a word: the same document, the same walk, and a
+// goal that repeats nothing it typed is the actor's sentence and is carried as one.
+check('while a goal in that same document that quotes nothing the walk typed is carried as stated',
+  modelFromCandidates({
+    ...reRead,
+    journeys: [{
+      ...(reRead.journeys[0] ?? {}),
+      goal: 'Reach the dashboard the signed-in user sees.',
+      metadata: {
+        ...(reRead.journeys[0]?.metadata ?? {}),
+        extra: { ...(reRead.journeys[0]?.metadata?.extra ?? {}), goal_stated: true },
+      },
+    }],
+  }).journeys[0]?.goal ?? null,
+  'Reach the dashboard the signed-in user sees.');
 
 // --- clause 4: nothing either document says is in error, and the two readers agree ---------
 const graphInvariants = committed.invariants.filter((result) => result.document === 'graph');
@@ -386,6 +460,29 @@ check('the profile finds nothing in error, so the model was written rather than 
 check('and no model rule is a blocker of the graph',
   [graphInvariants.length + modelInvariants.length, committed.invariants.filter((result) => /^P\d+$/.test(result.code)).length],
   [28, 15]);
+
+// --- clause 4b: every reference says what it is evidence for ----------------------------------
+// §P1's evidence granularity, asserted on the document that was written rather than on a hand-built
+// fixture. The references were always attached to the right claims; what was missing was the words —
+// and what the review found was one journey carrying nine references and nine identical notes, with
+// nothing saying which step any of them documented. `commit.js` writes them: the session's own note
+// kept on the capability, the store's own word for a state, the storage key on a persistence effect,
+// and the step on each of a journey's references.
+const references = [
+  ...model.behaviors.flatMap((behavior) => (behavior.evidence ?? []).map((ref) => ['behaviors', behavior.id, ref])),
+  ...model.transitions.flatMap((transition) => (transition.evidence ?? []).map((ref) => ['transitions', transition.id, ref])),
+  ...model.journeys.flatMap((journey) => (journey.evidence ?? []).map((ref) => ['journeys', journey.id, ref])),
+  ...model.states.flatMap((state) => (state.evidence ?? []).map((ref) => ['states', state.id, ref])),
+  ...model.state_variables.flatMap((variable) => (variable.evidence ?? []).map((ref) => ['state_variables', variable.name, ref])),
+];
+check('every reference in the written model names a kind of reading, and says what it is evidence for',
+  references.filter(([, , ref]) => !ref?.role || typeof ref.note !== 'string' || !ref.note.trim()),
+  []);
+check('and a journey\'s references say which step of the walk each reading documents',
+  [model.journeys.length,
+    model.journeys.every((journey) => (journey.evidence ?? []).length >= 3
+      && journey.evidence.every((ref) => /read for step \d+ of this journey \(transition_[a-z_]+, cap_[a-z_]+\)/.test(String(ref.note))))],
+  [1, true]);
 
 // The drift test, and the reason this suite exists rather than a unit test of either half: the
 // commit's model rules are read from a document it assembled in memory, and this reads the document

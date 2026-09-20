@@ -53,7 +53,25 @@ const ok = (label, condition, detail = '') => {
 // copied from the real run (`~/tmp/live-graph/graph-run`): the defect this suite quantifies is the
 // one that run produced, and a fixture that renamed things would be measuring a different walk.
 
-const evidence = (observation, role) => ({ observation, role });
+// §P1: a reference says what it is evidence for. The fixture writes a note on every reference, the
+// way `commit.js` does — one note per reading, saying which claim the reading belongs to — so the
+// documents under test are shaped like the documents the projection produces. The two rules that
+// require one are exercised by taking a note or a role away on purpose, below.
+const ROLE_NOTES = {
+  identity: 'the surface as it stood at this reading',
+  action: 'the action this reading recorded',
+  effect: 'what the machinery saw change between this reading and the one before it',
+  element: 'the reading the surface was described in',
+  detection: 'the reading the dimension was measured in',
+  api: 'the reading the call was seen in',
+  counterexample: 'the reading that contradicted the claim',
+  unknown: 'the reading, with nothing said about what it is evidence for',
+};
+const evidence = (observation, role) => ({
+  observation,
+  role,
+  note: ROLE_NOTES[role] ?? `the reading, taken as evidence for the ${role} claim`,
+});
 const THREE_ROLES = [evidence('obs_0001', 'identity'), evidence('obs_0002', 'action'), evidence('obs_0002', 'effect')];
 
 const element = (id, role, name, extra = {}) => ({
@@ -99,7 +117,16 @@ export const candidates = () => structuredClone({
         element('element_project_list', 'list', 'Project list', { evidence: [evidence('obs_0003', 'identity')] }),
         element('element_add_project_button', 'button', 'Add project', { evidence: [evidence('obs_0003', 'element')] }),
       ],
-      detection: [{ type: 'element_state', element: 'element_project_list', operator: 'exists' }],
+      detection: [
+        { type: 'element_state', element: 'element_project_list', operator: 'exists' },
+        // The dimension's own check, in the graph's vocabulary: a `value` assertion that names the
+        // dimension (`target`) *and* the surface a browser reads it on. That name is what makes the
+        // check attributable — the projection carries it as the state variable's own `name` — and
+        // this is the shape `commit.js` asks the walk for. A state whose identity declares a
+        // dimension and whose detection reads no surface for it is the case
+        // `P7:dimension_without_detection` exists for, and the projection must not invent one.
+        { type: 'value', target: 'projects', element: 'element_project_list', operator: 'greater_than', expected: 0 },
+      ],
       evidence: [evidence('obs_0003', 'identity')],
       metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
     },
@@ -168,7 +195,15 @@ export const candidates = () => structuredClone({
         { type: 'storage_changed', target: 'localStorage.acme-demo-state', observed: true },
       ],
       evidence: THREE_ROLES,
-      metadata: { confidence: 1, status: 'verified', producer: 'llm:deepseek-flash' },
+      // What the reading saw the step write down, keyed by storage key: the effect above is a claim
+      // about the session, and this is the sample it is evidenced by (see the P9 rule that refuses a
+      // `storage_changed` effect no reading shows).
+      metadata: {
+        confidence: 1,
+        status: 'verified',
+        producer: 'llm:deepseek-flash',
+        extra: { recorder: { observed_change: { storage: { 'acme-demo-state': '{"user":"test@example.com"}' } } } },
+      },
     },
   ],
   journeys: [
@@ -204,12 +239,13 @@ console.log('\n# projection');
     model.application.actors.map((actor) => actor.id), ['anonymous', 'authenticated']);
   // The variant is all a run can witness, so with nothing declared that is all the projection may
   // name — and it says so in the description rather than letting a derived id read as a decided
-  // role. `application.actors[]` cannot carry metadata, so the description is the only place the
-  // document has to admit the row was derived.
-  check('and each one admits it was derived, because an actor has no metadata to say it in',
+  // role: a row exists because `actors` cannot be empty and because `state.identity.variant` is read
+  // through this vocabulary, not because the application offers that role. `application.actors[]`
+  // cannot carry metadata, so the description is the only place the document has to admit it.
+  check('and each one admits it is a surface variant and not a role',
     model.application.actors.map((actor) => actor.description),
-    ['Observed as the surface variant "anonymous"; the projection cannot say what it means.',
-      'Observed as the surface variant "authenticated"; the projection cannot say what it means.']);
+    ['Observed as the surface variant "anonymous"; no declaration names an actor with this id. A variant is what the run saw and not a role the application offers, so this row is what a state\'s variant resolves to rather than a claim about who can use the application.',
+      'Observed as the surface variant "authenticated"; no declaration names an actor with this id. A variant is what the run saw and not a role the application offers, so this row is what a state\'s variant resolves to rather than a claim about who can use the application.']);
 
   // --- a declared vocabulary -------------------------------------------------------------------
   // The declaration is the one input the evidence cannot supply, so this is the one place the
@@ -245,7 +281,7 @@ console.log('\n# projection');
     partial.model.application.actors,
     [
       { id: 'anonymous', description: 'Nobody is signed in.' },
-      { id: 'authenticated', description: 'Observed as the surface variant "authenticated"; the projection cannot say what it means.' },
+      { id: 'authenticated', description: 'Observed as the surface variant "authenticated"; no declaration names an actor with this id. A variant is what the run saw and not a role the application offers, so this row is what a state\'s variant resolves to rather than a claim about who can use the application.' },
     ]);
   // A declaration is not a repair: it adds rows, and it must not make a document that says more
   // than the walk did. The states, behaviours and transitions are the evidence's, unchanged.
@@ -267,7 +303,14 @@ console.log('\n# projection');
     model.states[1].affordances.map((affordance) => affordance.element), ['element_add_project_button']);
   check('an affordance carries the confidence of a claim nothing refuted',
     model.states[1].affordances[0].metadata.confidence, 0.3);
-  check('a dimension becomes a state variable whose detection reads the state\'s own element',
+  // §P1: a variable's evidence is about *the variable*, so its note names the state whose identity
+  // draws the distinction and the value that state was read with. The reference used to be the
+  // state's own `evidence[]` copied whole, note and all — prose that answers a question about the
+  // state, carried on a claim about a variable, which is traceability that looks present and is not.
+  const variableReading = 'the reading in which state_project_list_authenticated_projects_populated'
+    + ' was seen drawing this distinction: its identity declares projects = "populated", and the'
+    + ' reading is where the surface was read as that state';
+  check('a dimension becomes a state variable whose detection is the check the run recorded for it',
     model.state_variables,
     [{
       name: 'projects',
@@ -275,8 +318,11 @@ console.log('\n# projection');
       type: 'string',
       values: ['populated'],
       dimension_of: ['state_project_list_authenticated_projects_populated'],
-      detection: { type: 'value', element: 'element_project_list', operator: 'equals', expected: 'populated' },
-      evidence: [evidence('obs_0003', 'identity')],
+      // The surface and the operator are the reading's; the name is the variable's. Nothing is
+      // derived: a detector the run did not record is a detector no test can run, which is the
+      // whole of what this projection owes a generator.
+      detection: { type: 'value', element: 'element_project_list', operator: 'greater_than', expected: 0 },
+      evidence: [{ observation: 'obs_0003', role: 'identity', note: variableReading }],
       metadata: {
         confidence: 0.5,
         status: 'inferred',
@@ -287,11 +333,35 @@ console.log('\n# projection');
   check('the journey keeps the walk order, the edge arguments and the starting variant',
     model.journeys[0].steps.map((step) => [step.transition, step.arguments?.email ?? step.arguments?.password ?? null]),
     [['transition_fill_login_email', 'test@example.com'], ['transition_fill_login_password', '[set]'], ['transition_submit_login', null]]);
-  check('goal_stated is the commit\'s flag, not a guess', model.journeys[0].goal_stated, true);
-  check('the journey actor is the variant the walk started as', model.journeys[0].actor, 'anonymous');
-  ok('the actor choice is recorded in the document\'s own notes',
-    model.warnings.some((note) => note.includes('starts as "anonymous" and ends as "authenticated"')),
+  // P1: the fixture's own goal quotes the account the walk typed, so it is the withheld case (see the
+  // block below). This is the other one — the flag is the commit's, and a goal that states an outcome
+  // is carried exactly as it was stated, with the flag the graph set still standing.
+  const stated = projected({
+    journeys: [{
+      ...candidates().journeys[0],
+      goal: 'List the projects the signed-in user can see.',
+      metadata: { status: 'inferred', producer: 'importer:dsh-graph-explorer', extra: { goal_stated: true } },
+    }],
+  });
+  check('goal_stated is the commit\'s flag, not a guess', stated.model.journeys[0].goal_stated, true);
+  check('and a goal that repeats nothing the walk typed is carried verbatim',
+    stated.model.journeys[0].goal, 'List the projects the signed-in user can see.');
+  // P1: the actor field. The fixture declares no actors, so the walk's variant "anonymous" is not a
+  // role this document may hand to `journey.actor` — that field means "role the journey is exercised
+  // as", and no declaration says the application has such a role. The variant is not lost: it is on
+  // every state's identity, which is where the run's own word for the surface belongs, and P6
+  // reports the gap as a warning rather than letting a surface stand in for a role.
+  check('a journey claims no actor when the variant it walked was never declared as a role',
+    [model.journeys[0].actor ?? null,
+      withRule(profileFindings(model, {}), 'P6').filter((finding) => finding.scope === 'journeys').map((finding) => finding.code)],
+    [null, ['journey_actor_missing']]);
+  ok('and the document says what the run did show instead of quietly claiming a role',
+    model.warnings.some((note) => note.includes('which is an authentication state and not a role')),
     JSON.stringify(model.warnings));
+  // The same walk with the variant declared as an actor: the declaration is what makes the id a
+  // role, and then the run's trace of the surface is the trace of the role.
+  check('while the same walk with that variant declared walks as it, because a role is a declaration',
+    vocabulary.model.journeys[0].actor, 'anonymous');
   ok('a null guard is not carried (0a: null is not a value here)',
     !('guard' in model.transitions[0]), JSON.stringify(model.transitions[0].guard));
   ok('the projection never writes to the candidates it read',
@@ -302,7 +372,7 @@ console.log('\n# projection');
 
 console.log('\n# the 0.1.22 defect, in miniature');
 {
-  const { findings, source } = projected();
+  const { findings, source, model } = projected();
   check('three P1 errors (the mechanism names), three P2 warnings (steps with no realization)',
     codes(findings.filter((finding) => finding.rule === 'P1' || finding.rule === 'P2')),
     ['P1:behavior_name_is_a_mechanism', 'P1:behavior_name_is_a_mechanism', 'P1:behavior_name_is_a_mechanism',
@@ -311,6 +381,25 @@ console.log('\n# the 0.1.22 defect, in miniature');
     subjects(findings, 'P1'),
     ['behavior_fill_login_email', 'behavior_fill_login_password', 'behavior_submit_login']);
   check('and passes the composite that names the goal', subjects(findings, 'P1').includes('behavior_login'), false);
+  // P0-1b: `kind: "composite"` is refused of a behaviour this run *realized*, because the schema
+  // defines the word as "defined only by composed_of" and a realized behaviour is defined by its
+  // steps. The walk's own declaration is what the document carries whenever the realization does not
+  // contradict it, so the same capability is projected twice below: once as a composite nobody
+  // realized (the word stands), and once as the behaviour this run performed (the word is the
+  // pre-pivot spelling of the steps the document now carries, and it goes with the composition).
+  const compositeKind = (kind, steps) => {
+    const source = candidates();
+    const login = source.capabilities.find((entry) => entry.id === 'cap_login');
+    login.kind = kind;
+    if (steps) login.steps = steps;
+    return modelFromCandidates(source).behaviors.find((entry) => entry.id === 'behavior_login');
+  };
+  check('a composite the walk never realized is carried as the composite it declared itself',
+    compositeKind('composite', null).kind, 'composite');
+  check('and the same behaviour, once this run realized it, is not called a composite any more',
+    ['kind' in compositeKind('composite', [{ action: 'fill', element: 'element_email_input' }]),
+      compositeKind('composite', [{ action: 'fill', element: 'element_email_input' }]).composed_of],
+    [false, []]);
   const p14 = withRule(findings, 'P14');
   // A derived state variable used to claim `verified` with no producer behind it, which is the one
   // claim in the projection that outranked the reading it came from. It is now inferred, honestly,
@@ -328,7 +417,7 @@ console.log('\n# the 0.1.22 defect, in miniature');
     [subjects(findings, 'P14').includes('behavior_login'), subjects(findings, 'P14').includes('journey_login_anonymous_to_project_list')],
     [false, false]);
   check('the summary counts them the way a gate would read them', summarizeFindings(findings),
-    { total: 14, errors: 11, warnings: 3, infos: 0, bySeverity: { info: 0, warning: 3, error: 11 }, byRule: { P1: 3, P2: 3, P14: 8 }, failed: true });
+    { total: 15, errors: 11, warnings: 4, infos: 0, bySeverity: { info: 0, warning: 4, error: 11 }, byRule: { P1: 3, P2: 3, P6: 1, P14: 8 }, failed: true });
   ok('the fixture really is the run\'s own vocabulary',
     MECHANISM_VERBS.has('fill') && MECHANISM_VERBS.has('submit') && source.capabilities[3].name === 'login');
 }
@@ -514,7 +603,7 @@ console.log('\n# P6 actors are declared and traceable, P7 a dimension has a dete
 }
 {
   const { model } = projected();
-  check('the derived detection is enough for P7', withRule(profileFindings(model, {}), 'P7').length, 0);
+  check('the recorded detection is the one P7 reads, and it passes', withRule(profileFindings(model, {}), 'P7').length, 0);
 
   delete model.state_variables[0].detection;
   ok('a dimension with no detection is refused',
@@ -523,6 +612,15 @@ console.log('\n# P6 actors are declared and traceable, P7 a dimension has a dete
   model.state_variables[0].detection = { type: 'value', operator: 'equals', expected: 'populated' };
   ok('a detection that reads neither an element nor a route is refused',
     codes(profileFindings(model, {})).includes('P7:detection_reads_no_surface'));
+
+  // The fabricated detector this rule exists for: live 0.1.34 read `element_sign_in_button equals
+  // "seeded"` off a state whose only dimension was a project count. The check existed, so no rule
+  // reported the gap, and the state looked verified on the strength of an element-identity check
+  // that would have passed on the login page.
+  model.state_variables[0].detection = { type: 'value', element: 'element_login_button', operator: 'equals', expected: 'populated' };
+  ok('a detector that reads an element no state drawing the dimension declares is refused',
+    codes(profileFindings(model, {})).includes('P7:detection_reads_another_surface'),
+    JSON.stringify(codes(profileFindings(model, {}))));
 
   model.state_variables[0].detection = { type: 'value', element: 'element_project_list', operator: 'equals', expected: 'populated' };
   model.state_variables[0].values = ['empty'];
@@ -533,6 +631,73 @@ console.log('\n# P6 actors are declared and traceable, P7 a dimension has a dete
   model.state_variables[0].name = 'project_count';
   ok('a dimension no state variable declares is refused',
     codes(profileFindings(model, {})).includes('P7:undeclared_dimension'));
+}
+
+// The projection's side of the same rule, which is the review's §2: a state that declares a
+// dimension nothing reads is carried with *no* detector, and the projection says so itself rather
+// than letting the silence read as a clean state. Three outcomes, and the third is the one that
+// used to be a fabrication.
+console.log('\n# a dimension nothing measures is reported, not invented');
+{
+  const source = candidates();
+  const state = source.states[1];
+  // 1. The state's own detection names the dimension and reads a surface → carried.
+  check('a detection that names the dimension is carried, with the reading\'s own operator',
+    projected(source).model.state_variables[0].detection,
+    { type: 'value', element: 'element_project_list', operator: 'greater_than', expected: 0 });
+
+  // 2. The state asserts the dimension and reads no surface → nothing is carried, and the reason
+  //    names the state that made the unreadable claim.
+  state.detection = [{ type: 'value', target: 'projects', operator: 'equals', expected: 'populated' }];
+  const unreadable = projected(source);
+  check('an assertion that names the dimension and no surface carries no detector',
+    [unreadable.model.state_variables[0].detection ?? null,
+      unreadable.model.warnings.some((note) => note.includes('names no element or route to read it on'))],
+    [null, true]);
+  ok('and the profile refuses the dimension rather than the state looking verified',
+    codes(unreadable.findings).includes('P7:dimension_without_detection'),
+    JSON.stringify(codes(unreadable.findings)));
+
+  // 3. Nothing asserts the dimension at all. The old projector read whatever element the state's
+  //    detection happened to mention and wrote the dimension's *word* into `expected` — the
+  //    fabrication, in one line. Now there is no detector and the loss is the finding.
+  state.detection = [{ type: 'element_state', element: 'element_project_list', operator: 'exists' }];
+  const nothing = projected(source);
+  check('a dimension no reading measures is carried without a detector, and said out loud',
+    [nothing.model.state_variables[0].detection ?? null,
+      nothing.model.warnings.some((note) => note.includes('no reading of it records an element or route that measures it'))],
+    [null, true]);
+  check('and the neighbouring element is not borrowed to make one up',
+    [nothing.model.state_variables[0].detection ?? null, nothing.model.state_variables[0].name],
+    [null, 'projects']);
+  ok('P7 refuses it, so the document cannot claim a state variable it cannot check',
+    codes(nothing.findings).includes('P7:dimension_without_detection'),
+    JSON.stringify(codes(nothing.findings)));
+
+  // 4. The committed step's own count is a real reading and grounds the detector when the state's
+  //    identity does not: this is the signal `commit.js` records (`candidate_assertions[].basis ===
+  //    'dimension'`) and the projection copies rather than derives.
+  state.detection = [{ type: 'element_state', element: 'element_project_list', operator: 'exists' }];
+  source.transitions[2].metadata = {
+    confidence: 0.5,
+    status: 'inferred',
+    producer: 'llm:deepseek-flash',
+    extra: {
+      commit: {
+        candidate_assertions: [{
+          assertion: { type: 'value', target: 'projects', element: 'element_project_list', operator: 'greater_than', expected: 0 },
+          basis: 'dimension',
+          detail: 'state_project_list_authenticated_projects_populated declares the dimension "projects" as "populated", and the reading at the end of the step counted 3 row(s) in element_project_list — so the dimension is checkable as a count.',
+          from: 'obs_0003',
+        }],
+      },
+    },
+  };
+  const counted = projected(source);
+  check('the count the commit attributed to the dimension grounds the detector',
+    counted.model.state_variables[0].detection,
+    { type: 'value', element: 'element_project_list', operator: 'greater_than', expected: 0 });
+  check('and nothing is reported against it', withRule(counted.findings, 'P7').length, 0);
 }
 
 // --- P8, P9 ---------------------------------------------------------------------------------------
@@ -572,6 +737,38 @@ console.log('\n# P8 semantic paths name entities, P9 nothing is claimed without 
   roles.transitions[0].evidence = [evidence('obs_9999', 'identity'), evidence('obs_9999', 'action'), evidence('obs_9999', 'effect')];
   ok('evidence naming an observation the document does not carry is refused',
     withRule(profileFindings(roles, {}), 'P9').some((finding) => finding.code === 'unresolved_evidence'));
+}
+{
+  // §P1: a reference has to say what it is evidence for. Both codes are warnings, and a document
+  // stripped of its notes is exactly what the 0b projection looked like — one journey whose nine
+  // references carried nine identical notes and nothing saying which step any of them documented.
+  const { model: bare } = projected();
+  bare.transitions[2].evidence = [
+    { observation: 'obs_0003', role: 'effect' },
+    'obs_0003',
+  ];
+  check('a reference with a role and no words, and the schema\'s bare-id shorthand, are both warnings',
+    withRule(profileFindings(bare, {}), 'P9').filter((finding) => finding.severity === 'warning').map((finding) => finding.code),
+    ['evidence_without_a_note', 'evidence_without_a_role', 'evidence_without_a_note']);
+  ok('and the two the stripped reference really did lose are still refused outright',
+    withRule(profileFindings(bare, {}), 'P9').some((finding) => finding.code === 'transition_missing_evidence_role'));
+
+  const { model: storage } = projected();
+  delete storage.transitions[2].metadata.extra.recorder.observed_change.storage;
+  check('a storage_changed effect the recorded change does not show is reported, as a warning',
+    withRule(profileFindings(storage, {}), 'P9').map((finding) => finding.code),
+    ['persistence_effect_without_a_reading']);
+
+  // The rule reads the *key*, not the presence of a sample: an edge that claims to have written a
+  // key this step's own reading did not write is the same unbacked claim with more paperwork around
+  // it, and it is the shape a generator would most like to be told is true.
+  const { model: otherKey } = projected();
+  otherKey.transitions[2].effects[1].target = 'localStorage.some-other-key';
+  check('and an effect on a key this step\'s reading does not show is reported too',
+    withRule(profileFindings(otherKey, {}), 'P9').map((finding) => finding.code),
+    ['persistence_effect_without_a_reading']);
+  check('while the same edge, with the reading behind it, draws nothing at all',
+    withRule(profileFindings(projected().model, {}), 'P9'), []);
 }
 
 // --- P10, P11 -------------------------------------------------------------------------------------
@@ -650,6 +847,38 @@ console.log('\n# one move is one turn of the walk');
   check('and the turn carries the arguments of the edge it names, not of the call that opened it',
     model.journeys[0].steps.map((step) => [step.transition, step.arguments ?? null]),
     [['transition_submit_login', null]]);
+  // P0-1: the edge's own prose is the move's. `...last` left the edge's `name` and `description`
+  // describing the call that *ended* the move, and this is the fixture where that is visible: one
+  // behaviour, named for what the user wants, with a three-action realization — and an edge that
+  // was named and described after its last click. A reader had a `behavior` pointing at `login` and
+  // a sentence about `submit_login` sitting in the same object, with nothing saying which of the two
+  // the edge was. The calls carry their own sentences (`candidates()` gives them none, so this one
+  // is written here), because that is what the commit records — and the edge no longer keeps them.
+  const last = realized.transitions.find((entry) => entry.id === 'transition_submit_login');
+  last.name = 'submit_login';
+  last.description = 'Submit the sign-in form.';
+  const named = modelFromCandidates(realized);
+  const edge = named.transitions[0];
+  check('the edge the collapse leaves is named and described after the behaviour, not after the call that ended it',
+    [edge.name, edge.description],
+    ['login',
+      'login performed as one move from state_login_anonymous to state_project_list_authenticated_projects_populated — 3 recorded call(s): fill_login_email, fill_login_password, submit_login. The calls are this behaviour\'s realization[]; the edge is the move they add up to.']);
+  check('and the sentence the surviving call was recorded with is kept, where the edge\'s own prose came from',
+    edge.metadata.extra.collapsed.last_call,
+    { id: 'transition_submit_login', name: 'submit_login', description: 'Submit the sign-in form.' });
+  // A behaviour with one step is a behaviour whose move *is* that call, and re-deriving its prose
+  // would rewrite what the commit recorded for no reason: the edge of a single call is the call.
+  const single = candidates();
+  single.capabilities.find((entry) => entry.id === 'cap_login').steps = undefined;
+  single.transitions = [single.transitions[2]];
+  single.transitions[0].name = 'submit_login';
+  single.transitions[0].description = 'Submit the sign-in form.';
+  single.states[0].capabilities = ['cap_submit_login'];
+  single.journeys[0].transitions = ['transition_submit_login'];
+  const alone = modelFromCandidates(single);
+  check('and an edge that absorbed nothing keeps the sentence its own call was recorded with',
+    [alone.transitions[0].name, alone.transitions[0].description, alone.transitions[0].metadata.extra?.collapsed ?? null],
+    ['submit_login', 'Submit the sign-in form.', null]);
 }
 {
   // The other direction, because a rule that only ever collapses is a rule that would merge two
@@ -862,6 +1091,128 @@ console.log('\n# the model in the shape the generator reads');
   stepless.journeys[0].steps = [];
   ok('a journey with no steps is refused',
     codes(profileFindings(stepless, {})).includes('P12:journey_without_steps'));
+}
+
+// A journey is "an ordered walk over transitions", and its steps are references: `transition` names
+// the edge, the edge names the behaviour, the behaviour owns the names of its inputs. A reference
+// only carries meaning as far as it can be followed, so these are the two ways a journey stops being
+// followable — and both are refusals, because with a journey the generator cannot expand, the one
+// end-to-end claim the document makes is not a claim about the application. The shape the rule was
+// written for is the reviewed document's: one edge named three times. Three turns, each saying "walk
+// this edge", while only the first of them stood where that edge begins.
+
+console.log('\n# P0-3 a journey is one walk, and every binding is the behaviour\'s');
+{
+  const { model, source } = projected();
+  // The P6 actor warning is the one journey-scope finding this fixture has, and it is what makes the
+  // check below about the walk rather than about the fixture's vocabulary: the walk rules are
+  // `P12`/`P5` and this run satisfies all of them.
+  check('the walk the run took is one walk: every turn begins where the turn before it ended',
+    profileFindings(model, { candidates: source }).filter((finding) => finding.scope === 'journeys')
+      .map((finding) => `${finding.rule}:${finding.code}`),
+    ['P6:journey_actor_missing']);
+
+  const { model: repeated } = projected();
+  repeated.journeys[0].steps = [...repeated.journeys[0].steps, repeated.journeys[0].steps[2]];
+  ok('a turn that begins where the turn before it did not end is refused, not read as a repetition',
+    codes(profileFindings(repeated, {})).includes('P12:journey_step_does_not_continue_the_walk'));
+
+  const { model: elsewhere } = projected();
+  elsewhere.journeys[0].start_state = 'state_project_list_authenticated_projects_populated';
+  ok('and a journey that starts where its first step does not is refused',
+    codes(profileFindings(elsewhere, {})).includes('P12:journey_start_state_not_where_the_walk_starts'));
+
+  const { model: rebound } = projected();
+  rebound.journeys[0].steps[0].arguments = { password: 'hunter2' };
+  ok('a binding the behaviour it performs does not declare is refused',
+    codes(profileFindings(rebound, {})).includes('P5:journey_step_argument_not_declared'));
+  check('and the behaviour\'s own declared names are accepted by that same rule, which is what makes it a check',
+    codes(profileFindings(model, {})).includes('P5:journey_step_argument_not_declared'), false);
+}
+
+// --- P1: a journey's goal is never the instruction that carried a credential ---------------------
+//
+// The prohibition is the one thing `journey.schema.json` says about `goal` — "NEVER the raw instruction
+// when the instruction carried a credential" — and nothing in the evidence says *which* instruction
+// carried one, because a credential is a string like any other. So the test is not the shape of a word,
+// it is a repetition: the fixture's goal is `Sign in with test@example.com and password123.`, and
+// `test@example.com` is a value the walk typed into the email field, on the edge's `arguments`.
+//
+// Withheld is not blanked. The sentence is *replaced* by one the model can support — what the walk
+// performed, in order, and where it ended — because a goal with a hole in it ("sign in with and")
+// states nothing and reads as damage; and the instruction the run did state is still on the journey's
+// metadata exactly as the commit wrote it, which is where a reader goes for the run's own words.
+console.log('\n# P1 a goal is never the instruction that carried a credential');
+{
+  const { model } = projected();
+  const [journey] = model.journeys;
+  check('a goal that repeats a value the walk typed is withheld, and the run\'s sentence does not come along',
+    [journey.goal.startsWith('Derived goal:'), journey.goal.includes('test@example.com'), journey.goal.includes('password123')],
+    [true, false, false]);
+  check('and the derivation names the behaviours the walk performed, in walk order',
+    journey.goal,
+    'Derived goal: the walk performs fill_login_email, fill_login_password, submit_login and reaches state_project_list_authenticated_projects_populated from state_login_anonymous (3 moves).');
+  check('and the flag goes to false, because nobody stated this sentence',
+    journey.goal_stated, false);
+  ok('while the reason is kept in the graph\'s own key, so the two documents agree about why',
+    (journey.metadata.extra.goal_source ?? '').startsWith('withheld:'),
+    JSON.stringify(journey.metadata));
+  check('and nothing else about the journey\'s provenance is touched — every value stays where the record put it',
+    [journey.metadata.extra.goal_stated, 'run_instruction' in journey.metadata.extra],
+    [false, false]);
+  ok('the withholding is reported as a note rather than done silently',
+    model.warnings.some((note) => note.includes('withheld:')), JSON.stringify(model.warnings));
+
+  // A name is a second sentence about the same walk — the commit derives it from the goal — so a name
+  // that repeats a value is the same defect in a shorter field, and the keys corrected here are the
+  // graph's own (`name_from`, `name_source_kind`, `name_stated`): a document that disagreed with
+  // itself about where its name came from would be worse than either answer.
+  const named = projected({
+    journeys: [{
+      ...candidates().journeys[0],
+      name: 'Sign in as test@example.com',
+      metadata: { status: 'inferred', extra: { goal_stated: true, name_from: 'the first clause of the run\'s stated goal', name_source_kind: 'goal', name_stated: true } },
+    }],
+  });
+  const renamed = named.model.journeys[0];
+  check('a name that repeats the value is derived from the walk, and the flag that called it stated goes with it',
+    [renamed.name, renamed.metadata.extra.name_stated, renamed.metadata.extra.name_source_kind,
+      renamed.metadata.extra.name_from.startsWith('the endpoints of the walk:')],
+    ['Derived walk: state_login_anonymous to state_project_list_authenticated_projects_populated (3 step(s))', false, 'endpoints', true]);
+  ok('and that, too, is reported rather than silent',
+    named.model.warnings.some((note) => note.includes('name repeats a value')), JSON.stringify(named.model.warnings));
+
+  // A value too short to be told apart from the sentence around it is not a repetition. The floor is
+  // four characters for one reason: a walk that typed "yes" into a checkbox must not have its goal
+  // withheld for the instruction's own "yes".
+  const tiny = projected({
+    transitions: candidates().transitions.map((transition, index) => (
+      index === 0 ? { ...transition, action: { ...transition.action, arguments: { email: 'yes' } } } : transition
+    )),
+    journeys: [{
+      ...candidates().journeys[0],
+      goal: 'Sign in as yes.',
+      metadata: { status: 'inferred', extra: { goal_stated: true } },
+    }],
+  });
+  check('and a value shorter than four characters withholds nothing, so a word like "yes" is not a secret',
+    [tiny.model.journeys[0].goal, tiny.model.journeys[0].goal_stated],
+    ['Sign in as yes.', true]);
+
+  // The other half of what makes this a rule rather than a heuristic: the test is what the walk typed,
+  // not what a credential looks like. `hunter2` is the password everyone recognises as a password, and
+  // this projection has no opinion about it — the walk never typed it, so the sentence that says it is
+  // the run's own goal and it is carried as stated.
+  const untyped = projected({
+    journeys: [{
+      ...candidates().journeys[0],
+      goal: 'Sign in with hunter2.',
+      metadata: { status: 'inferred', extra: { goal_stated: true } },
+    }],
+  });
+  check('and a goal is judged by what the walk typed, not by what a credential looks like',
+    [untyped.model.journeys[0].goal, untyped.model.journeys[0].goal_stated],
+    ['Sign in with hunter2.', true]);
 }
 {
   const { model } = projected();

@@ -148,7 +148,7 @@ export const PROFILE_RULES = Object.freeze({
   P6: ['warning'],
   P7: ['error'],
   P8: ['warning'],
-  P9: ['error'],
+  P9: ['error', 'warning'],
   P10: ['warning'],
   P11: ['warning'],
   P12: ['error', 'info'],
@@ -341,6 +341,138 @@ export function candidatesFromRun(dir) {
 // ---------------------------------------------------------------------------------------------
 
 /**
+ * The values this walk supplied into a field, and therefore the values the model may not repeat as
+ * prose.
+ *
+ * `capture.js` masks a password box before it is read (`entry.value = el.type === 'password' ? …
+ * '[set]' …`) for one reason: "the graph is a durable artefact and a credential in it outlives the
+ * run". The *semantic* layer honours that mask (`fill_login_password` is realised with the value
+ * `[set]`), but a goal quoted from the run's instruction undoes it in prose — the 0b live run's goal
+ * was "Using the browser tools, open the Acme demo app at http://127.0.0.1:4173/ and sign in with
+ * test@example.com and password123.", and the email it names is also on an edge's `arguments` while
+ * the password is on the recorded action. This is the set of values that make an instruction one
+ * that "carried a credential" (`journey.schema.json`, `goal`).
+ *
+ * Read from the evidence, never from the shape of a word: an instruction that says "sign in as the
+ * seeded user" repeats nothing the walk typed, and this module does not decide whether a word looks
+ * like a secret. What it does is narrower and checkable: a sentence that repeats a value the walk put
+ * in a field is a sentence quoting test data rather than stating an outcome.
+ *
+ * Four characters is the floor, because a walk that typed "yes" must not have its goal withheld for
+ * the instruction's own "yes": a value shorter than that is not specific enough to be told apart from
+ * the sentence around it, and a rule that fires on the word "yes" is a rule nobody can keep.
+ */
+const SUPPLIED_MIN_CHARS = 4;
+
+// The one call whose arguments carry a value *into* a control, and the argument it carries it in. One
+// entry, because it is the one this plugin has ever seen a value on: `index.js#requestedUrl` reads
+// `browser_open`'s `url` by name for the same reason, and that is the same distinction — an argument
+// that names a place is not a value the walk supplied. `browser_select` carries a value too and is not
+// listed, because nothing in this repository says which argument name it uses, and a rule that guessed
+// would be a rule that reads the wrong field and calls the result a credential.
+const SUPPLIED_ARGUMENT = new Map([['browser_type', 'text']]);
+
+const suppliedValuesOf = ({ observations = [], transitions = [], capabilities = [] } = {}) => {
+  const values = new Set();
+  const note = (value) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (trimmed.length >= SUPPLIED_MIN_CHARS) values.add(trimmed);
+  };
+  // The run's own record of each call. A page reads back what a field *holds* — and a password box
+  // reads back `[set]`, by design — while the call that filled it still says what was typed, which is
+  // why the value is read from the call as well as from the edge. It is also the only source that knows
+  // a password at all: `transitions[].action.arguments` are the commit's field→value map, and they
+  // honour the capture's mask.
+  for (const observation of rows(observations)) {
+    for (const value of Object.values(observation.action?.arguments ?? {})) note(value);
+    const tool = observation.metadata?.extra?.tool;
+    if (SUPPLIED_ARGUMENT.has(tool)) note(observation.metadata?.extra?.tool_arguments?.[SUPPLIED_ARGUMENT.get(tool)]);
+  }
+  for (const transition of rows(transitions)) {
+    for (const value of Object.values(transition.action?.arguments ?? {})) note(value);
+  }
+  for (const capability of rows(capabilities)) {
+    for (const step of rows(capability.steps)) {
+      for (const value of [step.value, ...Object.values(step.arguments ?? {})]) note(value);
+    }
+  }
+  return values;
+}
+
+/** What a value the walk supplied is, as far as a sentence can tell. */
+const repeatedIn = (text, supplied) => (typeof text === 'string'
+  ? [...supplied].filter((value) => text.includes(value))
+  : []);
+
+/**
+ * The goal a journey may carry, and the goal it may not.
+ *
+ * `journey.schema.json` gives `goal` one prohibition — it is "the business outcome in one sentence",
+ * and "NEVER the raw instruction when the instruction carried a credential" — and this projection is
+ * the layer that can enforce it, because the commit quotes the run's instruction verbatim (it has
+ * to: `run.json` is the only place intent was written down) and an instruction is usually a task with
+ * the account to use attached to it.
+ *
+ * Withheld is not the same as dropped. The journey keeps saying what the walk was for, in the
+ * model's own vocabulary: the behaviour names the walk performed, in walk order, and the surface it
+ * reached — the same derived-sentence voice the fallback journey uses, prefixed so a reader knows no
+ * person wrote it. `goal_stated` becomes false, because nobody stated *this* sentence: the run
+ * stated a different one, and that is a fact about the goal that the schema's own flag carries.
+ *
+ * The instruction itself stays in `metadata.extra.run_instruction` with the repeated values replaced,
+ * which is the difference between a document that says less and a document that says one thing and
+ * shows another: leaving the instruction verbatim beside a withheld goal would put the credential
+ * back in the same object, and dropping it would lose the only record of what the run was asked.
+ */
+/**
+ * The sentence a journey may keep, and the reason it may not keep the other one.
+ *
+ * `journey.schema.json` gives `goal` exactly one prohibition — it is "the business outcome in one
+ * sentence", and "NEVER the raw instruction when the instruction carried a credential" — and this
+ * projection is the layer that can enforce it, because the commit quotes the run's instruction as the
+ * goal (it has to: `run.json` is the only place intent was written down) and an instruction is
+ * usually a task with the account to use attached to it. The test is not whether a word looks like a
+ * secret — a password is a string like any other — it is whether the sentence repeats a value the walk
+ * actually typed into a field.
+ *
+ * Withholding is not dropping. The journey keeps saying what the walk was for, in the model's own
+ * vocabulary: the behaviour names it performed, in walk order, and the surface it reached — the voice
+ * the fallback journey already uses, prefixed so a reader knows no person wrote it. And `goal_stated`
+ * becomes false, which is what that flag means: the run stated a different sentence, so this one is
+ * derived.
+ *
+ * The instruction is redacted rather than kept or removed. Kept verbatim beside a withheld goal, the
+ * credential would be back in the same object; removed, the document would lose the only record of
+ * what the run was asked for. Redacted, the sentence still says what the task was, and the run's own
+ * actions still carry the value the generator resolves test data from.
+ */
+const goalOf = ({ journey, turns = [], supplied = new Set() } = {}) => {
+  const stated = typeof journey?.goal === 'string' && journey.goal.trim() ? journey.goal.trim() : null;
+  const raw = journey?.metadata?.extra?.run_instruction;
+  const instruction = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+  const statedRepeats = repeatedIn(stated, supplied);
+  const instructionRepeats = repeatedIn(instruction, supplied);
+  const count = (values) => (values.length === 1 ? 'a value' : `${values.length} values`);
+  const answer = {
+    goal: stated,
+    goal_stated: journey?.metadata?.extra?.goal_stated ?? Boolean(stated),
+    goal_source: null,
+    repeated: distinct([...statedRepeats, ...instructionRepeats]),
+  };
+  if (!statedRepeats.length) return answer;
+  const names = distinct(turns.map((turn) => turn.name));
+  const start = turns.length ? turns[0].from_state : null;
+  const end = turns.length ? turns[turns.length - 1].to_state : null;
+  return {
+    ...answer,
+    goal: `Derived goal: the walk performs ${names.join(', ') || 'nothing'} and reaches ${end ?? 'no surface'} from ${start ?? 'no surface'} (${turns.length === 1 ? '1 move' : `${turns.length} moves`}).`,
+    goal_stated: false,
+    goal_source: `withheld: the run's instruction was quoted as this walk's goal and it repeats ${count(statedRepeats)} the walk supplied into a field, so it carried a credential — and a goal is never the raw instruction when the instruction carried one. The goal kept here is derived from the walk's own behaviours: what it performed, in order, and where it ended. The instruction itself is left where the record has it, and so is every value: a generator resolves test data from the run's own actions, and a value deleted here would be a value something downstream has to invent.`,
+  };
+};
+
+/**
  * The ABM shape of §3, from a recorded run. Mechanical by construction; see the module docstring.
  *
  * Every derived object carries `metadata.extra.derived`, so a later reader can tell what the
@@ -350,6 +482,7 @@ export function candidatesFromRun(dir) {
 export function modelFromCandidates({
   run = null,
   application = null,
+
   observations = [],
   states = [],
   capabilities = [],
@@ -376,6 +509,9 @@ export function modelFromCandidates({
   const transitionById = new Map(transitions.map((entry) => [entry.id, entry]));
   const stateById = new Map(states.map((entry) => [entry.id, entry]));
   const variantOfState = (stateId) => stateById.get(stateId)?.identity?.variant ?? null;
+  // The values this walk supplied, read once from the evidence and used for one thing: telling a goal
+  // that states an outcome from a goal that quotes the run's instruction and the account it used.
+  const supplied = suppliedValuesOf({ observations, transitions, capabilities });
 
   // --- the realisation the run recorded, and what it demotes (D13/D14) --------------------------
   // A capability is a *behaviour* only while nothing recorded it as a *step*. Phase 1 fills
@@ -466,6 +602,25 @@ export function modelFromCandidates({
       }
       for (const call of carried) absorbed.set(call.id, last.id);
       if (!carried.length) continue;
+      // P0-1: the prose the merged edge carries. `...last` below copies the surviving call's own
+      // `name` and `description`, and those describe a *step* — which is how an edge whose behaviour
+      // is `login`, whose `realization[]` is three actions and whose `behavior` is `behavior_login`,
+      // came to be described as "Submit the sign-in form". A document whose edge says one thing in
+      // `behavior` and another in `description` is a reader's contradiction, and the schema states
+      // the rule the merge has to satisfy: the edge "is what the application did, in domain terms",
+      // and "the steps live in behavior.realization[]".
+      //
+      // So the edge's name is the behaviour's and its description is built from what the move was
+      // made of — the calls it was recorded as, in the order the walk performed them. Nothing is
+      // invented: a behaviour that declared no name of its own keeps the surviving call's, and the
+      // call names are the committed capabilities' own.
+      const ownerBehaviour = realized.find((entry) => (entry.id ?? entry.capability_id) === ownerId) ?? null;
+      const moveSteps = [...carried, last];
+      const behaviourName = ownerBehaviour?.name ?? last.name ?? last.id;
+      const callNames = moveSteps.map((call) => {
+        const step = capabilityById.get(call.action?.capability);
+        return step?.name ?? call.action?.capability ?? call.id;
+      });
       survivorById.set(last.id, {
         ...last,
         // D12: the edge is the behaviour's *move*, so it starts where the invocation started and ends
@@ -475,6 +630,14 @@ export function modelFromCandidates({
         // behaviour started wherever its final call started and lost the state the walk stood in when
         // it was asked for.
         from_state: final[0].from_state,
+        // P0-1: see the note above the literal. The moved bounds alone would leave the edge named
+        // and described after its final step, which is the contradiction the review names: a
+        // behaviour with a three-action realization whose edge reads like one of the three.
+        name: behaviourName,
+        description:
+          `${behaviourName} performed as one move from ${final[0].from_state} to ${last.to_state} — ` +
+          `${moveSteps.length} recorded call(s): ${callNames.join(', ')}. ` +
+          'The calls are this behaviour\'s realization[]; the edge is the move they add up to.',
         action: { ...last.action },
         effects: dedupeRefs([...carried, last].flatMap((call) => rows(call.effects)), (effect) => JSON.stringify(effect)),
         apis: distinct([...carried, last].flatMap((call) => rows(call.apis))),
@@ -500,6 +663,11 @@ export function modelFromCandidates({
               invocations: group.length,
               calls: [...carried, last].map((call) => call.id),
               passed_through: distinct(carried.map((call) => call.to_state).filter((state) => state !== last.to_state)),
+              // P0-1: the sentence the surviving call was recorded with. The edge's `description`
+              // now describes the move, so this is where the model's own account of the step that
+              // ended it is kept: it is the evidence the edge's prose was derived from, and a reader
+              // comparing the edge with the committed call should find it rather than infer it.
+              last_call: prune({ id: last.id, name: last.name, description: last.description }),
             },
           },
         },
@@ -559,15 +727,18 @@ export function modelFromCandidates({
   // as, nor which credential they sign in with. So a declared entry is carried through as declared —
   // id, description, credentials_ref — and the projection says nothing about it beyond copying it,
   // except for the one thing it can check: whether any state or journey of this run actually used
-  // that id (P6's `untraceable_actor`).
+  // that id (P6's `untraceable_actor`). The one decision the projection takes about roles is whether
+  // a journey may claim one, and it is at the journey builder: a role is a declaration, so a variant
+  // that no declaration names is not one.
   //
-  // A variant the run used and the declaration does not name is *also* carried, with the derived
-  // description, because every `state.identity.variant` and `journey.actor` is a reference to one of
-  // these ids and dropping the row would break the reference rather than report the omission. The
-  // omission is reported where the graph is built (`commit.js` warns when a used variant is
-  // undeclared); here the row has to exist for the document to hold together at all. A run that
-  // declares nothing therefore projects exactly as it did before this registry existed: the union is
-  // the old behaviour, and a declaration only adds rows and metadata the run could not have derived.
+  // A variant the run used and the declaration does not name is *also* carried, because
+  // `state.identity.variant` is read through this vocabulary and `actors` cannot be empty (the schema
+  // needs one row even when the run declared none), so dropping the row would leave a state variant
+  // pointing at nothing. It is carried as what it is — a surface variant, explicitly not a role —
+  // which is also why it does not become a journey's `actor`: see the journey builder below. A run
+  // that declares nothing therefore projects exactly as it did before this registry existed: the
+  // union is the old behaviour, and a declaration only adds rows and metadata the run could not have
+  // derived.
   const declaredActors = Array.isArray(application?.actors) ? application.actors.filter((actor) => actor?.id) : [];
   const declaredIds = new Set(declaredActors.map((actor) => actor.id));
   const variantRows = distinct(states.map((state) => state.identity?.variant));
@@ -581,36 +752,98 @@ export function modelFromCandidates({
       .filter((id) => !declaredIds.has(id))
       .map((id) => ({
         id,
-        description: `Observed as the surface variant "${id}"; the projection cannot say what it means.`,
+        description: `Observed as the surface variant "${id}"; no declaration names an actor with this id. A variant is what the run saw and not a role the application offers, so this row is what a state's variant resolves to rather than a claim about who can use the application.`,
       })),
   ];
 
   // --- state variables: every dimension a state identity distinguishes, with its detection ----
+  //
+  // A dimension is read off the *reading*, and the reading that measures one is the step that moved
+  // the state: the commit counts a collection's rows there ("the reading at the end of the step
+  // counted 3 row(s) in element_project_list — so the dimension is checkable as a count") and offers
+  // it as an assertion. That offer, and the model's own assertion on the same edge, are the two
+  // signals `detectionFor` falls back to when the state's own `detection` names no surface. Neither
+  // is invented here: both are copied, and the name link (`target`) is what says which variable they
+  // are about.
+  const dimensionReadings = new Map();
+  const recordDimensionReading = (assertion) => {
+    if (assertion?.type !== 'value') return;
+    const name = assertion.target;
+    if (typeof name !== 'string' || name === '' || dimensionReadings.has(name)) return;
+    dimensionReadings.set(name, assertion);
+  };
+  for (const edge of survivors) {
+    // The model's own assertion first: it is the claim, and the commit's candidate is a proposal.
+    for (const assertion of rows(edge.assertions)) recordDimensionReading(assertion);
+    for (const candidate of rows(edge.metadata?.extra?.commit?.candidate_assertions)) {
+      if (candidate?.basis === 'dimension') recordDimensionReading(candidate.assertion);
+    }
+  }
+
   const variables = new Map();
   for (const state of states) {
     for (const [name, value] of Object.entries(state.identity?.dimensions ?? {})) {
-      const variable = variables.get(name) ?? {
-        name,
-        description: 'A distinction a state identity draws; the projection cannot say what it means.',
-        type: 'string',
-        values: [],
-        dimension_of: [],
-        detection: detectionFor(state, value),
-        evidence: [],
-        // A variable is not read off a page the way a state is: the state is the reading, the
-        // variable is the commit's reading *of the reading*, so it is `inferred` and says who
-        // inferred it. Claiming `verified` here was the one row in the projection that carried a
-        // level with no producer behind it (P14/`claim_has_no_producer`).
-        metadata: {
-          confidence: 0.5,
-          status: 'inferred',
-          producer: 'importer:dsh-graph-explorer',
-          extra: { derived: 'state.identity.dimensions' },
-        },
-      };
+      let variable = variables.get(name);
+      if (!variable) {
+        variable = {
+          name,
+          description: 'A distinction a state identity draws; the projection cannot say what it means.',
+          type: 'string',
+          values: [],
+          dimension_of: [],
+          detection: detectionFor(state, name, dimensionReadings),
+          evidence: [],
+          // A variable is not read off a page the way a state is: the state is the reading, the
+          // variable is the commit's reading *of the reading*, so it is `inferred` and says who
+          // inferred it. Claiming `verified` here was the one row in the projection that carried a
+          // level with no producer behind it (P14/`claim_has_no_producer`).
+          metadata: {
+            confidence: 0.5,
+            status: 'inferred',
+            producer: 'importer:dsh-graph-explorer',
+            extra: { derived: 'state.identity.dimensions' },
+          },
+        };
+        // A dimension the projection could not ground is said out loud, because dropping a claim
+        // the state made is exactly the kind of silence this projection exists to refuse: the
+        // finding that follows it (P7) says a test cannot check the difference, and this says why
+        // the projector had nothing to carry — the reading named no surface, or no reading named
+        // the dimension at all.
+        const claimed = rows(state.detection).find((entry) => entry?.target === name);
+        if (!variable.detection) {
+          notes.push(claimed
+            ? `${name}: ${state.id} asserts the dimension in \`detection\` and names no element or route to read it on, so the state variable carries no detection (P7).`
+            : `${name}: ${state.id} declares the dimension and no reading of it records an element or route that measures it, so the state variable carries no detection (P7 asks for one: an element that shows the distinction, or the count of the collection it names).`);
+        }
+      }
       if (!variable.values.includes(value)) variable.values.push(value);
       if (!variable.dimension_of.includes(state.id)) variable.dimension_of.push(state.id);
-      if (!variable.evidence.length) variable.evidence = rows(state.evidence);
+      // §P1: a variable's evidence has to be evidence *about the variable*, and the reference this
+      // used to carry was the state's own `evidence[]` copied whole — including the state's note,
+      // which says "the reading that made this a *state*". A reference whose prose answers a
+      // question about a different claim is the sort of traceability that looks present and is not:
+      // a reader following it learns when the state was first seen, and nothing about why this
+      // reading is evidence for `projects` holding the value `populated`. So the observation is the
+      // same observation — nothing is invented, and the readings a state has are the readings the
+      // dimension was read in — and the note is this claim's own: it names the state whose identity
+      // draws the distinction and the value that state was read with, both of which are fields of
+      // this document and checkable against it.
+      //
+      // The role stays `identity`, and that is a correction rather than an oversight: the reading is
+      // evidence for the *identity* that declares the dimension, not for the variable's detection.
+      // `detection` would say this reading is where a predicate measured the distinction, and in a
+      // run where no reading asserted the dimension (the live 0b run) there is no such reading — the
+      // P7 finding named below is the truth about it, and a role that claimed otherwise would be
+      // this projection papering over the gap it exists to report.
+      for (const ref of rows(state.evidence)) {
+        const observationId = ref.observation;
+        if (!observationId || variable.evidence.some((entry) => entry.observation === observationId)) continue;
+        variable.evidence.push({
+          observation: observationId,
+          role: 'identity',
+          note: `the reading in which ${state.id} was seen drawing this distinction: its identity declares ${name} = ${JSON.stringify(value)}, and the reading is where the surface was read as that state`,
+        });
+      }
       variables.set(name, variable);
     }
   }
@@ -658,6 +891,19 @@ export function modelFromCandidates({
       const composed = steps.length ? [] : rows(capability.composed_of).map((member) => (
         capabilityById.has(member) ? behaviorIdFor(capabilityById.get(member).name) : member
       ));
+      // P0-1, the other half of D14: `kind: "composite"` is a claim about how the behaviour is
+      // *defined*, and the schema gives the word exactly one meaning — "'composite' means the
+      // behaviour is defined only by composed_of". A behaviour this run realized has steps instead:
+      // the composition was the pre-pivot spelling of those very steps (D12 reads `realization[]`
+      // straight out of 0.1's `capability.steps`), and it is dropped one line above. Copying the
+      // word would leave a behaviour that declares itself defined only by a `composed_of` it does
+      // not carry — a document contradicting the schema's own definition of the value it wrote. The
+      // declared kind stands whenever the realization does not contradict it; where it does, the
+      // document states no kind, and the schema's default ("interaction") is what is in force. A
+      // composite the walk never realized keeps the word: that one *is* defined only by composed_of.
+      const kind = BEHAVIOR_KINDS.has(capability.kind) && !(steps.length && capability.kind === 'composite')
+        ? capability.kind
+        : undefined;
       const actor = singleVariant([
         ...edges.map((edge) => variantOfState(edge.from_state)),
         ...composed.flatMap((member) => (edgesByCapability.get(memberIdOf(member, capabilityById)) ?? [])
@@ -674,7 +920,7 @@ export function modelFromCandidates({
         id: behaviorIdFor(name),
         name,
         description: capability.description,
-        kind: BEHAVIOR_KINDS.has(capability.kind) ? capability.kind : undefined,
+        kind,
         actor,
         input: steps.length ? inputOf(capability) : capability.input,
         output: capability.output,
@@ -687,6 +933,11 @@ export function modelFromCandidates({
         metadata: capability.metadata,
       });
     });
+  // What a turn is called in prose. A collapsed edge is named after the behaviour it became (P0-1),
+  // and an edge that was never collapsed may carry no name at all — so the behaviour's own name is
+  // the second answer, and the transition id the last, because a sentence that names a behaviour by
+  // its id is a sentence no reader can use.
+  const behaviorNameById = new Map(behaviors.map((behavior) => [behavior.id, behavior.name]));
 
   // --- affordances: declared controls on a surface that no committed step used -----------------
   // Read off the walk's own calls, not the collapsed edges: the question is which declared controls
@@ -779,6 +1030,10 @@ export function modelFromCandidates({
       metadata: edge.metadata,
     });
   });
+  // The projected edge of a walk step, keyed by the id the walk names — the edge the document ends up
+  // carrying rather than the record it came from, which is what prose about a turn must be written
+  // from: a reader is told about the edge that is there.
+  const projectedById = new Map(projectedTransitions.map((transition) => [transition.id, transition]));
 
   // --- journeys: the walk the commit reassembled, with an actor the document declares ----------
   //
@@ -842,18 +1097,66 @@ export function modelFromCandidates({
         : prune({ transition: carried, arguments: transitionById.get(carried)?.action?.arguments }));
     }
     const startState = journey.start_state ?? steps[0]?.from_state ?? null;
-    const actor = startState ? variantOfState(startState) : null;
+    // P1: a role is a declaration, and an authentication state is not one. `state.identity.variant` is
+    // the run's own word for the *surface* — "authenticated", "anonymous" are the schema's own examples
+    // of it, alongside "mobile" and "ab_test_b", which are nobody's role — and `journey.actor` means
+    // "role the journey is exercised as". So the variant is handed over only where the application
+    // declares that id as an actor: then the run shows which surface the role was exercised on, and the
+    // declaration says that id is a role. Where it does not, the journey claims no actor and P6 reports
+    // the gap — a field that has to mean a role may not be filled with the nearest word available, which
+    // is what made the 0b model describe a walk that ends signed in as "walked as anonymous".
+    const startVariant = startState ? variantOfState(startState) : null;
+    const actor = startVariant && declaredIds.has(startVariant) ? startVariant : null;
     const endState = [...steps].reverse().map((step) => transitionById.get(step.transition)?.to_state)[0] ?? null;
     const endVariant = endState ? variantOfState(endState) : null;
     if (actor && endVariant && actor !== endVariant) {
       notes.push(`${journey.id}: the walk starts as "${actor}" and ends as "${endVariant}"; the journey's actor is the starting variant, and the walk is the transition between them.`);
     }
+    if (!actor && startVariant) {
+      notes.push(`${journey.id}: the walk's surfaces are read as variant "${startVariant}", which is an authentication state and not a role, and application.actors[] declares no actor with that id; the journey claims no actor (P6).`);
+    }
+    // P1: the narrative a journey may carry. Its two sentences are usually the run's own words — the
+    // commit quotes the instruction as the goal because nothing else in the run states intent, and it
+    // derives the name from that goal — and the schema forbids exactly one thing about them: a goal is
+    // never the raw instruction when the instruction carried a credential. `goalOf` is where that is
+    // decided, and where the sentence that replaces one is derived from the walk itself.
+    const turns = steps.map((step) => {
+      const edge = projectedById.get(step.transition) ?? {};
+      return {
+        name: edge.name ?? behaviorNameById.get(edge.behavior) ?? step.transition,
+        from_state: edge.from_state ?? null,
+        to_state: edge.to_state ?? null,
+      };
+    });
+    const narrative = goalOf({ journey, turns, supplied });
+    const nameRepeats = repeatedIn(journey.name, supplied);
+    const narrativeExtra = {
+      ...(narrative.goal_source ? { goal_stated: false, goal_source: narrative.goal_source } : {}),
+      // A name is a handle for a walk and a goal is a sentence about it, so a name is *less* likely to
+      // quote an account than a goal is — but the commit derives the name from the goal, and a name
+      // that repeats one is the same defect in a shorter field. The keys are the graph's own
+      // (`name_from`, `name_source_kind`, `name_stated`), corrected rather than supplemented, because
+      // a document that disagrees with itself about its own provenance is worse than either answer.
+      ...(nameRepeats.length
+        ? {
+          name_from: 'the endpoints of the walk: the name the run\'s instruction produced this walk repeated a value the walk supplied into a field, so it could not be carried',
+          name_source_kind: 'endpoints',
+          name_stated: false,
+        }
+        : {}),
+    };
+    if (narrative.goal_source) notes.push(`${journey.id}: ${narrative.goal_source}`);
+    if (nameRepeats.length) {
+      notes.push(`${journey.id}: the walk's name repeats a value the walk supplied, so the name is derived from the walk instead of quoted from the run's instruction.`);
+    }
+    const metadata = Object.keys(narrativeExtra).length
+      ? prune({ ...journey.metadata, extra: { ...(journey.metadata?.extra ?? {}), ...narrativeExtra } })
+      : journey.metadata;
     return prune({
       id: journey.id ?? `journey_${index + 1}`,
-      name: journey.name,
-      goal: journey.goal,
-      goal_stated: journey.metadata?.extra?.goal_stated
-        ?? (typeof journey.goal === 'string' && journey.goal.trim() !== ''),
+      name: nameRepeats.length ? `Derived walk: ${startState ?? 'no surface'} to ${endState ?? 'no surface'} (${steps.length} step(s))` : journey.name,
+      goal: narrative.goal,
+      goal_stated: narrative.goal_stated,
       description: journey.description,
       actor,
       start_state: startState,
@@ -861,7 +1164,7 @@ export function modelFromCandidates({
       assertions: rows(journey.assertions),
       criticality: journey.criticality,
       evidence: rows(journey.evidence),
-      metadata: journey.metadata,
+      metadata,
     });
   });
 
@@ -948,19 +1251,43 @@ function stepsOfCapability(capability, notes) {
 }
 
 /**
- * How a test would read the dimension a state identity drew.
+ * How a test would read the dimension a state identity drew — or `null`, when nothing does.
  *
- * An element the state's own detection already reads is the strongest available reading: the
- * distinction and the evidence for it then come from the same place. A route is the fallback, and
- * if the state has neither, `null` — which P7 reports, because a dimension nothing observable
- * reports is a distinction no test can make.
+ * A dimension is the model's word for a difference the screen does not spell out ("the project list
+ * is seeded"), so the only detector that *measures* it is one the run grounded: an entry that says
+ * both which dimension it is about (`target`) and which surface a browser reads it on (`element` or
+ * `route`), with the value it was read as. This function used to take any element the state's own
+ * detection happened to mention and write the dimension's declared word into `expected`, which is
+ * how a state whose only reading was "the sign-in button is absent" came to claim
+ * `element_sign_in_button equals "seeded"`: an element-identity check wearing a dimension's name,
+ * measuring nothing the variable claims and passing for the wrong reason. Two consequences, both of
+ * them the review's §2: the document said a state was verified when nothing had verified it, and
+ * P7's two surface rules could never fire, because the fabricator always produced a surface.
+ *
+ * Three outcomes, and the third is the point:
+ *   - the state's own `detection` entry names this dimension and reads a surface → carried;
+ *   - a committed step recorded the same reading (`recorded`: the count the commit attributed to
+ *     the dimension, or the model's own assertion about it) → carried, because that is the check
+ *     the walk watched pass;
+ *   - neither → `null`. Nothing is invented. An absent detector is a *finding* — P7 reports
+ *     `dimension_without_detection` and the commit will not write a model that claims a state
+ *     variable it cannot check — where a fabricated one was a claim no reading could refute.
  */
-function detectionFor(state, value) {
-  const element = rows(state.detection).find((entry) => isElementId(entry.element))?.element;
-  if (element) return { type: 'value', element, operator: 'equals', expected: value };
-  const route = rows(state.detection).find((entry) => typeof entry.route === 'string')?.route
-    ?? state.identity?.route;
-  if (typeof route === 'string' && route !== '') return { type: 'route', route, operator: 'equals', expected: value };
+function detectionFor(state, name, recorded = new Map()) {
+  const named = rows(state.detection).find((entry) => entry?.target === name) ?? recorded.get(name) ?? null;
+  if (!named || named.expected === undefined) return null;
+  if (typeof named.operator !== 'string' || named.operator === '') return null;
+  const element = isElementId(named.element) ? named.element : null;
+  if (element) {
+    return prune({ type: 'value', element, operator: named.operator, expected: named.expected });
+  }
+  const route = typeof named.route === 'string' && named.route !== '' ? named.route : null;
+  if (route) {
+    return prune({ type: 'route', route, operator: named.operator, expected: named.expected });
+  }
+  // The entry names the dimension and no surface reads it: a value assertion over a semantic path
+  // or a storage key is a dimension-shaped claim nothing can evaluate, and carrying it would put a
+  // check in the document that no generator could turn into a line of a test.
   return null;
 }
 
@@ -1277,6 +1604,7 @@ export function profileFindings(model, { candidates = null } = {}) {
   const actorIds = new Set(actors.map((actor) => actor.id));
   const behaviorById = new Map(behaviors.map((behavior) => [behavior.id, behavior]));
   const transitionIds = new Set(transitions.map((transition) => transition.id));
+  const transitionById = new Map(transitions.map((transition) => [transition.id, transition]));
   const observationIds = new Set(observations.map((observation) => observation.id));
   const surfacesOfElement = elementSurfaces(states);
   const vocabulary = surfaceVocabulary(states);
@@ -1435,6 +1763,31 @@ export function profileFindings(model, { candidates = null } = {}) {
     }
   }
 
+  // P0-3: a journey step binds only what the behaviour it performs declares. `journeyStep` allows
+  // `arguments` and states the rule for them in one line — "Keys must be the behaviour's declared
+  // input names" — because the step is a *reference* to the behaviour: the walk supplies the values,
+  // the behaviour owns the vocabulary. A key no `input` declares is the journey disagreeing with the
+  // semantic model about how the behaviour is called, which is the second place to say it the schema
+  // refused to create. It is checked here rather than left to the generator for the same reason P5
+  // checks `{{param}}`: an unbound binding is a run that cannot start, discovered late.
+  for (const journey of journeys) {
+    for (const [index, step] of rows(journey.steps).entries()) {
+      const keys = Object.keys(step.arguments ?? {});
+      if (!keys.length) continue;
+      const transition = transitionById.get(step.transition);
+      const behavior = transition ? behaviorById.get(transition.behavior) : null;
+      if (!behavior) continue; // no edge, or no behaviour: `journey_step_names_no_transition` / P3
+      const inputs = new Set(Object.keys(behavior.input ?? {}));
+      for (const key of keys) {
+        if (inputs.has(key)) continue;
+        add({
+          rule: 'P5', code: 'journey_step_argument_not_declared', severity: 'error', scope: 'journeys', subject: journey.id,
+          detail: `steps[${index}] binds "${key}", which is not a declared input of "${behavior.name}" (declared: ${[...inputs].join(', ') || 'none'}). A step names the behaviour it performs and the values the walk has for it; the names are the behaviour's.`,
+        });
+      }
+    }
+  }
+
   const observationArguments = new Set();
   for (const observation of observations) {
     for (const value of Object.values(observation.action?.arguments ?? {})) {
@@ -1464,6 +1817,7 @@ export function profileFindings(model, { candidates = null } = {}) {
 
   // --- P6: actors are declared, and traceable ---------------------------------------------------
   const variants = new Set(states.map((state) => state.identity?.variant).filter(Boolean));
+  const variantByState = new Map(states.map((state) => [state.id, state.identity?.variant]));
   if (!actorIds.size) {
     add({
       rule: 'P6', code: 'no_actors_declared', severity: 'warning', scope: 'application', subject: null,
@@ -1474,15 +1828,19 @@ export function profileFindings(model, { candidates = null } = {}) {
     if (!actorIds.has(variant)) {
       add({
         rule: 'P6', code: 'undeclared_actor', severity: 'warning', scope: 'states', subject: null,
-        detail: `A state is written as variant "${variant}", which no application.actors[] entry declares. The id is the join; both sides must name one of these.`,
+        detail: `A state is read as the surface variant "${variant}", which no application.actors[] entry declares. A variant names a surface and not a role, so this is not a broken reference — it is the declaration not saying which actor is on that surface.`,
       });
     }
   }
   for (const journey of journeys) {
     if (!journey.actor) {
+      const startVariant = variantByState.get(journey.start_state);
       add({
         rule: 'P6', code: 'journey_actor_missing', severity: 'warning', scope: 'journeys', subject: journey.id,
-        detail: 'The journey names no actor, so nothing says who it is for.',
+        detail: 'The journey names no actor, so nothing says who it is for.'
+          + (startVariant
+            ? ` Its first surface is read as variant "${startVariant}", which is where the run's word for who is looking at it stops: a variant is not a role, and application.actors[] declares no actor with that id. A role is a declaration, because no page shows that "authenticated" is something somebody can sign in as.`
+            : ''),
       });
       continue;
     }
@@ -1523,13 +1881,30 @@ export function profileFindings(model, { candidates = null } = {}) {
     if (!variable.detection) {
       add({
         rule: 'P7', code: 'dimension_without_detection', severity: 'error', scope: 'state_variables', subject: variable.name,
-        detail: `"${variable.name}" declares no detection, so no test can tell its values apart.`,
+        detail: `"${variable.name}" declares no detection, so no test can tell its values apart. A detection that measures a dimension reads it on a surface: {"type":"value","element":"<the element that shows it>","operator":"equals","expected":"<the value>"}, or the count of the collection it names ({"operator":"greater_than","expected":0} over the element that lists the rows). A distinction nothing can read at runtime is a description, not an identity.`,
       });
     } else if (!variable.detection.element && !variable.detection.route) {
       add({
         rule: 'P7', code: 'detection_reads_no_surface', severity: 'error', scope: 'state_variables', subject: variable.name,
         detail: `The detection of "${variable.name}" reads neither an element nor a route. A check over a storage key is a dimension-shaped claim nothing can evaluate.`,
       });
+    } else if (variable.detection.element) {
+      // The detector and the variable have to be about the same surface, which is the one thing the
+      // document can be held to without a `target` on the detection: the element it reads must be
+      // declared by a state whose own identity draws *this* dimension. The fabricated detector this
+      // rule exists for read `element_sign_in_button` on a state whose only dimension was a project
+      // count — an element-identity check attributed to a collection, which is a check that would
+      // have passed on the login page. Reported, not repaired: the fix is either to read the
+      // collection on the state that has it, or to stop calling the difference a dimension.
+      const readers = new Set(rows(model.states)
+        .filter((state) => rows(variable.dimension_of).includes(state.id))
+        .flatMap((state) => rows(state.elements).map((element) => element.id)));
+      if (readers.size && !readers.has(variable.detection.element)) {
+        add({
+          rule: 'P7', code: 'detection_reads_another_surface', severity: 'error', scope: 'state_variables', subject: variable.name,
+          detail: `The detection of "${variable.name}" reads ${variable.detection.element}, which no state that draws the dimension declares (${[...readers].join(', ')}). The check and the variable would be about two different surfaces, which is a detector that passes for the wrong reason.`,
+        });
+      }
     }
   }
 
@@ -1601,6 +1976,82 @@ export function profileFindings(model, { candidates = null } = {}) {
       add({
         rule: 'P9', code: 'unresolved_evidence', severity: 'error', scope, subject: owner,
         detail: `Evidence names observation "${entry.observation}", which the document does not carry.`,
+      });
+    }
+  }
+
+  // §P1: a role-bearing reference has to say *what it is evidence for*, in words. A role says what
+  // kind of reading it is — `identity` is the surface as it stood, `effect` is what the machinery saw
+  // change — and cannot say which claim the reading is evidence for, so a document whose references
+  // are bare roles is a document where every reading is attached to every claim with nothing to tell
+  // them apart. That is the shape the 0b projection had: one journey carrying nine references and
+  // nine identical notes, with nothing saying which step any of them documented.
+  //
+  // Two codes, one idea. `evidence_without_a_role` is a reference that does not say what kind of
+  // reading it is — a bare observation id, which the schema does permit as shorthand;
+  // `evidence_without_a_note` is a reference that does not say what it is evidence for. Both are
+  // warnings and not errors: the short form is legal, and a document written by hand is not a
+  // hallucination — it is a document a reader cannot follow, which is what the warning level is for.
+  // Nothing this project writes can trip either, and that is the point of having them: `commit.js`
+  // writes one note per reading (the session's own note, or one derived from the store's record),
+  // so the rule's job is to keep a dropped note from being a silent regression.
+  for (const [scope, owner, list] of [
+    ...behaviors.map((behavior) => ['behaviors', behavior.id, rows(behavior.evidence)]),
+    ...transitions.map((transition) => ['transitions', transition.id, rows(transition.evidence)]),
+    ...journeys.map((journey) => ['journeys', journey.id, rows(journey.evidence)]),
+    ...states.map((state) => ['states', state.id, rows(state.evidence)]),
+    ...variables.map((variable) => ['state_variables', variable.name, rows(variable.evidence)]),
+  ]) {
+    for (const entry of list) {
+      const short = typeof entry === 'string';
+      const role = short || entry === null || typeof entry !== 'object' ? null : entry.role ?? null;
+      const note = short || entry === null || typeof entry !== 'object'
+        ? null
+        : (typeof entry.note === 'string' && entry.note.trim() ? entry.note : null);
+      if (!role) {
+        add({
+          rule: 'P9', code: 'evidence_without_a_role', severity: 'warning', scope, subject: owner,
+          detail: `A reference on ${owner} does not say what kind of reading it is — ${short
+            ? `it is the bare observation id ${JSON.stringify(entry)}`
+            : 'it carries no role'}. A reader cannot tell whether the reading is the surface the step started from, the action itself, or what the step changed.`,
+        });
+      }
+      if (!note) {
+        add({
+          rule: 'P9', code: 'evidence_without_a_note', severity: 'warning', scope, subject: owner,
+          detail: `A reference on ${owner} does not say what it is evidence for (${role
+            ? `role \`${role}\``
+            : 'and it carries no role either'}, observation ${JSON.stringify(short ? entry : entry?.observation ?? null)}). The role says what kind of reading it is; the note is the one place a reader is told which claim the reading belongs to.`,
+        });
+      }
+    }
+  }
+
+  // §P1's *persistence*, as a check on the fact rather than on the prose. A `storage_changed` effect
+  // is a claim about what the application wrote down, and the reading is what evidences it: the
+  // commit records what the reader saw change in `metadata.extra.recorder.observed_change.storage`,
+  // keyed by storage key. An effect whose key is not in there is an effect nothing saw — which is the
+  // shape a hallucinated "and it saved the session" takes, and the shape a state comparison cannot
+  // catch, because nothing about the DOM changes when a token is written to `localStorage`.
+  //
+  // A warning, not an error: the effect can come from a document whose reading is carried somewhere
+  // this projection does not read, and refusing the model over that would be this rule claiming to
+  // know that nothing saw it. What the rule does say is that the document as it stands cannot show it.
+  for (const transition of transitions) {
+    const declared = rows(transition.effects)
+      .filter((effect) => effect?.type === 'storage_changed' && typeof effect.target === 'string' && effect.target);
+    if (!declared.length) continue;
+    const recorded = transition.metadata?.extra?.recorder?.observed_change?.storage;
+    const keys = recorded && typeof recorded === 'object' && !Array.isArray(recorded) ? Object.keys(recorded) : [];
+    for (const effect of declared) {
+      // The same reading `isStorageKey` reads, with the kind kept: the effect names the place and the
+      // recorder's sample is keyed by the place alone (`localStorage.acme-demo-state` against
+      // `acme-demo-state`), and both spellings are in the wild.
+      const key = effect.target.replace(/^(localStorage|sessionStorage|cookie)[.:]/i, '');
+      if (keys.some((recordedKey) => recordedKey === effect.target || recordedKey === key)) continue;
+      add({
+        rule: 'P9', code: 'persistence_effect_without_a_reading', severity: 'warning', scope: 'transitions', subject: transition.id,
+        detail: `The edge declares a \`storage_changed\` effect on ${effect.target} and no reading shows it: this step's recorded change names ${keys.length ? keys.map((recordedKey) => JSON.stringify(recordedKey)).join(', ') : 'no storage key at all'}. What a session remembers is the one effect a comparison of two states cannot see, so it is the effect that most needs a reading behind it.`,
       });
     }
   }
@@ -1745,6 +2196,35 @@ export function profileFindings(model, { candidates = null } = {}) {
       add({
         rule: 'P12', code: 'journey_step_names_no_transition', severity: 'error', scope: 'journeys', subject: journey.id,
         detail: `steps[${index}] names "${step.transition}", which no transitions[] entry declares. A step is a move the document can make.`,
+      });
+    }
+    // P0-3: the walk has to be one walk. A journey is "an ordered walk over transitions"
+    // (journey.schema.json), and a walk is a path: every turn begins where the turn before it
+    // finished, and the first begins where the journey says it starts. Nothing else in the document
+    // says this — the transitions are a set, and a step is "deliberately thin" precisely so the
+    // order lives in one place — so a step that begins where the previous one did not end is a turn
+    // of some *other* walk, and a reader (or the generator that expands these references into a
+    // test) follows it out of the document. The shape that made this a rule: a journey naming one
+    // edge three times. Three turns, each saying "walk this edge", while only the first of them
+    // stood at the state that edge starts from — a walk that reads as a repetition the graph cannot
+    // perform. The projection is where this is fixed (one invocation is one move, one turn), and
+    // this is the gate that says so rather than trusting it.
+    for (const [index, step] of rows(journey.steps).entries()) {
+      const transition = transitionById.get(step.transition);
+      if (!transition) continue; // the step's own missing-transition finding is above
+      if (index === 0) {
+        if (typeof journey.start_state !== 'string' || journey.start_state === transition.from_state) continue;
+        add({
+          rule: 'P12', code: 'journey_start_state_not_where_the_walk_starts', severity: 'error', scope: 'journeys', subject: journey.id,
+          detail: `The journey starts at ${journey.start_state} and its first step walks ${transition.from_state} → ${transition.to_state}. A goal attached to a surface the walk never stood on is a journey that cannot be taken.`,
+        });
+        continue;
+      }
+      const previous = transitionById.get(rows(journey.steps)[index - 1].transition);
+      if (!previous || previous.to_state === transition.from_state) continue;
+      add({
+        rule: 'P12', code: 'journey_step_does_not_continue_the_walk', severity: 'error', scope: 'journeys', subject: journey.id,
+        detail: `steps[${index}] walks ${transition.from_state} → ${transition.to_state}, and steps[${index - 1}] ended at ${previous.to_state}. No move of this document leads from the one to the other, so the step is not a turn of this walk.`,
       });
     }
   }

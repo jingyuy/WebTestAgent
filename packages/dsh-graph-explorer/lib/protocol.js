@@ -116,9 +116,16 @@ For every step:
      \`value\`/\`expected\` — never in a key of your own: for a state word write
      \`{"type":"element_state","target":"sign_in_button","operator":"visible"}\`, and for
      a value \`{"type":"element_value","target":"email_input","value":"test@example.com"}\`.
-     A dimension is asserted the same way, with the name you gave the dimension:
-     \`{"type":"value","target":"projects","operator":"equals","expected":"empty"}\` — one
-     name, so the graph's word for the difference and the test's check for it are one thing.
+     A dimension is asserted the same way, with the name you gave the dimension *and* the
+     element that shows it:
+     \`{"type":"value","target":"projects","element":"project_list","operator":"equals","expected":"empty"}\`
+     — one name, so the graph's word for the difference and the test's check for it are one
+     thing, and one surface, so the check is something a browser can run. Where the screen
+     does not spell the value out, assert the count instead
+     (\`{"operator":"greater_than","expected":0}\` on the element that lists the rows). A value
+     assertion that names a dimension and no element is a claim nothing can evaluate: it is
+     carried as written and reported, and the semantic model will not treat it as a detection
+     for that variable.
      An element in a detection resolves against the \`semantic_purpose\` a state has
      declared, so declare the element in the reading that first sees it. A detection is
      checked against the capture of the very reading that carries it: a claim the page
