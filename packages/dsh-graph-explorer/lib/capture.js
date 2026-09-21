@@ -134,6 +134,11 @@ export const CAPTURE_EXPRESSION = `(() => {
     if (placeholder) entry.placeholder = clean(placeholder);
     if (el.required === true) entry.required = true;
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      // The same three characters redaction.js exports as REDACTION, written as a literal because
+      // this file is a template literal with a no-interpolation rule. It is not only a mask here: a
+      // reading that says a field withheld its value is the *evidence* the recorder matches a call's
+      // arguments against, which is why the mask and the fact have to be the same string.
+      // test/redaction.test.mjs asserts they agree.
       entry.value = el.type === 'password' ? (el.value ? '[set]' : '') : clip(el.value, 120);
     } else if (el.tagName === 'SELECT') {
       entry.value = clip(el.value, 120);

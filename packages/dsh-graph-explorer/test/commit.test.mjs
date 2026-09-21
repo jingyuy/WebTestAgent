@@ -455,12 +455,16 @@ check('the rule set is the documented one', Object.keys(invariants).sort(), [
   'journey_is_a_walk', 'no_dangling_references', 'reachability', 'short_form_hygiene', 'state_identity_unique',
   'state_indistinguishable_from_another', 'unique_ids', 'version_coherence',
 ]);
-// Phase 2: the application model's fifteen rules are in the same section, with `document: 'model'`,
+// Phase 2: the application model's seventeen rules are in the same section, with `document: 'model'`,
 // so that "is this commit's output sound" is one question about two documents rather than two
 // sections a reader has to know to look in. They are *not* part of `blocking` — a rule the model
 // adds must never take `graph.json` away from a run that satisfied every rule the graph has (D1).
+// P16 is the reference-integrity rule the review asked for by name ("every reference resolves"), so
+// it is also the one rule whose *subject* is the document rather than what the document claims.
+// P17 is its counterpart for claims rather than ids: a contract may not be stated at a level its own
+// evidence does not reach.
 check('the model\'s rules are reported beside them, and name the other document', Object.keys(modelInvariants).sort(), [
-  'P1', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9',
+  'P1', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15', 'P16', 'P17', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9',
 ]);
 check('and none of them is a blocker of the graph', report.blocking.some((blocker) => /^P\d+$/.test(blocker.code ?? '')), false);
 

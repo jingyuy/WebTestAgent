@@ -456,10 +456,13 @@ check('the profile finds nothing in error, so the model was written rather than 
   [profileErrors.length, committed.profile.errors, committed.documents.model.blockers],
   [0, 0, []]);
 // A rule the model adds may never take the fallback document away: `blocking` is about `graph.json`
-// and says so, and the two documents are two readings of one run (D1).
+// and says so, and the two documents are two readings of one run (D1). The counts are asserted
+// rather than the emptiness alone, because a rule that stopped reporting would otherwise be
+// indistinguishable from a document with nothing wrong: 30 invariants (13 over the graph, one per
+// model rule — 17 as of P17) as of P17.
 check('and no model rule is a blocker of the graph',
   [graphInvariants.length + modelInvariants.length, committed.invariants.filter((result) => /^P\d+$/.test(result.code)).length],
-  [28, 15]);
+  [30, 17]);
 
 // --- clause 4b: every reference says what it is evidence for ----------------------------------
 // §P1's evidence granularity, asserted on the document that was written rather than on a hand-built

@@ -28,6 +28,10 @@
       "$ref": "common.schema.json#/$defs/argumentMap",
       "description": "What the behaviour yields, named semantically: session, project, order. A behaviour whose output is read by a later behaviour is a dependency the walk can be checked against."
     },
+    "contract": {
+      "$ref": "#/$defs/behaviorContract",
+      "description": "What performing this behaviour MEANS, separately from how one walk performed it. `realization[]` is an observation; this is the claim that observation is evidence about, and the two are deliberately separate documents of different kinds: a UI change invalidates the realization and leaves the behaviour intact, and a test written against the contract still asserts the same thing after the markup is rewritten."
+    },
     "assertions": {
       "$ref": "common.schema.json#/$defs/assertionList",
       "description": "Checks that hold once the behaviour has been performed, independent of which surface it started from."
@@ -65,6 +69,67 @@
       "type": "string",
       "minLength": 1,
       "description": "Must equal an id in application.actors[]. Kept loose here because the actor vocabulary is owned by the application document, and the join is what matters, not the spelling."
+    },
+    "behaviorContract": {
+      "type": "object",
+      "description": "The declared meaning of a behaviour: what has to be true before it, what it establishes, what it can lead to, and what its inputs are. Every entry is a claim about a walk and carries the status of the evidence behind it, so a contract cannot present a plausible outcome as an observed one. A projection derives this from the run's own evidence and adds nothing: an outcome the walk never exercised is absent rather than guessed, and a behaviour whose refusal path was never explored says so by having exactly the outcomes it was seen to produce.",
+      "properties": {
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/behaviorParameter" },
+          "description": "The behaviour's inputs, as bindings a test resolves at run time. `input` from common.schema.json declares the types and is what a step's {{param}} template is checked against; this says which of those inputs carries a value the page declines to read back, which is the difference between test data a generator may write into the file and test data it may only read from the environment."
+        },
+        "preconditions": {
+          "$ref": "common.schema.json#/$defs/preconditionList",
+          "description": "What must already be true. The projection fills these with the states the walk actually performed the behaviour from, because that is the only precondition this run can vouch for - a precondition nobody exercised is a claim about a walk that did not happen."
+        },
+        "postconditions": {
+          "$ref": "common.schema.json#/$defs/preconditionList",
+          "description": "What is true once the behaviour has been performed. Same shape as preconditions, and it nests none of them: a postcondition is a fact this behaviour is answerable for, which is what a test asserts and a precondition is not."
+        },
+        "outcomes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/behaviorOutcome" },
+          "description": "Where performing the behaviour can leave the application. `postconditions` says what holds; this says which observed end each holds at, keyed by the state a test can check. The two are not the same claim: a behaviour that can end in a refusal has two outcomes and might share a postcondition with neither."
+        }
+      },
+      "additionalProperties": false
+    },
+    "behaviorParameter": {
+      "type": "object",
+      "description": "One input of the behaviour, as a binding. The value is never here: a parameter is a name a test resolves, and a contract that stored the credential it was performed with would be the credential in the durable artefact, which is the thing the mask exists to prevent.",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "description": "Must equal a key of `input`, which is where the declared type lives." },
+        "type": { "$ref": "common.schema.json#/$defs/argumentValueSpec" },
+        "sensitive": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when a step of the realization supplied a value into a field the page declines to read back. It is the recorder's own test rather than a guess about a name: the reading says the field withheld its value, and the step says which input fed it. A sensitive parameter must be resolved from the environment, never written into generated test data."
+        },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "behaviorOutcome": {
+      "type": "object",
+      "description": "One way the behaviour can end. `status` is what keeps the contract honest: 'observed' means the walk reached this state by performing the behaviour, and anything weaker must say so, because a plausible failure path carried as a fact is worse than an absent one - it is a test that passes for the wrong reason.",
+      "required": ["id", "description"],
+      "properties": {
+        "id": { "$ref": "common.schema.json#/$defs/id" },
+        "description": { "type": "string", "minLength": 1 },
+        "to_state": {
+          "$ref": "common.schema.json#/$defs/stateId",
+          "description": "The state the application is left in. Must resolve to a declared state, which is what makes an outcome checkable rather than a sentence."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["observed", "inferred", "modelled"],
+          "description": "The D9/D11 level of this outcome: observed when a reading saw the application arrive there, inferred when the projection derived it from an edge, modelled when a person declared it. The three are ordinary levels of a claim, and this field is the one place a contract can get one wrong."
+        },
+        "evidence": { "$ref": "common.schema.json#/$defs/evidenceList" }
+      },
+      "additionalProperties": false
     },
     "behaviorStep": {
       "type": "object",

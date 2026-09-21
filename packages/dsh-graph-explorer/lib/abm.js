@@ -10,8 +10,12 @@
  *
  * - `modelFromCandidates()` turns a run — live candidates or a committed `graph.json` — into the
  *   ABM shape of §3.
- * - `profileFindings()` implements **P1–P15**, the judgement rules of §3, as the flat findings
+ * - `profileFindings()` implements **P1–P17**, the judgement rules of §3, as the flat findings
  *   the commit already emits (`{code, severity, detail, basis, …}`, plus `rule` and `scope`).
+ *   P16 is the exception that judges shape rather than meaning: every reference in a document
+ *   must resolve *within that document*, because a reference copied from a parent's edge set
+ *   resolves fine where it came from and names nothing here. P17 is the contract's half of D9:
+ *   an outcome may not be stated at a level stronger than the readings that support it.
  * - `claimsOf()` is the list of claims a document makes, each with the epistemic level P14/P15
  *   judge it at (D9); `claimLevel()` is the level of one `metadata` block (D11).
  * - `summarizeFindings()` is the counting half, for a CLI.
@@ -44,6 +48,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, readRun, readJsonl, reconcile } from './commit.js';
+import { MIN_WITHHELD_CHARS, REDACTION, SUPPLIED_ARGUMENT, redactProse } from './redaction.js';
 import { EVIDENCE_ROLES, templateParameter } from './schema.js';
 import { slugify } from './session.js';
 
@@ -155,13 +160,12 @@ export const PROFILE_RULES = Object.freeze({
   P13: ['error', 'warning'],
   P14: ['error'],
   P15: ['error'],
+  P16: ['error'],
+  P17: ['error'],
 });
 
 /** The kinds a behaviour may declare. Copied from `behavior.schema.json`'s enum. */
 const BEHAVIOR_KINDS = new Set(['interaction', 'navigation', 'query', 'setup', 'composite']);
-
-/** The honest record of a value that was set but never read back. */
-const REDACTION = '[set]';
 
 const rows = (value) => (Array.isArray(value) ? value : []);
 
@@ -358,26 +362,22 @@ export function candidatesFromRun(dir) {
  * like a secret. What it does is narrower and checkable: a sentence that repeats a value the walk put
  * in a field is a sentence quoting test data rather than stating an outcome.
  *
- * Four characters is the floor, because a walk that typed "yes" must not have its goal withheld for
- * the instruction's own "yes": a value shorter than that is not specific enough to be told apart from
- * the sentence around it, and a rule that fires on the word "yes" is a rule nobody can keep.
+ * Four characters is the floor (`redaction.js#MIN_WITHHELD_CHARS`, the same number for the same
+ * reason), because a walk that typed "yes" must not have its goal withheld for the instruction's own
+ * "yes": a value shorter than that is not specific enough to be told apart from the sentence around
+ * it, and a rule that fires on the word "yes" is a rule nobody can keep.
  */
-const SUPPLIED_MIN_CHARS = 4;
-
-// The one call whose arguments carry a value *into* a control, and the argument it carries it in. One
-// entry, because it is the one this plugin has ever seen a value on: `index.js#requestedUrl` reads
-// `browser_open`'s `url` by name for the same reason, and that is the same distinction — an argument
-// that names a place is not a value the walk supplied. `browser_select` carries a value too and is not
-// listed, because nothing in this repository says which argument name it uses, and a rule that guessed
-// would be a rule that reads the wrong field and calls the result a credential.
-const SUPPLIED_ARGUMENT = new Map([['browser_type', 'text']]);
-
 const suppliedValuesOf = ({ observations = [], transitions = [], capabilities = [] } = {}) => {
   const values = new Set();
   const note = (value) => {
     if (typeof value !== 'string') return;
     const trimmed = value.trim();
-    if (trimmed.length >= SUPPLIED_MIN_CHARS) values.add(trimmed);
+    // The mask is not a value the walk supplied — it is the standing for one, and a projection that
+    // took it for data would withhold a goal for having typed "[set]". The call's own arguments are
+    // redacted at ingestion now (`redaction.js`), so this is the branch the password takes: the run
+    // says it supplied something, and the document says exactly that much.
+    if (trimmed === REDACTION) return;
+    if (trimmed.length >= MIN_WITHHELD_CHARS) values.add(trimmed);
   };
   // The run's own record of each call. A page reads back what a field *holds* — and a password box
   // reads back `[set]`, by design — while the call that filled it still says what was typed, which is
@@ -405,26 +405,6 @@ const repeatedIn = (text, supplied) => (typeof text === 'string'
   ? [...supplied].filter((value) => text.includes(value))
   : []);
 
-/**
- * The goal a journey may carry, and the goal it may not.
- *
- * `journey.schema.json` gives `goal` one prohibition — it is "the business outcome in one sentence",
- * and "NEVER the raw instruction when the instruction carried a credential" — and this projection is
- * the layer that can enforce it, because the commit quotes the run's instruction verbatim (it has
- * to: `run.json` is the only place intent was written down) and an instruction is usually a task with
- * the account to use attached to it.
- *
- * Withheld is not the same as dropped. The journey keeps saying what the walk was for, in the
- * model's own vocabulary: the behaviour names the walk performed, in walk order, and the surface it
- * reached — the same derived-sentence voice the fallback journey uses, prefixed so a reader knows no
- * person wrote it. `goal_stated` becomes false, because nobody stated *this* sentence: the run
- * stated a different one, and that is a fact about the goal that the schema's own flag carries.
- *
- * The instruction itself stays in `metadata.extra.run_instruction` with the repeated values replaced,
- * which is the difference between a document that says less and a document that says one thing and
- * shows another: leaving the instruction verbatim beside a withheld goal would put the credential
- * back in the same object, and dropping it would lose the only record of what the run was asked.
- */
 /**
  * The sentence a journey may keep, and the reason it may not keep the other one.
  *
@@ -512,6 +492,13 @@ export function modelFromCandidates({
   // The values this walk supplied, read once from the evidence and used for one thing: telling a goal
   // that states an outcome from a goal that quotes the run's instruction and the account it used.
   const supplied = suppliedValuesOf({ observations, transitions, capabilities });
+  // The level each reading was obtained at, so a contract can state its outcomes at the level of the
+  // readings that support them rather than at a level of its own choosing (D11). Without this the
+  // projection writes `observed` about a set of readings that may all be `modelled` — a legal document,
+  // produced by any tool that stamps no `producer` — and a contract that outranks its own evidence is
+  // the one shape P17 exists to refuse. A projection must not be able to trip its own rule.
+  const levelByObservation = new Map(observations.map((observation) => [observation.id, claimLevel(observation.metadata)]));
+  const levelOfObservation = (id) => (id == null ? null : levelByObservation.get(id) ?? null);
 
   // --- the realisation the run recorded, and what it demotes (D13/D14) --------------------------
   // A capability is a *behaviour* only while nothing recorded it as a *step*. Phase 1 fills
@@ -857,10 +844,16 @@ export function modelFromCandidates({
   // is a document with two vocabularies in it, and P4 refuses the second one. A purpose that resolves
   // to no element this run declared is left alone rather than guessed at, and P4 reports it.
   const elementIdByPurpose = new Map();
+  // The reverse index, for the contract: a behaviour's parameter is sensitive when a step fed it into a
+  // field the page declines to read back, and the only link the document states between an element and
+  // an input is the element's semantic purpose.
+  const purposeOfElement = new Map();
   for (const state of states) {
     for (const element of rows(state.elements)) {
       const purpose = element.semantic?.purpose;
-      if (typeof purpose === 'string' && isElementId(element.id)) elementIdByPurpose.set(purpose, element.id);
+      if (typeof purpose !== 'string' || !isElementId(element.id)) continue;
+      elementIdByPurpose.set(purpose, element.id);
+      purposeOfElement.set(element.id, purpose);
     }
   }
   const resolveEffectTargets = (steps) => steps.map((step) => {
@@ -916,14 +909,21 @@ export function modelFromCandidates({
       const evidence = steps.length
         ? dedupeRefs(edges.flatMap((edge) => rows(edge.evidence)), (ref) => `${ref.observation ?? ''}|${ref.role ?? ''}`)
         : rows(capability.evidence);
+      const id = behaviorIdFor(name);
+      // The declared inputs, whether they came from the run's `steps[]` (0.1's spelling of a
+      // realization) or from the capability's own `input` map: a behaviour with no realization has no
+      // steps to read them from, and a behaviour whose realization exists has both.
+      const declaredInput = steps.length ? inputOf(capability) : capability.input;
+      const contract = contractOf({ behavior: id, edges, steps, input: declaredInput, purposeOfElement, notes, dedupeRefs, levelOfObservation });
       return prune({
-        id: behaviorIdFor(name),
+        id,
         name,
         description: capability.description,
         kind,
         actor,
-        input: steps.length ? inputOf(capability) : capability.input,
+        input: declaredInput,
         output: capability.output,
+        contract,
         // The recorded steps, when the run recorded any: they are what the behaviour is, and the
         // `steps[]` a 0.1 capability carries is the same claim in the older spelling.
         realization: steps,
@@ -933,6 +933,20 @@ export function modelFromCandidates({
         metadata: capability.metadata,
       });
     });
+
+  // What the contracts do *not* cover, said once rather than left to be noticed.
+  //
+  // A contract derived from evidence can only ever describe the paths the walk took, and the review's
+  // second P0 asked for failure outcomes because that is exactly the part it cannot reach: nothing in
+  // the run shows what an invalid credential does, and an outcome invented from what is plausible
+  // would sit in the contract looking precisely like the one that was watched. So the honest report is
+  // the count of outcomes each behaviour has and what that count means, in one line, rather than a
+  // fabricated refusal path that a test would then assert. This is also the sentence a reader needs in
+  // order to know how to *fix* it: exercise the path and the contract grows on its own.
+  const successOnly = behaviors.filter((behavior) => behavior.contract?.outcomes?.length === 1).map((behavior) => behavior.id);
+  if (successOnly.length) {
+    notes.push(`${successOnly.length} behaviour(s) carry exactly one outcome, the state the walk's success path reached (${successOnly.join(', ')}). A refusal path — an invalid credential, a rejected field — is an outcome no reading of this run saw, and none is stated: an outcome supplied from what is plausible is indistinguishable in a contract from one that was watched, which is the whole point of D9. Read these contracts as the path the run exercised, and exercise the others to grow them.`);
+  }
   // What a turn is called in prose. A collapsed edge is named after the behaviour it became (P0-1),
   // and an edge that was never collapsed may carry no name at all — so the behaviour's own name is
   // the second answer, and the transition id the last, because a sentence that names a behaviour by
@@ -979,33 +993,8 @@ export function modelFromCandidates({
     return owner ? behaviorIdOf(owner) : undefined;
   };
 
-  // `state.capabilities` is 0.1's inverse view and 0.2 renamed it `behaviors` (D2), so the key is
-  // translated rather than copied: the ids are looked up, and an id no capability declares is
-  // dropped with a note rather than carried as a behaviour that does not exist.
-  const projectedStates = states.map((state) => {
-    const { capabilities: offered = [], ...rest } = state;
-    const fromDocument = rows(offered).map((id) => {
-      const capability = capabilityById.get(id);
-      if (!capability) {
-        notes.push(`${state.id}: capabilities[] names "${id}", which no committed capability declares; the behaviour reference was dropped.`);
-        return null;
-      }
-      // An offered step capability is offered as the behaviour that performs it, because the step
-      // is not a behaviour any more (D13).
-      return behaviorIdOf(ownerOf.get(id) ?? capability);
-    });
-    return {
-      ...prune(rest),
-      // The inverse view of `transitions[].from_state`, plus what 0.1 already recorded as offered.
-      behaviors: distinct([
-        ...survivors.filter((edge) => edge.from_state === state.id).map(behaviorOfEdge),
-        ...fromDocument,
-      ]),
-      affordances: affordancesOf(state, actedOn.get(state.id) ?? new Set(), state.affordances),
-    };
-  });
-
   // --- transitions: one edge per move a behaviour performs (D5) --------------------------------
+  // Built before the states, because `state.outgoing_transitions` is an index *of these*.
   const projectedTransitions = survivors.map((edge) => {
     const capability = capabilityById.get(edge.action?.capability);
     if (!capability) {
@@ -1034,6 +1023,56 @@ export function modelFromCandidates({
   // carrying rather than the record it came from, which is what prose about a turn must be written
   // from: a reader is told about the edge that is there.
   const projectedById = new Map(projectedTransitions.map((transition) => [transition.id, transition]));
+
+  // --- states, after the transitions -----------------------------------------------------------------
+  //
+  // `state.capabilities` is 0.1's inverse view and 0.2 renamed it `behaviors` (D2), so the key is
+  // translated rather than copied: the ids are looked up, and an id no capability declares is
+  // dropped with a note rather than carried as a behaviour that does not exist.
+  //
+  // `outgoing_transitions` is the same kind of thing one level down, and this is where the review's
+  // first P0 came from. The graph keeps it as stored data — `commit.js` builds it from the edges it
+  // committed — and the model inherited it through the object spread above, so the reviewer's
+  // `application-model.json` had a state whose `outgoing_transitions` named
+  // `transition_fill_email_input`, `transition_fill_password_input` and `transition_submit_login`
+  // while the document's own `transitions[]` held only the last of them. Nothing was broken in the
+  // graph: its `transitions[]` is the uncollapsed set, and every one of the three resolved. The
+  // reference rotted *in the projection*, because `survivors` — the collapsed edge set D12 writes
+  // into `transitions[]` — is not the set the graph derived the index from. Two levels of the same
+  // document then disagreed about what an edge is, and both were schema-valid, because no schema can
+  // check that a reference resolves. So the index is not carried any more: it is derived from
+  // `transitions[]` after `transitions[]` exists, which is the one ordering in which it cannot go
+  // stale, and the ids it dropped are named in `warnings[]` rather than disappearing quietly.
+  const projectedStates = states.map((state) => {
+    const { capabilities: offered = [], outgoing_transitions: declared, ...rest } = state;
+    const fromDocument = rows(offered).map((id) => {
+      const capability = capabilityById.get(id);
+      if (!capability) {
+        notes.push(`${state.id}: capabilities[] names "${id}", which no committed capability declares; the behaviour reference was dropped.`);
+        return null;
+      }
+      // An offered step capability is offered as the behaviour that performs it, because the step
+      // is not a behaviour any more (D13).
+      return behaviorIdOf(ownerOf.get(id) ?? capability);
+    });
+    const outgoing = projectedTransitions
+      .filter((transition) => transition.from_state === state.id)
+      .map((transition) => transition.id);
+    const unresolved = rows(declared).filter((id) => !projectedById.has(id));
+    if (unresolved.length) {
+      notes.push(`${state.id}: outgoing_transitions named ${unresolved.join(', ')}, which this document's transitions[] does not contain — the calls those edges were made of are one move now (D5/D12), and the index was recomputed from the transitions the model carries instead of copied from the graph's uncollapsed set.`);
+    }
+    return {
+      ...prune(rest),
+      // The inverse view of `transitions[].from_state`, plus what 0.1 already recorded as offered.
+      behaviors: distinct([
+        ...survivors.filter((edge) => edge.from_state === state.id).map(behaviorOfEdge),
+        ...fromDocument,
+      ]),
+      ...(outgoing.length ? { outgoing_transitions: outgoing } : {}),
+      affordances: affordancesOf(state, actedOn.get(state.id) ?? new Set(), state.affordances),
+    };
+  });
 
   // --- journeys: the walk the commit reassembled, with an actor the document declares ----------
   //
@@ -1130,7 +1169,40 @@ export function modelFromCandidates({
     });
     const narrative = goalOf({ journey, turns, supplied });
     const nameRepeats = repeatedIn(journey.name, supplied);
+    // The derivation note the graph wrote describes the graph's walk, and a journey that comes from the
+    // graph carries it verbatim — three transitions, `distinct_transitions: 3` — into a document whose
+    // `steps[]` holds one turn, because the collapse (D5/D12) happens here and not there. The reviewer
+    // read exactly that: "the journey's derivation metadata still lists all three original transitions,
+    // while the committed journey has one step referencing the collapsed login transition". So the
+    // derivation is recomputed from the turns *this* document carries. Metadata describing a different
+    // document is worse than no metadata: it is a provenance claim that fails the first time anyone
+    // follows it, and the reader who follows it is the one checking the document's own integrity.
+    const inheritedSteps = rows(journey.metadata?.extra?.steps);
+    const derivation = {
+      derivation: 'the model\'s own transitions in walk order, one turn per behaviour invocation: the calls one behaviour performs are one move (D5/D12), so a turn names the edge the invocation moved along and the calls it was made of are that behaviour\'s realization.',
+      steps: steps.map((step) => prune({
+        transition: step.transition,
+        from_state: projectedById.get(step.transition)?.from_state ?? step.from_state ?? null,
+        to_state: projectedById.get(step.transition)?.to_state ?? step.to_state ?? null,
+      })),
+      distinct_transitions: distinct(steps.map((step) => step.transition)).length,
+    };
+    if (inheritedSteps.length !== derivation.steps.length) {
+      notes.push(`${journey.id}: the derivation note the graph carried listed ${inheritedSteps.length} transition(s), and this document's walk has ${derivation.steps.length}; the note was recomputed from the turns the model carries, because the calls of one behaviour are one move here.`);
+    }
     const narrativeExtra = {
+      ...derivation,
+      // The instruction is the run's own account of what it was asked to do, and the model carries it
+      // as evidence of intent rather than as the journey's goal (`goalOf` above decides that). It is
+      // put through the mask on the way in: a value the walk supplied into a field is recorded where a
+      // machine reads it — the edge's `arguments`, the behaviour's `realization[].value` — and a
+      // sentence is not the place for it. The recorder has already done this once (`redaction.js`), and
+      // doing it again here is not redundancy: it is the difference between the run *having* redacted
+      // the record and the model *publishing* only the redacted form, which is the only one of the two
+      // this document can be held to.
+      ...(typeof journey.metadata?.extra?.run_instruction === 'string'
+        ? { run_instruction: redactProse(journey.metadata.extra.run_instruction, supplied) }
+        : {}),
       ...(narrative.goal_source ? { goal_stated: false, goal_source: narrative.goal_source } : {}),
       // A name is a handle for a walk and a goal is a sentence about it, so a name is *less* likely to
       // quote an account than a goal is — but the commit derives the name from the goal, and a name
@@ -1149,9 +1221,7 @@ export function modelFromCandidates({
     if (nameRepeats.length) {
       notes.push(`${journey.id}: the walk's name repeats a value the walk supplied, so the name is derived from the walk instead of quoted from the run's instruction.`);
     }
-    const metadata = Object.keys(narrativeExtra).length
-      ? prune({ ...journey.metadata, extra: { ...(journey.metadata?.extra ?? {}), ...narrativeExtra } })
-      : journey.metadata;
+    const metadata = prune({ ...journey.metadata, extra: { ...(journey.metadata?.extra ?? {}), ...narrativeExtra } });
     return prune({
       id: journey.id ?? `journey_${index + 1}`,
       name: nameRepeats.length ? `Derived walk: ${startState ?? 'no surface'} to ${endState ?? 'no surface'} (${steps.length} step(s))` : journey.name,
@@ -1248,6 +1318,139 @@ function stepsOfCapability(capability, notes) {
     }));
   }
   return steps;
+}
+
+/**
+ * The contract of a behaviour: what performing it means, derived from the walk that performed it.
+ *
+ * The review's second P0 was that `login` had actions and an outcome but no preconditions, no
+ * postconditions and no failure outcomes — and it is worth being precise about what was missing,
+ * because the answer is not "the walk forgot to write them down". There was no field. `graph_observe`
+ * and `graph_transition` between them record a *surface*, an *action* and an *effect*, and a
+ * behaviour's meaning was being read off the effects of the last step: the state arrived at is the
+ * outcome, the state left is the precondition, and nothing anywhere in the protocol asked for either
+ * as a claim about the behaviour rather than as a property of a move. The consequences are the ones
+ * the review names. A generator can write a test that asserts the project list appeared — the one
+ * thing the recording happens to contain — and cannot write one that asserts the authenticated user is
+ * correct, because *correct as whom* was never stated; and a refusal path is invisible, because an
+ * outcome the walk never reached leaves no effect to read.
+ *
+ * So this derives the contract from the evidence, which is the only thing a projection is allowed to
+ * do (D13: it reports, it does not repair), and it is careful about the two ways that goes wrong:
+ *
+ *   - **An empty field is not a field with a guess in it.** A precondition is a state the walk
+ *     actually performed the behaviour from, an outcome is a state a reading saw the application
+ *     arrive at, a sensitive parameter is one a step fed into a field the page declined to read back.
+ *     None of the four is inferred from what a behaviour of that name would normally need.
+ *   - **A contract takes the level of its evidence.** An outcome's `status` is not a word the
+ *     projection chooses; it is the minimum level among the readings that outcome cites (D11), so a
+ *     behaviour whose steps were all rationalised rather than watched yields outcomes that say so.
+ *     The earlier spelling of this derivation wrote `observed` unconditionally on the argument that an
+ *     outcome names a state a reading was taken in — true, and beside the point: the field is a claim
+ *     about the *evidence*, and a document can be full of readings taken by a tool whose producer this
+ *     code does not recognise, which makes every one of them `modelled` (D9). A projection that wrote
+ *     `observed` over those would be the exact defect the review's P0-2 names, produced by the tool
+ *     that is supposed to be enforcing it.
+ *   - **Absence has to be stated.** A contract derived this way only ever describes the paths the walk
+ *     took, so the caller is told which behaviours carry a single outcome — the success path — rather
+ *     than being left to notice. The review's rule is exact here: "The model should not silently turn
+ *     a plausible failure path into an observed fact." Stating the one path is the other half of
+ *     refusing to invent the second.
+ *
+ * `undefined` when there is nothing to say — a behaviour with no realization, no edge and no input
+ * carries no contract, because an empty contract is a claim that the behaviour has no inputs and no
+ * effects, and the truth is that this run did not say.
+ */
+function contractOf({ behavior, edges, steps, input, purposeOfElement, notes, dedupeRefs, levelOfObservation = () => null }) {
+  const entries = Object.entries(input ?? {});
+  // The words of every purpose a masked step acted on. A parameter is a binding a test resolves, and
+  // the derivation is the recorder's own test read one level up: the *reading* says this field withheld
+  // its value, the *step* says which control was fed, and the control's semantic purpose is the only
+  // link between the two that the document states. It is a word match rather than a binding because a
+  // literal was recorded (the walk typed a value and the mask replaced it) — where the walk wrote a
+  // `{{param}}` template instead, the same purpose words match the same declared input, so both
+  // spellings land on the same parameter.
+  const maskedPurposes = new Set();
+  const maskedWords = new Set();
+  for (const step of steps) {
+    if (step.value !== REDACTION) continue;
+    const purpose = purposeOfElement.get(step.element);
+    if (typeof purpose !== 'string' || !purpose) continue;
+    maskedPurposes.add(purpose);
+    for (const word of purpose.split(/[^A-Za-z0-9]+/)) {
+      if (word) maskedWords.add(word.toLowerCase());
+    }
+  }
+  const parameters = entries.map(([name, spec]) => prune({
+    name,
+    // Only the type travels: `input` is the declared map and already carries every other hint
+    // (`format`, `enum`, `pattern`), and duplicating a declaration into two places in one document is
+    // how they come to disagree. `argumentValueSpec` is closed, so a spec copied whole would be
+    // refused by the schema the moment the walk declared anything it allowed and this def did not.
+    type: typeof spec === 'string' ? { type: spec } : (typeof spec?.type === 'string' ? { type: spec.type } : undefined),
+    sensitive: maskedWords.has(name.toLowerCase()) ? true : undefined,
+  }));
+  if (maskedPurposes.size && !parameters.some((parameter) => parameter.sensitive)) {
+    notes.push(`${behavior}: a realization step supplied a value into a field the page declines to read back (${[...maskedPurposes].join(', ')}), and no declared input shares a word with that field's purpose, so no parameter is marked sensitive — a generator reading this contract will look for a literal, and there is none.`);
+  }
+
+  const fromStates = distinct(rows(edges).map((edge) => edge.from_state).filter(Boolean));
+  const preconditions = fromStates.map((state) => ({
+    kind: 'state',
+    state,
+    description: `the walk performed this behaviour from ${state}, so that surface is the precondition this run can vouch for. It is not a claim about everywhere the behaviour could be performed from — nothing in the run tried another surface — and a guessed precondition is exactly what this document may not carry.`,
+  }));
+
+  const evidenceByTo = new Map();
+  for (const edge of rows(edges)) {
+    if (!edge.to_state) continue;
+    const list = evidenceByTo.get(edge.to_state) ?? [];
+    for (const ref of rows(edge.evidence)) list.push(ref);
+    evidenceByTo.set(edge.to_state, list);
+  }
+  const toStates = [...evidenceByTo.keys()];
+  // The level of one state's outcome is the *weakest* level among the readings that support it, which
+  // is D11's rule for any claim with inputs, applied to a contract instead of stated beside it. Two
+  // consequences are the point rather than side effects. The first: a document whose readings arrived
+  // without a producer this code recognises produces an outcome at `modelled`, which is weaker than
+  // any of P17's complaints, so the projection cannot write a contract its own judgement rule would
+  // reject. The second: nothing here is invented. The level is not a hedge the projection adds to be
+  // safe — it is the level the evidence actually has, and where a walk was watched end to end it is
+  // `observed`, exactly as before.
+  const levelOfOutcome = (refs) => rows(refs)
+    .map((ref) => levelOfObservation(ref?.observation))
+    .filter(Boolean)
+    .reduce((lowest, level) => (CLAIM_LEVELS.indexOf(level) < CLAIM_LEVELS.indexOf(lowest) ? level : lowest), CLAIM_LEVELS[0]);
+  const levelByToState = new Map(toStates.map((state) => [state, levelOfOutcome(evidenceByTo.get(state))]));
+  // A description and a status are two claims about one outcome, so the prose cannot say "observed"
+  // over a status of `modelled`: the sentence a generator reads and the field it branches on would
+  // disagree, and the field is the one that is right. Seeded at the weakest level, so an outcome whose
+  // evidence list is empty — an edge that arrived carrying no reading at all — is described as what
+  // this document says rather than as what a walk saw.
+  const OUTCOME_PHRASES = {
+    observed: 'was observed to leave',
+    inferred: 'is stated, on the strength of reasoning readings, to leave',
+    modelled: 'is stated by this document, with no reading behind it, to leave',
+  };
+  const outcomes = toStates.map((state) => prune({
+    id: `outcome_${state}`,
+    description: `performing this behaviour ${OUTCOME_PHRASES[levelByToState.get(state)]} the application at ${state}.`,
+    to_state: state,
+    status: levelByToState.get(state),
+    evidence: dedupeRefs(evidenceByTo.get(state), (ref) => `${ref.observation ?? ''}|${ref.role ?? ''}`),
+  }));
+  // `postconditions` and `outcomes` are the same evidence stated two ways on purpose, and both are
+  // needed: a postcondition is a fact that holds afterwards and has no state attached to it in the
+  // schema (a variable can be a postcondition, which is how "the session is authenticated" would be
+  // said), while an outcome is the end a test can navigate to. A behaviour with two ends shares neither.
+  const postconditions = toStates.map((state) => ({
+    kind: 'state',
+    state,
+    description: `reaching ${state} is what ${levelByToState.get(state) === 'observed' ? 'this behaviour was observed to do' : `this document states this behaviour does, at the level of ${levelByToState.get(state)}`}.`,
+  }));
+
+  if (!parameters.length && !preconditions.length && !outcomes.length) return undefined;
+  return prune({ parameters, preconditions, postconditions, outcomes });
 }
 
 /**
@@ -1578,7 +1781,7 @@ export function claimsOf(model) {
 }
 
 /**
- * P1–P15 over a projected model.
+ * P1–P17 over a projected model.
  *
  * `candidates` is the second document P12 needs: the committed transitions and capabilities the
  * model has to account for. Without them P12 checks only the model's internal coherence and says
@@ -1603,6 +1806,8 @@ export function profileFindings(model, { candidates = null } = {}) {
   const actors = rows(model.application?.actors);
   const actorIds = new Set(actors.map((actor) => actor.id));
   const behaviorById = new Map(behaviors.map((behavior) => [behavior.id, behavior]));
+  const behaviorIds = new Set(behaviorById.keys());
+  const stateIds = new Set(states.map((state) => state.id));
   const transitionIds = new Set(transitions.map((transition) => transition.id));
   const transitionById = new Map(transitions.map((transition) => [transition.id, transition]));
   const observationIds = new Set(observations.map((observation) => observation.id));
@@ -2332,6 +2537,203 @@ export function profileFindings(model, { candidates = null } = {}) {
           detail: `${claim.label ?? claim.subject} is inferred by "${producer}" from nothing: no evidence[], no composed_of, no named derivation. An inference with no basis is a hallucination, and it is reported as one rather than carried as a claim P9 could anchor.`,
         });
       }
+    }
+  }
+
+  // --- P16: every reference resolves --------------------------------------------------------------
+  //
+  // The one rule about the document's *shape* rather than about what it claims, and the acceptance
+  // criterion the review put first: "Every state, behaviour, transition, actor, and journey reference
+  // resolves". It exists because the two failure modes it catches are both silent and both survive a
+  // schema. A dangling id is a string like any other — `additionalProperties: false` and a
+  // `pattern` on the id grammar will both pass a name that was never written — and a *stale* id, one
+  // that resolves to an object which is not the one meant, is worse: `outgoing_transitions` was
+  // inherited from an earlier document's uncollapsed edge set, so the ids resolved in the graph and
+  // pointed at transitions this document had collapsed away. Nothing but this rule reads a reference
+  // on both sides and asks whether they are the same one.
+  //
+  // A reference is checked for *existence* and, where there is a second thing to agree with, for
+  // agreement: a transition's `from_state` must be the state that lists it, a behaviour's
+  // `contract.preconditions[].state` must be a state, a journey step's transition must exist. An id
+  // that names nothing and an id that names the wrong thing are one finding with different prose,
+  // because the fix is the same and the reader needs the four things: which object, which field,
+  // which id, and which collection it should have been in.
+  //
+  // This rule never repairs anything. The projection derives what it can and reports what it
+  // rewrote; by the time a document is profiled, a reference that does not resolve is a defect in the
+  // document and must be reported as one, because a reader who is told "the ids were fixed" has
+  // learned nothing about the ids that were not.
+  // The pool each `target` name refers to, spelled as the reader has to spell it in the message, and
+  // the objects each scope holds. Two tables rather than one so that adding a field to a scope is a
+  // one-line change and cannot get the pool's *name* wrong without getting the pool wrong too.
+  const referencePools = {
+    transitions: transitionIds,
+    behaviors: behaviorIds,
+    states: stateIds,
+    observations: observationIds,
+    'application.actors[]': actorIds,
+    'element ids': new Set(surfacesOfElement.keys()),
+  };
+  const scoped = {
+    states,
+    transitions,
+    behaviors,
+    journeys,
+    state_variables: variables,
+  };
+  // Every stored reference in the document, by the scope that holds it. A field absent from this
+  // table is a reference this rule does not check, and there is exactly one kind: a value inside
+  // `metadata`, which is the producer's own record and not the document's vocabulary.
+  const references = [
+    { scope: 'states', label: 'outgoing_transitions', field: 'outgoing_transitions', target: 'transitions', list: true },
+    { scope: 'states', label: 'behaviors', field: 'behaviors', target: 'behaviors', list: true },
+    { scope: 'states', label: 'elements', field: 'elements', target: 'element ids', list: 'id' },
+    { scope: 'transitions', label: 'from_state', field: 'from_state', target: 'states' },
+    { scope: 'transitions', label: 'to_state', field: 'to_state', target: 'states' },
+    { scope: 'transitions', label: 'behavior', field: 'behavior', target: 'behaviors' },
+    { scope: 'transitions', label: 'evidence[].observation', field: 'evidence', target: 'observations', list: 'observation' },
+    { scope: 'behaviors', label: 'actor', field: 'actor', target: 'application.actors[]' },
+    { scope: 'behaviors', label: 'composed_of', field: 'composed_of', target: 'behaviors', list: true },
+    { scope: 'behaviors', label: 'contract.preconditions[].state', field: 'contract.preconditions', target: 'states', list: 'state' },
+    { scope: 'behaviors', label: 'contract.postconditions[].state', field: 'contract.postconditions', target: 'states', list: 'state' },
+    { scope: 'behaviors', label: 'contract.outcomes[].to_state', field: 'contract.outcomes', target: 'states', list: 'to_state' },
+    // An outcome's evidence is a reference like any other, and it is the one P17 ranks: a contract
+    // that cites a reading the document does not hold is a claim with no support that *looks* like
+    // it has some, which is worse than the empty case P17's first code catches. This is the one
+    // reference in the table that is two levels deep — an array of outcomes, each holding an array
+    // of evidence entries — which is why `list` can also name a path rather than a key.
+    { scope: 'behaviors', label: 'contract.outcomes[].evidence[].observation', field: 'contract.outcomes', target: 'observations', list: { through: 'evidence', at: 'observation' } },
+    { scope: 'journeys', label: 'start_state', field: 'start_state', target: 'states' },
+    { scope: 'journeys', label: 'actor', field: 'actor', target: 'application.actors[]' },
+    { scope: 'journeys', label: 'steps[].transition', field: 'steps', target: 'transitions', list: 'transition' },
+    { scope: 'state_variables', label: 'dimension_of', field: 'dimension_of', target: 'states' },
+  ];
+  // How a field names its ids: `list: true` reads the field as an array of ids, `list: 'x'` reads it
+  // as an array of objects whose `x` is the id, `list: {through, at}` reads it as an array of objects
+  // each holding an array of objects whose `at` is the id, and no `list` reads the field as one id.
+  // Getting this wrong is how a rule about dangling references reports nothing at all while appearing
+  // to run — which is the failure it exists to catch, so the shapes are named rather than inferred
+  // from the value at hand.
+  const lookup = (object, path) => path.split('.').reduce((held, key) => (held == null ? held : held[key]), object);
+  // The ids one field names, given the shape that field has. Four shapes and no fifth, each one a
+  // fact about the schema rather than a convenience: a scalar (`transition.from_state`), an array of
+  // ids (`state.behaviors`), an array of objects carrying an id (`state.elements[].id`), and an
+  // array of objects carrying an array of objects carrying an id (`contract.outcomes[].evidence[]
+  // .observation`). Declared per row and never inferred from the value, because inferring it is how
+  // this rule reported nothing at all the first time it was written: `rows(value)` over a scalar is
+  // an empty array, and an empty array is silence, which reads exactly like agreement.
+  const idsNamed = (value, list) => {
+    if (list === true) return rows(value);
+    if (typeof list === 'string') return rows(value).map((entry) => entry?.[list]);
+    if (list && typeof list === 'object') {
+      return rows(value).flatMap((entry) => rows(entry?.[list.through]).map((inner) => inner?.[list.at]));
+    }
+    return [value];
+  };
+  for (const reference of references) {
+    const pool = referencePools[reference.target] ?? new Set();
+    const held = rows(scoped[reference.scope]);
+    for (const object of held) {
+      // A scalar that is absent was pruned by the projection for having nothing to say, and that is
+      // not a dangling reference: the difference between "this behaviour performs no move" and "this
+      // behaviour performs a move that is not in the document" is the whole point of the rule.
+      const value = lookup(object, reference.field);
+      const named = idsNamed(value, reference.list);
+      for (const id of named) {
+        if (typeof id !== 'string' || !id || pool.has(id)) continue;
+        add({
+          rule: 'P16',
+          code: 'reference_does_not_resolve',
+          severity: 'error',
+          scope: reference.scope,
+          subject: object.id ?? object.name ?? null,
+          detail: `${object.id ?? object.name ?? 'this object'}: ${reference.label} names "${id}", and no ${reference.target} entry carries that id.`,
+        });
+      }
+    }
+  }
+  // A state that lists an edge the edge does not own is a *stale* reference rather than a dangling
+  // one, and it is the specific defect the review found: the ids resolved in the graph they were
+  // copied from, and pointed at edges this document does not have the calls for.
+  for (const state of states) {
+    for (const id of rows(state.outgoing_transitions)) {
+      const transition = transitionById.get(id);
+      if (!transition || transition.from_state === state.id) continue;
+      add({
+        rule: 'P16',
+        code: 'reference_is_stale',
+        severity: 'error',
+        scope: 'states',
+        subject: state.id,
+        detail: `${state.id}: outgoing_transitions names "${id}", which resolves to a transition whose from_state is "${transition.from_state ?? null}". An edge belongs to the state it leaves: this id was copied from a document whose edges this one does not share.`,
+      });
+    }
+  }
+
+  // --- P17: a contract states what was watched, and no more ---------------------------------------
+  //
+  // The gap the review named as P0-2, in one sentence: *"The model should not silently turn a
+  // plausible failure path into an observed fact."* A contract that says an outcome is `observed`
+  // is making exactly that claim, and until this rule existed nothing read it — the outcome's
+  // `status` is a closed enum and its `to_state` is checked by P16, so a hand-written or
+  // LLM-written contract could assert any of the three levels about anything and validate.
+  //
+  // The projection never trips it: `contractOf` writes `observed` only from an edge's own evidence
+  // and copies that evidence in the same breath. That is the point. The rule exists for the
+  // document the projection did not write, and its two codes are the two ways a contract can
+  // outrun what it watched:
+  //
+  //   - an outcome that claims observation and names no reading at all (`outcome_without_evidence`),
+  //     which is the invented failure path with the paperwork of a watched one;
+  //   - an outcome stronger than every reading it does name (`outcome_outranks_its_evidence`) — the
+  //     same defect, one step quieter, and the one a document will reach by *editing* a real
+  //     outcome's `status` rather than by writing a new one.
+  //
+  // A weaker claim is not reported, and that is deliberate rather than an omission: `inferred` on a
+  // failure path someone reasoned about is the honest way to state a path no walk took, and this
+  // rule's whole value is that it leaves that door open. The levels are `CLAIM_LEVELS`, the same
+  // three D9 already uses, so a contract and a claim are ranked by one vocabulary and not two.
+  const levelOf = (level) => CLAIM_LEVELS.indexOf(level ?? 'modelled');
+  // The observations by id, so an outcome's citation can be *ranked* and not merely counted. P16
+  // builds the same set as a set — it only needs to know an id exists — and this is the map a rule
+  // needs when existence is not the question.
+  const observationById = new Map(observations.map((observation) => [observation.id, observation]));
+  for (const behavior of behaviors) {
+    const outcomes = rows(behavior.contract?.outcomes);
+    for (const outcome of outcomes) {
+      const claimed = levelOf(outcome.status);
+      const named = rows(outcome.evidence);
+      const cited = named
+        .map((entry) => observationById.get(entry?.observation))
+        .filter(Boolean);
+      // A citation that names no reading at all is this rule's finding. A citation that names a
+      // reading the document does not hold is *P16's* — the two codes are separate complaints and one
+      // edit must not draw both, because "this claim has nothing behind it" and "this claim points at
+      // something that is not here" are different things to go and fix, and a document reported twice
+      // for one mistake is a document whose report is read as noise.
+      if (claimed >= levelOf('observed') && !cited.length && !named.length) {
+        add({
+          rule: 'P17',
+          code: 'outcome_without_evidence',
+          severity: 'error',
+          scope: 'behaviors',
+          subject: behavior.id,
+          detail: `${behavior.id}: the outcome "${outcome.id ?? ''}" is stated ${outcome.status} and names no reading, so nothing in this document supports it. A failure path no walk took is a path the contract may state as inferred; stating it as observed is the one thing it may not do.`,
+        });
+        continue;
+      }
+      const support = cited.length
+        ? cited.reduce((lowest, observation) => Math.min(lowest, levelOf(claimLevel(observation.metadata))), Number.POSITIVE_INFINITY)
+        : null;
+      if (support === null || claimed <= support) continue;
+      add({
+        rule: 'P17',
+        code: 'outcome_outranks_its_evidence',
+        severity: 'error',
+        scope: 'behaviors',
+        subject: behavior.id,
+        detail: `${behavior.id}: the outcome "${outcome.id ?? ''}" is stated ${outcome.status}, while the weakest of the ${cited.length} reading(s) it names was obtained at ${CLAIM_LEVELS[support]}. A contract is a claim like any other and takes the level of its evidence (D11); state this outcome ${CLAIM_LEVELS[support]} or cite a reading that was actually executed.`,
+      });
     }
   }
 

@@ -50,8 +50,9 @@
  *    directory is repaired and the write retried, and a failure that cannot be
  *    repaired is reported — never thrown.
  */
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { MIN_WITHHELD_CHARS, redactProse } from './redaction.js';
 
 export const RUN_DIR_NAME = 'graph-run';
 
@@ -298,7 +299,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
       // itself survived, because a file appearing that the run did not just write is
       // exactly the kind of thing that should not happen quietly.
       const manifestMissing = !existsSync(join(dir, 'run.json'));
-      if (manifestMissing) writeFileSync(join(dir, 'run.json'), runRecordText, 'utf8');
+      if (manifestMissing) writeFileSync(join(dir, 'run.json'), runRecordText(), 'utf8');
       if (gone) recreations += 1;
       if (gone) {
         // The log the commit will read begins at this point, so nothing may be
@@ -385,18 +386,44 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
   /** Append one record. `false` means it is not in the log, so callers must not keep it. */
   const append = (path, record) => write(path, JSON.stringify(record) + '\n');
 
-  // Provenance, written once and never rewritten. Every field answers "could
-  // someone reproduce this run?" — what code, what instruction, what model,
-  // what starting point. A graph that cannot be tied to those is a claim
-  // without a warrant, and the schema's version-coherence invariant cannot be
-  // checked at all if the producing versions were never recorded. Fields we
-  // genuinely cannot see stay null rather than being guessed at: a null is an
-  // honest "unknown", a plausible-looking default is a false fact.
-  const runRecordText = JSON.stringify({
-    started_at: new Date().toISOString(),
+  // Provenance. Every field answers "could someone reproduce this run?" — what
+  // code, what instruction, what model, what starting point. A graph that cannot be
+  // tied to those is a claim without a warrant, and the schema's version-coherence
+  // invariant cannot be checked at all if the producing versions were never
+  // recorded. Fields we genuinely cannot see stay null rather than being guessed
+  // at: a null is an honest "unknown", a plausible-looking default is a false fact.
+  //
+  // Written once at run start and never rewritten — with one exception, and it is
+  // the reason this is a function rather than a constant: `withholdValue` rewrites
+  // `instruction` when the run learns a value it may not keep. The exception is
+  // forced rather than chosen. The instruction is prose, and nothing in prose says
+  // which of its words is a credential; the machinery only knows once a field that
+  // refuses to be read has received one. So the instruction is written as it was
+  // given, and the moment a call supplies a value the page declines to read back,
+  // the sentence is rewritten with that value replaced by the mask. See
+  // `withholdValue` for the window that leaves and why it is the narrowest one
+  // available.
+  const startedAt = new Date().toISOString();
+  let withheldValues = [];
+  let withheldAt = null;
+  const runRecordText = () => JSON.stringify({
+    started_at: startedAt,
     cwd,
     start_url: provenance.startUrl ?? null,
-    instruction: provenance.instruction ?? null,
+    instruction: redactProse(provenance.instruction ?? null, withheldValues),
+    // What was taken back out of the sentence above, and why it was ever in it. A
+    // record that quietly lost a value would be a record nobody could account for;
+    // the count and the reason are what make the edit legible to whoever reads the
+    // file afterwards.
+    ...(withheldValues.length
+      ? {
+        instruction_withheld: {
+          values: withheldValues.length,
+          at: withheldAt,
+          reason: 'a call supplied a value into a field the page declines to read back, so the value was removed from this instruction as well as from the call\'s own arguments. It was written into this file at run start, before the run had learned what it was.',
+        },
+      }
+      : {}),
     // Which application this is about, as declared in config. The one field here
     // the machinery cannot observe, and the one the graph cannot be committed
     // without. Null is the honest "not declared": it makes the commit refuse,
@@ -416,7 +443,7 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
   // Through the same path as every other write: a workspace that cannot be written
   // to is a run that cannot record anything, and that is a fact to report at the
   // first step rather than an exception thrown out of a browser action.
-  write(join(dir, 'run.json'), runRecordText, { append: false });
+  write(join(dir, 'run.json'), runRecordText(), { append: false });
 
   return {
     dir,
@@ -437,6 +464,51 @@ export function createRun({ cwd, runDirName = RUN_DIR_NAME, provenance = {}, onS
     writeFailures: () => totalWriteFailures,
     /** How many times a vanished run directory had to be recreated. */
     recreations: () => recreations,
+
+    /**
+     * Take a value the run may not keep back out of the provenance record.
+     *
+     * Called the moment a call has supplied a value into a field the page declines to
+     * read back — before that step's reading is appended, so the step whose value it was
+     * never lands while the value is still in `run.json`. The caller is `index.js`'s
+     * recorder, which is the only place that can pair the call with the reading that
+     * says the field withheld its value.
+     *
+     * There is a window, and it is worth stating rather than hiding: between run start
+     * and this call, `run.json` on disk holds the instruction exactly as it was given,
+     * credential included. Nothing can narrow it. Redacting at write time is impossible
+     * because prose does not say which of its words is a credential, and the only
+     * evidence that a value is one — a field that returns `[set]` instead of what it was
+     * given — does not exist until the field has been given it. Holding the instruction
+     * back until the run ends would close the window and lose the one thing `run.json`
+     * is for: a durable record of what this run was asked to do, written before the walk
+     * can end any number of ways that never reach a commit.
+     *
+     * Returns whether the instruction had the value, which is the only honest answer to
+     * "was anything rewritten?". A failure to rewrite is reported and does not throw:
+     * the call's own arguments are redacted either way, and a provenance record that
+     * still names a credential is a fact the run should state rather than one it should
+     * break a browser action over.
+     */
+    withholdValue(value) {
+      if (typeof value !== 'string' || value.length < MIN_WITHHELD_CHARS) return false;
+      if (withheldValues.includes(value)) return false;
+      const instruction = provenance.instruction;
+      if (typeof instruction !== 'string' || !instruction.includes(value)) return false;
+      withheldValues = [...withheldValues, value];
+      withheldAt = new Date().toISOString();
+      const landed = write(join(dir, 'run.json'), runRecordText(), { append: false });
+      if (!landed) {
+        report({
+          kind: 'credential_not_withdrawn',
+          path: join(dir, 'run.json'),
+          message: 'a value the page declines to read back could not be removed from run.json, so the instruction on disk still contains it. The call\'s own arguments were redacted; the instruction was not.',
+          at: new Date().toISOString(),
+          trigger: 'withholdValue',
+        });
+      }
+      return landed;
+    },
 
     /** Allocate the next machine-evidence record. Immutable once written. */
     addObservation({ tool, toolArgs, phase, actionIndex, capture, error, screenshot, settle }) {

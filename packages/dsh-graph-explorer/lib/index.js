@@ -43,6 +43,7 @@ import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from './capture.js';
 import { assertionSurvival, commitRun, CONTROL_ROLES, ELEMENT_TARGET_EFFECTS, elementClaim, elementPresentIn, normalizeLocator, observedApis, persistenceVariablesOf, routeOf, semanticVariablesOf, stateVariablesOf, surfaceIsDisjoint, surfaceOf, unrecordedStateVariables } from './commit.js';
 import { generateTest, requiresInstruction } from './generate.js';
 import { SECTION_NAME, SECTION_ORDER, protocolText } from './protocol.js';
+import { redactCallArguments } from './redaction.js';
 import {
     APPLICATION_ID_PATTERN,
     CAPABILITY_KINDS,
@@ -1096,10 +1097,19 @@ export function apply(ctx, config) {
 
         let observation = null;
         const repairs = store.recreations();
+        // The call's own arguments are the second copy of a value the page withheld, and the
+        // one the mask in `capture.js` does not cover: the element is written as `[set]`, and
+        // the call that set it as the literal. So the value is taken back out here, where the
+        // call and the reading that says the field withheld its value are both in hand — and
+        // *before* the reading is appended, so the step whose value it was never lands while
+        // the value is still in the run's provenance record. See `redaction.js` for the test
+        // and `session.js#withholdValue` for the ordering.
+        const supplied = redactCallArguments(tool, toolArgs, captureValue);
+        if (supplied.withheld) store.withholdValue(supplied.value);
         try {
             observation = store.addObservation({
                 tool,
-                toolArgs,
+                toolArgs: supplied.arguments,
                 phase: 'after',
                 // Which step this reading was taken after. The reading is evidence for
                 // that action, and without the link the raw log says only that the

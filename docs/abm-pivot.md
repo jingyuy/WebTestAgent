@@ -1514,3 +1514,37 @@ or stored as a reference.
 §3's shape and P1–P15, and D5 changes that shape materially — the rule set and the document's
 edge unit had to be right before there was anything to implement. The plan revision below is
 that reordering, not a delay.
+
+## Coda — where this stands (0.1.37)
+
+Everything above is the plan as it was written and revised, and the phase notes keep their own
+numbers: Phase 2 says it added **P1–P15**, and it did, at the time it ran. This coda is the
+current state of the rule set, so a reader does not have to reconstruct it from five mentions of a
+count that has since grown.
+
+**The profile is `P1`–`P17`.** `P1`–`P15` are the rules Phases 0b and 2 built. The two added since
+come from reading a committed 0.2 artifact as a document and asking what it would take to hand it to
+a generator, and both are enforcement for defects the schema alone cannot see:
+
+- **`P16` — every reference resolves inside the document that names it.** The committed artifact had
+  a state whose `outgoing_transitions` named the three steps of `login` while `transitions[]` held
+  the one edge they collapsed into. The ids resolved in the graph they came from, where the edge set
+  is uncollapsed, and named nothing in the model, whose edges are per behaviour. The rule is the one
+  in the plan whose subject is the document rather than what the document claims, and it needed a
+  second code for it: `reference_does_not_resolve` for an id that is not there, and
+  `reference_is_stale` for an id that resolves to something the naming object does not own — the
+  narrower finding, and the more useful one, because the id was not invented and the repair is not a
+  deletion.
+- **`P17` — a contract may not outrank its evidence.** `behaviors[].contract` is what a generator
+  needs and what a projection can only partly supply: an outcome may cite the readings that support
+  it, but a failure path no walk took has no reading to cite, and *"the model should not silently
+  turn a plausible failure path into an observed fact"* is a rule as much as a sentence. So an
+  outcome stated `observed` over no evidence is an error, an outcome stated stronger than the
+  weakest reading it cites is an error, and an outcome stated `inferred` over no evidence is not.
+  The derivation is the same rule read forwards: an outcome's `status` is the minimum level among
+  its readings (D11), so the projection cannot write a contract its own profile would refuse.
+
+Both are `error`-severity, so both withhold `application-model.json` — and neither is part of
+`blocking[]`, which stays about `graph.json` (D1). `test/commit.test.mjs` asserts the rule set by
+name and `test/abm-commit.test.mjs` asserts the count, so a rule that stopped reporting cannot pass
+as a document with nothing wrong.

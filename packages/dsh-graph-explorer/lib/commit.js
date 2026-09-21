@@ -75,6 +75,7 @@ import { loadSchemas, validateDocument, DEFAULT_SCHEMA_ROOT } from './validate.j
 // safe one: neither module calls into the other while it is being evaluated, only from inside a
 // function that runs later.
 import { candidatesFromGraph, keyedRealizationSteps, modelFromCandidates, profileFindings, profileInvariants, summarizeFindings } from './abm.js';
+import { redactCallArguments, redactProse } from './redaction.js';
 
 /** Severity ordering: a candidate's verdict is the worst thing said about it. */
 const SEVERITY_RANK = { info: 0, warning: 1, error: 2 };
@@ -1522,13 +1523,35 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   const generatedAt = now.toISOString();
   const findings = [];
   const gates = [];
+  // --- what the run may not keep -----------------------------------------
+  // First, before any of it is quoted anywhere. The call's arguments with the values the page
+  // declines to read back taken out of them, per observation, plus the values themselves so the run's
+  // instruction can be rewritten with them. It belongs at the top of this function and not beside the
+  // observation records because the instruction is quoted in four places — the report, a journey's
+  // goal, a journey's metadata, and the graph's warnings — and the earliest of those is assembled
+  // before the records are; a scan placed with the records would be a scan placed too late.
+  //
+  // The recorder applies this before it writes an observation, so for a run recorded by this version
+  // the answer is simply the arguments it was handed. It is asked again, and asked of the *evidence*
+  // rather than of a flag the recorder set: the reading says which controls withheld their value and
+  // the call says which control it targeted, so where those two name the same element the argument is
+  // a credential whatever any recorder believed. A log written by an earlier version carries the raw
+  // value, and it is the artefact that must not — which is why the check belongs at the boundary that
+  // writes it and not only at the one that reads the page.
+  const suppliedByObservation = observations.map((observation) => redactCallArguments(
+    observation.tool,
+    observation.tool_arguments,
+    observation.capture ?? null,
+  ));
+  const withheldValues = suppliedByObservation.filter((entry) => entry.withheld).map((entry) => entry.value);
+  const redactedInstruction = redactProse(run.instruction ?? null, withheldValues);
   const report = {
     generated_at: generatedAt,
     command,
     run_dir: dir,
     application: run.application ?? null,
     start_url: run.start_url ?? null,
-    instruction: run.instruction ?? null,
+    instruction: redactedInstruction,
     version: { plugin: run.plugin ?? null, model: run.model ?? null, provider: run.provider ?? null },
   };
 
@@ -2575,8 +2598,10 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     stateIds: new Set(canonicalStates.map((record) => record.state_id)),
     generatedAt,
     // The run's own instruction, which is the only statement of intent the run has. Quoted into
-    // the journey rather than paraphrased: see `assembleJourneys`.
-    instruction: run.instruction ?? null,
+    // the journey rather than paraphrased: see `assembleJourneys`. Read through the mask, because a
+    // credential the call layer took out of an argument is still sitting in the sentence that asked
+    // for it, and a journey that quotes the sentence quotes the credential.
+    instruction: redactedInstruction,
   });
   const journeys = assembled.journeys;
   const journeysWithGoal = journeys.filter((journey) => typeof journey.goal === 'string' && journey.goal);
@@ -3163,6 +3188,9 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     }
   }
 
+  // The observations the commit could not write as they were read, because the page withheld a value
+  // the call supplied (redaction.js). Declared before the map that finds them, and reported below.
+  const withheldByCommit = [];
   const observationRecords = observations.map((observation, index) => {
     const capture = observation.capture ?? null;
     // `screenshot` is an artifact path, and the schema's own example is relative
@@ -3214,6 +3242,11 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       cookies: Array.isArray(capture?.cookie_names) ? capture.cookie_names : [],
     };
     const capturedKeyCount = capturedKeys.localStorage.length + capturedKeys.sessionStorage.length + capturedKeys.cookies.length;
+    // What this call was given, read once for the whole run at the top of this function: the values
+    // the page declines to read back are out of the arguments here, and the two places below are the
+    // only two that copy a call's arguments into the graph.
+    const supplied = suppliedByObservation[index];
+    if (supplied.withheld) withheldByCommit.push({ observation: observation.id, tool: observation.tool });
     // What this reading *is* in the walk, which is the question the review asked of the live graph
     // and the schema has no field for. `observation.transition` says which step the reading
     // documents; this says where it sits relative to the steps around it, by the machine's own
@@ -3234,7 +3267,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       return {
         observation_role: role,
         action_id: observation.action_id ?? null,
-        action: observation.tool ? { tool: observation.tool, arguments: observation.tool_arguments ?? null } : null,
+        action: observation.tool ? { tool: observation.tool, arguments: supplied.arguments ?? null } : null,
         documents: producedBy ? producedBy.transition : null,
         precedes: precedes ? precedes.precedes : [],
         ...(role === 'entry' ? { note: 'the first reading of the run: it is the surface the first action was taken on, and no action produced it.' } : {}),
@@ -3275,7 +3308,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
         extra: {
           tool: observation.tool ?? null,
           phase: observation.phase ?? null,
-          tool_arguments: observation.tool_arguments ?? null,
+          tool_arguments: supplied.arguments ?? null,
           capture_error: observation.capture_error ?? null,
           ...(linkage ? { linkage } : {}),
           ...(externalArtifact ? { artifact_outside_run: externalArtifact } : {}),
@@ -3287,6 +3320,19 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
 
   // --- the graph ---------------------------------------------------------
   const graphWarnings = [];
+  // Said before anything else, because it is the one finding here whose subject is a credential. It
+  // does not say which value was removed, and it cannot: the value was handed back in memory only
+  // and is nowhere in this document. What it says is that the repair happened at commit time rather
+  // than at record time, which means the log on disk still holds it and the run directory is not
+  // safe to hand on as it stands.
+  for (const item of withheldByCommit) {
+    graphWarnings.push(
+      `${item.observation}: the ${item.tool} call's arguments carried a value into a control that withheld it, `
+      + 'so the argument was recorded as the mask rather than as what was supplied. It was found at commit time, '
+      + 'which means the observation log on disk still holds the value: the run directory must be treated as '
+      + 'carrying a credential, and the credential should be rotated.',
+    );
+  }
   for (const finding of findings) {
     graphWarnings.push(`${finding.scope ?? 'run'}: ${finding.code} — ${finding.detail}`);
   }
@@ -3735,7 +3781,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     // to that request. `instruction` is reported either way: a run whose instruction could not be
     // attributed is a hand-attribution job, and the text has to be visible to do it.
     stated_goals: journeysWithGoal.length,
-    instruction: run.instruction ?? null,
+    instruction: redactedInstruction,
     // Naming, counted rather than described: `named_by_model` is the walks the model named itself
     // (which is a better name than either the goal or the endpoints), and `name_conflicts` is where
     // one walk was named more than one way — a model that names a walk twice is telling the commit

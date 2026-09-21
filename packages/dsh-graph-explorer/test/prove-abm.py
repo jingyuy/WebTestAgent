@@ -945,6 +945,72 @@ CASES = [
         'new': r"""      if (keys.length) continue;""",
         'suite': 'test/abm.test.mjs',
     },
+    # --- P16 and P17: the two rules that read the document rather than the run -------------------
+    # P16 and P17 both judge a document rather than an observation, which makes them the two rules a
+    # projection cannot be trusted to exercise: `commit.test.mjs` commits a clean walk, so a quiet P16
+    # looks exactly like a document whose references all resolve. `test/abm.test.mjs` breaks the
+    # document by hand for each one, and these cases remove the rule underneath those breaks.
+    {
+        # The half of the rule the first reading of the artifact actually found: an id that resolves
+        # nowhere. Every pool answering `has` makes the check a formality, and the document the review
+        # reported — a state naming three collapsed-away transitions — goes through as sound.
+        'rule': 'a reference naming an id the document does not carry is reported',
+        'file': 'lib/abm.js',
+        'old': r"""  for (const reference of references) {
+    const pool = referencePools[reference.target] ?? new Set();
+    const held = rows(scoped[reference.scope]);""",
+        'new': r"""  for (const reference of references) {
+    const pool = { has: () => true };
+    const held = rows(scoped[reference.scope]);""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The narrower half, and the reason P16 has two codes: an id that resolves to an edge the
+        # naming state does not leave. Its ids were not invented and its repair is not a deletion, so
+        # the check that catches it is ownership rather than existence — and dropping ownership is the
+        # edit that leaves a rule about stale references reporting only the dangling ones.
+        'rule': 'a state naming an edge belonging to another state is reported',
+        'file': 'lib/abm.js',
+        'old': r"""      const transition = transitionById.get(id);
+      if (!transition || transition.from_state === state.id) continue;""",
+        'new': r"""      const transition = transitionById.get(id);
+      if (!transition) continue;""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # P17's second code, and the one a document reaches by editing rather than by writing: an
+        # outcome stated at a level its own cited readings do not reach. Without the comparison the
+        # rule still reports a claim with nothing behind it, which is why the two halves are separate
+        # cases — one surviving would hide the other.
+        'rule': 'an outcome stated stronger than the readings it cites is reported',
+        'file': 'lib/abm.js',
+        'old': r"""      if (support === null || claimed <= support) continue;""",
+        'new': r"""      if (support === null) continue;""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # P17's first code: an outcome claiming to have been watched, with no reading named. The
+        # mutation makes the branch unreachable rather than changing the level it compares against, so
+        # what the suite has to catch is the *silence* of a rule that used to speak — the invented
+        # failure path with the paperwork of a watched one, which is the whole of P0-2.
+        'rule': 'an outcome stated as observed with no evidence is reported',
+        'file': 'lib/abm.js',
+        'old': r"""      if (claimed >= levelOf('observed') && !cited.length && !named.length) {""",
+        'new': r"""      if (claimed >= levelOf('observed') && !cited.length && !named.length && false) {""",
+        'suite': 'test/abm.test.mjs',
+    },
+    {
+        # The door the rule deliberately leaves open is still a claim about the rule: an outcome at
+        # `inferred` with no evidence is how a failure path no walk took is stated honestly, and a rule
+        # that reported it would make a failure path unstateable rather than honest. This case removes
+        # the *level* test instead — every unsupported outcome becomes an error — so the suite has to
+        # catch a rule that got stricter, which is the failure mode a rule like this one has.
+        'rule': 'an outcome at a level weaker than observed needs no evidence to be stated',
+        'file': 'lib/abm.js',
+        'old': r"""      if (claimed >= levelOf('observed') && !cited.length && !named.length) {""",
+        'new': r"""      if (!cited.length && !named.length) {""",
+        'suite': 'test/abm.test.mjs',
+    },
 ]
 
 broken = survived = invalid = skipped = 0

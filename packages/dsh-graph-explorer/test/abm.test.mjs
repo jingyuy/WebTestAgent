@@ -1327,6 +1327,187 @@ console.log('\n# P14/P15 a document is reported at the level its claims were obt
     ['inferred', 'llm:deepseek-flash', 0.5]);
 }
 
+// --- P16 ---------------------------------------------------------------------------------------
+// The one rule whose subject is the document's shape rather than what it claims, and the acceptance
+// criterion the review put first: every reference resolves. It is tested by breaking exactly one
+// reference at a time and asking for exactly one finding, because the failure it was written for —
+// `outgoing_transitions` inherited from a parent document's uncollapsed edge set — resolves fine in
+// the document it was copied *from* and names the wrong edge in the document it was copied *into*.
+// A rule that only looked the id up in a pool would have passed that document.
+
+console.log('\n# P16 every reference in a document resolves to something that document has');
+{
+  const ids = (model) => profileFindings(model, {}).filter((finding) => finding.rule === 'P16');
+
+  check('a document the projection produced names nothing it does not have', ids(projected().model), []);
+
+  // The review's P0-1, reproduced: the same collapse P12 accepts above, performed on the edge set
+  // while the objects that describe the walk are left as they were. The index is not wrong in the
+  // document it came from — all three ids were edges there — so a rule that only asked "was this id
+  // ever an edge?" would call this document sound. What makes it wrong is that the three calls are
+  // now one move, and two of the three ids name nothing this document transitions by.
+  //
+  // Both objects the review named are here, because the defect came in two copies: the state's
+  // `outgoing_transitions` said three and so did the journey's derivation. They are two references
+  // to one fact, which is why the fix was to derive both from the edge set rather than to correct
+  // each, and why the rule has one row for each.
+  const inherited = projected().model;
+  inherited.transitions = inherited.transitions.filter((entry) => entry.id === 'transition_submit_login');
+  check('an index and a derivation left over from the uncollapsed edge set are one dangling reference per call each',
+    ids(inherited).map((finding) => [finding.code, finding.scope, finding.subject]),
+    [['reference_does_not_resolve', 'states', 'state_login_anonymous'],
+      ['reference_does_not_resolve', 'states', 'state_login_anonymous'],
+      ['reference_does_not_resolve', 'journeys', 'journey_login_anonymous_to_project_list'],
+      ['reference_does_not_resolve', 'journeys', 'journey_login_anonymous_to_project_list']]);
+  ok('and each says which id it could not place',
+    ids(inherited).every((finding) => /transition_fill_login_(email|password)/.test(finding.detail)),
+    JSON.stringify(ids(inherited).map((finding) => finding.detail)));
+
+  // An id that resolves to the wrong object is the same defect with a quieter symptom: the lookup
+  // succeeds, so a rule that only counted misses would call this document sound. The edge belongs
+  // to the state it leaves, so one listed on the anonymous state that leaves the project list is
+  // stale even though both ids exist and both objects do.
+  const borrowed = projected().model;
+  borrowed.transitions.push({
+    ...borrowed.transitions[2], id: 'transition_borrowed',
+    from_state: 'state_project_list_authenticated_projects_populated',
+    to_state: 'state_project_list_authenticated_projects_populated',
+  });
+  borrowed.states[0].outgoing_transitions = ['transition_borrowed'];
+  check('an edge that resolves to a transition leaving another state is stale, not sound',
+    ids(borrowed).map((finding) => [finding.code, finding.subject]), [['reference_is_stale', 'state_login_anonymous']]);
+  ok('and it names the state the edge actually leaves',
+    ids(borrowed)[0].detail.includes('state_project_list_authenticated_projects_populated'), ids(borrowed)[0].detail);
+
+  // The four other pools, one case each: a state reference from a transition and from a contract, a
+  // journey step, and a variable's dimension. Four different fields read by one table, so a table
+  // that lost a row — or that read a list-shaped field as a scalar — fails here rather than in a
+  // green commit, which is exactly how this rule reported nothing the first time it was written.
+  const moved = projected().model;
+  moved.transitions[0].to_state = 'state_never_read';
+  moved.behaviors[0].contract = {
+    ...moved.behaviors[0].contract,
+    outcomes: [{ id: 'outcome_gone', description: 'x', to_state: 'state_also_never_read' }],
+  };
+  moved.journeys[0].steps[0].transition = 'transition_never_walked';
+  moved.state_variables[0].dimension_of = 'state_not_a_dimension';
+  check('a moved target, an unobserved outcome state, a journey step and a variable\'s dimension are four findings',
+    ids(moved).map((finding) => [finding.scope, finding.code]),
+    [['transitions', 'reference_does_not_resolve'], ['behaviors', 'reference_does_not_resolve'],
+      ['journeys', 'reference_does_not_resolve'], ['state_variables', 'reference_does_not_resolve']]);
+  ok('and each names the id it could not find and the collection it looked in',
+    ids(moved).every((finding) => finding.detail.includes('carries that id')),
+    JSON.stringify(ids(moved).map((finding) => finding.detail)));
+
+  // A pruned field is not a dangling reference: the projection drops a `behavior` from a transition
+  // it could not attribute, and "no behaviour performs this move" is a different fact from "this
+  // move names a behaviour the document does not have". The first is the model declining to claim;
+  // the second is the model claiming something it cannot support, and only the second is a defect.
+  const pruned = projected().model;
+  delete pruned.transitions[2].behavior;
+  check('a field the projection pruned for having nothing to say is not dangling', ids(pruned), []);
+}
+
+// --- P17 ---------------------------------------------------------------------------------------
+// The contract's half of D9, and P0-2's remaining sentence: *the model should not silently turn a
+// plausible failure path into an observed fact*. A contract is the one part of an ABM that a person
+// or a model writes by hand — the projection fills it from an edge's own evidence — so it is the one
+// part where an invented path arrives with the paperwork of a watched one. Both codes are exercised,
+// and so is the case they must NOT fire on: the same invented failure path, stated at the level that
+// admits it is an inference. That last case is the rule's whole value.
+
+console.log('\n# P17 a contract states what was watched, and no more');
+{
+  const findings = (model) => profileFindings(model, {}).filter((finding) => finding.rule === 'P17');
+  const invented = (status) => ({
+    id: 'outcome_credentials_rejected',
+    description: 'a rejected sign-in is reported on the form.',
+    to_state: model.states[0].id,
+    status,
+    evidence: [],
+  });
+  const model = projected().model;
+  const behavior = model.behaviors[0].id;
+
+  check('the contract the projection wrote is the path the walk exercised and nothing else',
+    findings(projected().model), []);
+
+  const inventedObserved = projected().model;
+  inventedObserved.behaviors[0].contract.outcomes.push(invented('observed'));
+  check('an outcome claiming to have been watched, citing nothing, is an error',
+    findings(inventedObserved).map((finding) => [finding.code, finding.subject]),
+    [['outcome_without_evidence', behavior]]);
+  ok('and the detail names the outcome and says what the contract should have stated instead',
+    findings(inventedObserved)[0].detail.includes('outcome_credentials_rejected')
+    && findings(inventedObserved)[0].detail.includes('inferred'),
+    findings(inventedObserved)[0].detail);
+
+  // The same invented path at `inferred` is the honest way to state a path no walk took, and the
+  // rule must leave that door open: a contract that may only state what was watched cannot state a
+  // failure path at all, and the review's requirement is that it not state one *as* watched.
+  const inventedInferred = projected().model;
+  inventedInferred.behaviors[0].contract.outcomes.push(invented('inferred'));
+  check('the same path stated as inferred is a claim the document is allowed to make',
+    findings(inventedInferred), []);
+
+  // The quieter defect, and the one a document reaches by editing rather than by writing: a real
+  // outcome, citing its real evidence, relabelled a level stronger than that evidence supports. The
+  // fixture's readings carry no `producer`, which makes every one of them `modelled` (D9), and the
+  // projection says so rather than claiming `observed` over them — so the promotion here is an edit
+  // to the outcome's `status` alone, which is exactly the edit this code exists to catch.
+  ok('the fixture\'s readings are modelled, so the projection states its outcomes as modelled',
+    projected().model.behaviors.every((entry) => (entry.contract?.outcomes ?? []).every((outcome) => outcome.status === 'modelled')),
+    JSON.stringify(projected().model.behaviors[0].contract.outcomes));
+  const promoted = projected().model;
+  for (const entry of promoted.behaviors) {
+    for (const outcome of entry.contract?.outcomes ?? []) outcome.status = 'observed';
+  }
+  check('an outcome stronger than every reading it cites is the same claim one step quieter',
+    findings(promoted).map((finding) => [finding.code, finding.subject]),
+    // Only the behaviours that carry a contract: the fixture's fourth behaviour is the composite that
+    // *names* these three, and a behaviour with no realization and no edge has no outcome to outrank
+    // anything — absence is not the same claim as a false one, and it is the whole reason `contractOf`
+    // returns `undefined` rather than an empty contract.
+    promoted.behaviors.filter((entry) => (entry.contract?.outcomes ?? []).length)
+      .map((entry) => ['outcome_outranks_its_evidence', entry.id]));
+  ok('and the detail names the level the evidence actually supports',
+    findings(promoted).every((finding) => finding.detail.includes('modelled')), JSON.stringify(findings(promoted)));
+
+  // One reading is enough support, and one reading is also enough to *rank*: the rule reduces over
+  // what is cited, so a contract that cites one watched reading out of nine readings whose producers
+  // are reasoning producers is judged by the one it cited. That is D11's minimum over the inputs that
+  // exist, and it is why the reduction is over `claimLevel` of the cited readings and not a count.
+  const mixed = projected().model;
+  for (const observation of mixed.observations) {
+    observation.metadata = { ...observation.metadata, producer: 'llm:deepseek-flash', status: 'inferred', confidence: 0.5 };
+  }
+  const outcome = mixed.behaviors[0].contract.outcomes[0];
+  const cited = { observation: outcome.evidence[0].observation, role: 'effect' };
+  outcome.evidence = [cited];
+  outcome.status = 'observed';
+  ok('the outcome cites one reading, which the fixture does hold',
+    mixed.observations.some((observation) => observation.id === cited.observation));
+  check('the one reading it cites is what it is judged against, not the eight it does not',
+    findings(mixed).map((finding) => finding.code), ['outcome_outranks_its_evidence']);
+  ok('and it says how many readings were consulted',
+    findings(mixed)[0].detail.includes('weakest of the 1 reading(s)'), findings(mixed)[0].detail);
+  const citedExecuted = JSON.parse(JSON.stringify(mixed));
+  citedExecuted.observations.find((observation) => observation.id === cited.observation).metadata.producer = 'playwright';
+  check('so the same contract over a watched reading is sound, though its neighbours are not',
+    findings(citedExecuted), []);
+
+  // A citation naming a reading the document does not hold is P16's finding, not P17's: "nothing
+  // supports this" and "this points at something that is not here" are different repairs, and a
+  // document reported twice for one mistake is a report read as noise.
+  const uncited = projected().model;
+  uncited.behaviors[0].contract.outcomes = [{ ...invented('observed'), evidence: [{ observation: 'obs_never_taken', role: 'effect' }] }];
+  check('a citation naming a reading the document does not hold is P16\'s, and P17 stays silent',
+    [
+      profileFindings(uncited, {}).filter((finding) => finding.rule === 'P16').length,
+      findings(uncited).length,
+    ], [1, 0]);
+}
+
 // --- reading a run --------------------------------------------------------------------------------
 
 console.log('\n# reading a run: the committed document, or the commit run again');

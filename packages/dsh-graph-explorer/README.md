@@ -605,7 +605,7 @@ quietly:
 
 - the **schemas** in `schemas/abm/0.2/`, which every document is checked against before it
   is written;
-- the **profile** (`P1`–`P15`), whose `error` findings withhold the file — a document
+- the **profile** (`P1`–`P17`), whose `error` findings withhold the file — a document
   nothing downstream reads cannot be wrong in a way that matters, so the file is only
   written when the profile has nothing to say about it;
 - **`test/abm-commit.test.mjs`**, which commits a real walk through the real tools and
@@ -624,6 +624,48 @@ page the walk begins on, so both fills are self-loops and the three calls collap
 The rule asked the behaviour to record arriving at a state the walk never left, and the only effect
 that could satisfy it was a false one, so the run withheld `application-model.json` rather than
 write it. A rule whose sole satisfaction is a lie is the rule that was wrong.
+
+**A behaviour carries a contract, and the contract takes the level of its evidence.** The first
+reading of a 0.2 document found `login` with actions and an outcome and no preconditions, no
+postconditions and no failure outcomes — and the finding worth acting on was not that the walk
+forgot to write them down. There was no field. `graph_observe` and `graph_transition` between them
+record a surface, an action and an effect, and a behaviour's meaning was being read off the effects
+of its last step: the state arrived at was the outcome, the state left was the precondition, and
+nothing asked for either as a claim about the behaviour rather than as a property of a move. So
+`behaviors[].contract` is derived from the evidence — `parameters` (with `sensitive: true` on the
+one a step fed into a field the page declines to read back), `preconditions` from the surfaces the
+walk performed the behaviour from, `postconditions` and `outcomes` from the states a reading saw it
+arrive at — and it is derived the way a projection is allowed to: a field is empty when the run did
+not say, never filled with what a behaviour of that name would normally need. A contract that
+describes one path says so: every behaviour with a single outcome is reported, because the success
+path is what a walk has and the failure path is the thing a contract may not invent.
+
+**A contract may not outrank its evidence.** `P17` is the rule that keeps the two apart, and it has
+two codes for the two ways a contract can outrun what was watched: `outcome_without_evidence`, an
+outcome stated `observed` that cites no reading at all — the invented failure path with the
+paperwork of a watched one — and `outcome_outranks_its_evidence`, the same claim one step quieter,
+where an outcome is stated stronger than the weakest reading it does cite. Both are errors, and the
+half that matters is what it does *not* report: an outcome at `inferred` over no evidence is the
+honest way to state a path nobody walked, and a rule that refused that would make a failure path
+unstateable rather than honest. The derivation is the same rule read forwards, which is the point —
+an outcome's `status` is the minimum level among its readings (D11), so a document whose readings
+arrived without a producer this code recognises produces outcomes at `modelled` rather than at
+`observed`, and the projection cannot write a contract its own reader would reject.
+
+**References resolve inside the document, and a list-valued field is one reference per entry.**
+`P16` is the one rule whose subject is the document rather than what the document claims: every
+state, behaviour, transition, actor, journey, element and reading a field names has to be in the
+document that names it. It is asked of a table of sixteen reference kinds, and two of them are the
+same defect the first reading of the artifact reported: a state whose `outgoing_transitions` named
+the three steps of `login` while `transitions[]` held the one edge they collapsed into, because the
+index was copied from the graph's own edge set — where those ids resolve — into a document whose
+edges are per behaviour. An id that resolves nowhere is `reference_does_not_resolve`; an id that
+resolves to an edge the naming state does not leave is `reference_is_stale`, which is the narrower
+and more instructive of the two, because the id was not invented and the fix is not a deletion.
+Whether a field holds one id or a list of them is declared per reference rather than read off the
+value, and that declaration is load-bearing: `rows()` over a scalar is an empty array, and an empty
+array is silence, which reads exactly like agreement. A reference table that guessed the shape
+reported nothing at all the first time it was written, and passed.
 
 The phase-by-phase design, including what each phase is still allowed not to do, is in
 [`docs/abm-pivot.md`](../../docs/abm-pivot.md).
@@ -648,7 +690,7 @@ decisions[]   findings[]   invariants[]   notes[]   warnings[]
 why" is answerable without opening two files: `checked` separates *wrong* from *not
 there* (`valid: null` is the third answer), `written` says whether the file is on disk, and
 `errors` is the schema's own list. `invariants[]` carries a `document` field for the same
-reason: the graph's §14 rules and the model's `P1`–`P15` are in one array, each finding
+reason: the graph's §14 rules and the model's `P1`–`P17` are in one array, each finding
 saying which document it is about. `blocking[]` stays about `graph.json` — that is the
 document the run was for — so a model rule firing cannot block the graph; it withholds the
 model, which is reported in `documents.model.blockers[]`.
@@ -1506,7 +1548,7 @@ where the recorded graph has the margin.
 ## Tests
 
 ```sh
-npm test        # 15 suites, no browser and no harness
+npm test        # 16 suites, no browser and no harness
 ```
 
 The protocol gets a suite of its own, `test/protocol.test.mjs`, because the section is the only
@@ -1756,8 +1798,8 @@ retracted claim, `transition_submit_login.arguments.email`, is in neither docume
 dropped the value everywhere would look like a stronger proof and would be a weaker one.
 
 Every rule in every suite is checked the way the other suites' rules are: by breaking it and reading
-the failure. `test/prove-abm.py` is that file for this work — 80 mutations, all 80 refused, the tree
-restored byte-identically and `15/15 suites passed` reprinted afterwards. It distinguishes *BROKEN*
+the failure. `test/prove-abm.py` is that file for this work — 85 mutations, all 85 refused, the tree
+restored byte-identically and `16/16 suites passed` reprinted afterwards. It distinguishes *BROKEN*
 from **SURVIVED** from **INVALID**, because a case whose edit does not parse fails every suite for a
 reason that is not the rule and would otherwise look like a proof.
 
@@ -1772,7 +1814,7 @@ is not a mutation to delete; it is a test that was not testing what it said.
 **The prover was then read against the source, which found the one rule that had no case under it.**
 `{{param}}` is read in three places — the recorder's diff, the generator's value handling and the
 projection's `isPlaceholder` — and two of the three had a mutation under them. The third did not:
-`const isPlaceholder = (value) => false;` left **all fifteen suites green**. A rule read in three
+`const isPlaceholder = (value) => false;` left **every suite green**. A rule read in three
 places and tested in two looks tested from either end, and that is the gap a shared rule invites: the
 fixture that exercises it through a *realisation* proves the projection reads the rule, not that it
 reads it where an edge's `arguments` are judged. Two cases now hold it down — a whole template on an
@@ -1802,6 +1844,32 @@ Two of the round's findings are recorded as boundaries instead of code: the beha
 and an empty `apis[]`/`entities[]` is kept honest in the schema's own words — the live run has four
 readings and **no** network entry, so the empty list is a statement about the walk, and filling it in
 from the outside would be a claim no reading can be checked against.
+
+**0.1.37 answers the P0 findings on that review's own list — referential integrity, the missing
+behavioural contract, and the credential that survived in the evidence — and the two rules they
+became are `P16` and `P17`: `test/prove-abm.py` is 85 mutations, all 85 refused.** The findings were
+referential integrity (a state's `outgoing_transitions` named transitions the collapsed
+`transitions[]` no longer carried), missing behavioural contracts (`login` had an outcome and no
+preconditions, postconditions or failure outcomes), and a credential that survived in the evidence.
+The third was the one the review put in bold — *redaction must happen before data enters the
+persistent evidence layer* — and it is fixed at the recorder rather than at the projection: the call
+whose value a page declines to read back is masked before the reading is appended, and the
+instruction in `run.json` is rewritten at the same moment (`session.js#withholdValue`), so the window
+in which the file on disk holds it is the window before the run has learned which word in the
+sentence is a credential, and that window is stated in the code and in the record rather than closed
+silently. The first and second became rules, and the interesting half of each is what it refuses
+*not* to report: `P16` separates an id that is not there (`reference_does_not_resolve`) from one that
+resolves to an object the naming field does not own (`reference_is_stale`), and `P17` separates an
+outcome with no evidence (`outcome_without_evidence`) from one that outranks the evidence it cites
+(`outcome_outranks_its_evidence`) — and reports neither for an outcome stated `inferred` over no
+evidence, because that is how a failure path no walk took is stated honestly. The projection writes
+its outcomes at the level of the readings they cite rather than claiming `observed` for everything,
+so a document produced by a tool that stamps no producer yields a contract that is weaker than any
+of `P17`'s complaints: a projection cannot write a contract its own reader would reject, and the
+proof case for that half is the edit that *promotes* an outcome rather than the one that invents it.
+`behaviors[].contract` was already in the 0.2 schema and is now filled; `test/redaction.test.mjs` is
+the sixteenth suite and holds the four fixed spellings of the mask, the six questions the recorder
+declines to guess at, and the withholding rule itself.
 
 The suites drive the plugin's own seams: a fake tools registry, captures as plain
 objects. They cover the run store (minting, dedupe, id reuse, `chain_break`, record
@@ -1862,7 +1930,7 @@ first attempt at that last one proved nothing and is the reason the file is wort
 the `cutParameter &&` gate is *behaviourally* identical, because a connector can only dangle when a
 parameter was cut, so the proof breaks the rule instead — a connector set that includes the `in` of
 "sign in" — and the suite catches it. It runs on `python3`, changes nothing that survives, and
-prints `after restoring: 15/15 suites passed` when it is done.
+prints `after restoring: 16/16 suites passed` when it is done.
 
 The race between an action and the reading taken after it gets a suite that reproduces it,
 `test/settle.test.mjs`, because it is the one failure the recorder was built to catch and
