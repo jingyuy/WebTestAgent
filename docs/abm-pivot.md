@@ -1548,3 +1548,49 @@ Both are `error`-severity, so both withhold `application-model.json` — and nei
 `blocking[]`, which stays about `graph.json` (D1). `test/commit.test.mjs` asserts the rule set by
 name and `test/abm-commit.test.mjs` asserts the count, so a rule that stopped reporting cannot pass
 as a document with nothing wrong.
+
+### The live run that closed it (0.1.37, `~/tmp/live-037`)
+
+One walk of the demo app on the same task as 0.1.36's, against the deployed
+0.1.37, and the three P0s read off the run directory rather than off a test.
+
+**The credential never landed.** `grep -c password123` over every file in
+`graph-run/` returns zero, including `observations.jsonl` and `run.json`, and the
+two places the literal used to survive now carry the mask:
+`run.json.instruction` reads "...and sign in with test@example.com and `[set]`",
+and `observations.jsonl`'s password step is
+`browser_type {selector: [data-testid="password-input"], text: "[set]"}` while the
+email step beside it keeps the address it was given. That is the review's rule
+taken literally — the redaction happened where the data entered, so there was
+never a version of the file on disk that held it.
+
+**The contract is stated at the level of its readings.** Re-projecting the same
+log with this release gives `behavior_login` two outcomes, one per state the walk
+reached, citing nine and three readings respectively, and both stated `modelled`
+because this run's observations carry no `producer` — a walk that did not say what
+produced its readings does not get an `observed` contract, and `P17` has nothing
+to refuse.
+
+**Nothing dangles.** `state_login_anonymous.outgoing_transitions` is
+`["transition_submit_login", "transition_submit_login_project_list_authenticated_projects_none"]`,
+and both ids are in `transitions[]`. And the review's P0-1 is settled by
+re-projection rather than by argument: on the log the review read, the reviewer's
+own artifact and 0.1.36's `lib/` both put
+`["transition_fill_email_input", "transition_fill_password_input", "transition_submit_login"]`
+on `state_home_anonymous` while `transitions[]` holds only `transition_submit_login`,
+so the two `P16 reference_does_not_resolve` findings are about a document 0.1.36
+really did write and not about a file that went stale; 0.1.37 projecting the same
+log gives `["transition_submit_login"]` and no P16 at all. The model side is
+therefore both caught and repaired in this release, and the graph side is left
+alone on purpose — `states.jsonl`'s outgoing edges are still the uncollapsed set,
+because `graph.json` is byte-shape frozen and internally consistent, and that
+decision is recorded rather than taken by accident.
+
+The profile of the fresh run is `P7 dimension_without_detection`,
+`P8 entity_not_declared` and `P12 coverage_unchecked` — and the first is why the
+commit withheld `application-model.json` this time: the walk's own first reading
+of the authenticated state declared a dimension its detection did not measure, so
+the document was refused rather than written with a claim the reading does not
+support. The model that the reviewer read is still available to a reader, by
+re-projecting the log; what is not written is a model the harness would have to
+apologise for.
