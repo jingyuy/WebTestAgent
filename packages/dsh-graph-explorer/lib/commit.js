@@ -3656,12 +3656,16 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
 
   // --- the application model: the same evidence, read a second way (D1) ------------------------
   //
-  // The pivot's whole point, and the constraint that shapes it: `graph.json` and
-  // `application-model.json` are two *readings of one run*, not two versions of one file. The model
-  // is assembled here, out of the graph this commit has just decided, because that is what makes it
-  // a reading rather than a second opinion — every behaviour in it traces back to committed
-  // evidence, and the ABM adds only the two things 0.1 has no room for: what a completed behaviour
-  // is made of (D13) and what a reading said its surface *offered* (D6, D15).
+  // The pivot's whole point, and the constraint that shapes it: the graph and the behaviour model
+  // are two *readings of one run*, not two versions of one file. The model is assembled here, out of
+  // the graph this commit has just decided, because that is what makes it a reading rather than a
+  // second opinion — every behaviour in it traces back to committed evidence, and the ABM adds only
+  // the two things 0.1 has no room for: what a completed behaviour is made of (D13) and what a
+  // reading said its surface *offered* (D6, D15).
+  //
+  // Since 0.1.38 the graph being read here is the commit's own in-memory document rather than a file
+  // it wrote, which changes nothing about the projection: `candidatesFromGraph` takes the document,
+  // and it was always the document and never the path.
   //
   // `candidatesFromGraph` is the same door the profiler uses standalone, which is deliberate: the
   // profile below is run over exactly what a reader of the two written files would run it over.
@@ -3680,10 +3684,10 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     ? profileFindings(model, { candidates: { transitions: modelCandidates.transitions, capabilities: modelCandidates.capabilities } })
     : [];
   const profileSummary = summarizeFindings(profile);
-  // A finding about the model blocks the *model*, not the graph. The two documents have two
-  // verdicts on purpose: `graph.json` is the fallback (D1), and 0.1.22's standards are what decide
-  // whether it is written, so a rule the ABM adds can never take the graph away from a run that
-  // satisfied every rule the graph has.
+  // A finding about the model blocks the *model*, not the graph: the graph is the commit's own check
+  // on the run, and a rule the ABM adds may not decide whether the walk it was projected from was
+  // sound. The other direction does not hold since 0.1.38 — the graph's verdict gates the model,
+  // because the model is the only document a run produces (`commitRun` is where that is settled).
   const modelBlockers = profile
     .filter((finding) => finding.severity === 'error')
     .map((finding) => ({
@@ -3705,10 +3709,12 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
 
   report.ok = blocking.length === 0;
   report.blocking = blocking;
-  // A document that was written despite a blocking rule (a forced commit) has to carry the rule
-  // in its own `warnings[]`: the warning list is what a reader with only graph.json has, and a
-  // graph that was refused by its own commit and does not say so is the one lie worth refusing
-  // to tell. Prepended in order, so the most serious thing about the document is read first.
+  // A blocking rule has to survive into the assembled graph's own `warnings[]`, and into the
+  // report's copy of that list (`report.warnings`): a document that was refused by its own commit
+  // and does not say so is the one lie worth refusing to tell. Since 0.1.38 the graph is not
+  // written, so the report is the only place a reader meets this list — which is why the copy in the
+  // report is not a convenience. Prepended in order, so the most serious thing about the document is
+  // read first.
   for (const blocker of [...blocking].reverse()) {
     graphWarnings.unshift(`${blocker.severity}: ${blocker.code} — ${blocker.detail}`);
   }
@@ -3827,7 +3833,7 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
     shared: [...declarations.values()].filter((declaration) => declaration.seen_in.length > 1).length,
   };
   report.notes = [
-    '`ok` and `blocking` describe the graph document: `blocking` is the gates plus the failed error-severity invariants, and `graph.json` is written only when it is empty.',
+    '`ok` and `blocking` describe the commit\'s own check on the run: `blocking` is the gates plus the failed error-severity invariants of the assembled graph, and application-model.json is written only when it is empty. Since 0.1.38 the graph is assembled, validated and judged but never written — it is the check, not an artifact — so `documents.graph` reports `valid` with `written: false` and `artifact: false` (two fields, because a withheld document and a document that is not one are different facts).',
     '`findings[].severity` describes the candidate record, not the document: `error` means a claim was refused (and the refusal is the repair), `warning` means something was dropped or weakened, `info` means it was noted and carried through.',
     'The raw logs are not touched by a commit. Every record this report judged is still in the run directory exactly as the walk wrote it, which is why a rejected candidate can be re-judged later without re-walking anything.',
     'One candidate does not become one edge: candidates sharing a `transition_id` are the same edge walked more than once, and only the best of them is committed. `decisions[]` records what happened to the rest.',
@@ -3839,8 +3845,9 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
   // The graph's own invariants, plus the application model's rules in the same shape — one section,
   // because a reader asking "is this commit's output sound" should not have to know which of the two
   // documents a rule belongs to before they can find it. `document` says which one, and it is load
-  // bearing rather than decorative: `blocking` and `report.ok` are about `graph.json` and were
-  // computed above, from the graph's own invariants alone.
+  // bearing rather than decorative: `blocking` and `report.ok` were computed above, from the graph's
+  // own invariants alone — and since 0.1.38 the graph is only ever assembled in memory, so this tag
+  // is what tells a reader that a blocked commit is a fact about a document they will never open.
   report.invariants = [
     ...invariantResults.map((result) => ({ document: 'graph', ...result })),
     ...profileInvariants(profile),
@@ -3856,11 +3863,16 @@ export function reconcile({ dir = null, run, observations = [], states = [], cap
       : `No application model was assembled, so no rule could be applied: ${modelRefusal ?? 'the projection returned nothing'}.`,
   };
   // Which document was assembled, and what became of each. `written` is settled by `commitRun`,
-  // which is the only place that can see the filesystem (`reconcile` reads and writes nothing).
+  // which is the only place that can see the filesystem (`reconcile` reads and writes nothing);
+  // `artifact` is the field that separates "this document is not written" from "this document was
+  // withheld", and since 0.1.38 the graph is the first and the model is the second — which is why
+  // only the graph carries the field: a model that is not written was withheld, and
+  // `documents.model.blockers` is where that is said.
   report.documents = {
     graph: {
       assembled: true,
       written: false,
+      artifact: false,
       name: 'graph.json',
       schema: '0.1/graph.schema.json',
       checked: false,
@@ -4358,12 +4370,37 @@ export function validateDocuments({ graph = null, model = null, root = DEFAULT_S
 }
 
 /**
- * Write the two commit artifacts. The raw logs are opened read-only, above.
+ * The 0.1 document a run reconciles to, assembled and *not written*.
  *
- * `force` writes the assembled document even when a blocking rule fired. It does not make the
- * graph correct and it hides nothing: the violations are still in the report and in the
- * document's own `warnings`. It exists for the case where the near-miss is what you need to
- * look at — a rule is usually easier to understand against the document it refused.
+ * Since 0.1.38 the graph is the commit's check rather than an artifact, so a caller that wants the
+ * document it judged — a proof about what a walk projects to, a comparison of the two readings, a
+ * reader that wants the wider shape the ABM drops — has no file to open. This is the door: it runs
+ * the same reconciliation the commit runs, over the same logs, and returns the assembled document.
+ *
+ * It writes nothing, because `reconcile` writes nothing: this is a read of the evidence, and the
+ * only thing in this module that touches the filesystem on the way out is `commitRun`. `draft` is
+ * returned rather than `graph` on purpose — the draft is the document that was assembled whether or
+ * not the commit's gates allowed it, and a caller that wants the commit's verdict wants
+ * `commitRun`, not a document.
+ */
+export function assembledGraph(dir, options = {}) {
+  return reconcile({ ...readRun(dir), ...options }).draft;
+}
+
+/**
+ * Write the commit's artifacts. The raw logs are opened read-only, above.
+ *
+ * Since 0.1.38 that is one artifact: `application-model.json`, with `commit_report.json` beside it.
+ * The 0.1 graph is still assembled, validated against the vendored schema and judged by its own
+ * invariants — and then not written, because it is the commit's check on the run rather than a
+ * document a run produces. `graphFile` therefore names a document without being a path, and
+ * `graphPath` is always `null`; what a reader wants instead is `report.documents.graph`.
+ *
+ * `force` returns the assembled graph whatever the commit's own rules decided, and writes nothing it
+ * would not otherwise write. It does not make the graph correct and it hides nothing: the violations
+ * are still in the report and in the document's own `warnings`. It exists for the case where the
+ * near-miss is what you need to look at — a rule is usually easier to understand against the
+ * document it refused.
  */
 export function commitRun({ dir, now = new Date(), command = 'graph_commit', graphFile = 'graph.json', modelFile = 'application-model.json', reportFile = 'commit_report.json', force = false }) {
   const run = readRun(dir);
@@ -4381,16 +4418,16 @@ export function commitRun({ dir, now = new Date(), command = 'graph_commit', gra
   const describeErrors = (result) => `${result.schema}: `
     + `${result.errors.slice(0, 5).map((error) => `${error.path} ${error.message}`).join('; ')}`
     + `${result.error_count > 5 ? ` (and ${result.error_count - 5} more)` : ''}`;
-  // `blocking` is about `graph.json` and says so in its own note, so the *graph* being invalid is a
-  // blocker — but only when nothing else already blocked it: on a run a gate already refused, the
-  // draft is usually invalid for the very reason the gate names (`application_not_declared` is the
-  // obvious one), and a second code for one cause reads as two defects. The result is still
-  // reported either way, in `report.documents.graph`.
+  // `blocking` is the commit's own verdict on the run it just reconciled, so an assembled graph
+  // that does not validate is a blocker — but only when nothing else already blocked it: on a run a
+  // gate already refused, the draft is usually invalid for the very reason the gate names
+  // (`application_not_declared` is the obvious one), and a second code for one cause reads as two
+  // defects. The result is still reported either way, in `report.documents.graph`.
   if (documents.graph.valid === false && !report.blocking.length) {
     report.blocking.push({
       code: 'graph_does_not_validate',
       severity: 'error',
-      detail: `${graphFile} was assembled and does not validate against ${describeErrors(documents.graph)}. It was not written. This is a defect in the commit rather than in the run — the raw logs are untouched and the document can be rebuilt.`,
+      detail: `the assembled graph does not validate against ${describeErrors(documents.graph)}. This is a defect in the commit rather than in the run — the raw logs are untouched and the assembly can be rebuilt — and the application model is projected from this document, so it is refused with it.`,
     });
   }
   // The model has its own verdict, and it stays its own: its failures are profile errors plus, when
@@ -4403,28 +4440,53 @@ export function commitRun({ dir, now = new Date(), command = 'graph_commit', gra
         code: 'model_does_not_validate',
         severity: 'error',
         subject: null,
-        detail: `${modelFile} was assembled and does not validate against ${describeErrors(documents.model)}. It was not written. The graph is unaffected: the two documents are two readings of one run (D1), and a model the schema refuses is a defect in the projection rather than in the walk.`,
+        detail: `${modelFile} was assembled and does not validate against ${describeErrors(documents.model)}. It was not written. A model the schema refuses is a defect in the projection rather than in the walk, and the raw logs are untouched — the same run can be projected again.`,
       },
     ];
   }
   report.ok = report.blocking.length === 0;
-  // The graph is the fallback document (D1): it is written under exactly the conditions it always
-  // was, plus validity. The model is written only when it was assembled, the profile found no error
-  // in it, and it validates — three separate refusals, each reported in `report.documents`.
-  const writable = graph ?? (force ? draft : null);
-  const graphDocument = writable && (documents.graph.valid === true || force) ? writable : null;
-  const modelDocument = model && documents.model.valid === true && !(report.documents.model.blockers ?? []).length
+  // 0.1.38 — the graph is the commit's check and no longer an artifact. It is assembled, validated
+  // against the vendored 0.1 schema and judged by its own invariants exactly as before, and nothing
+  // is written for it: what a run produces is the behaviour model. Two consequences follow, and
+  // both are deliberate.
+  //
+  // `blocking` is no longer a verdict about a file, so the model is written only when *nothing* was
+  // blocked, the projection was assembled, the profile found no error in it and it validates — four
+  // separate refusals, each reported in `report.documents`. The coupling is the point: the model is
+  // projected from the very document the graph's rules judged, so a commit that answered
+  // `committed: false` while leaving a model on disk would be the one output this tool must not
+  // produce. Before the graph was dropped that combination was reachable, because a blocked graph
+  // and a sound model were two verdicts about two files (D1).
+  //
+  // `graphPath` is still returned and is now always `null`. It is not removed because it is the
+  // field callers already read for "did a graph land", and the answer to that question is now
+  // `documents.graph.artifact`/`written` rather than a path — two booleans, because "the graph was
+  // withheld" and "the graph is not an artifact" are different facts and a reader has to be able to
+  // tell them apart.
+  const assembled = graph ?? draft;
+  const graphDocument = assembled && (documents.graph.valid === true || force) ? assembled : null;
+  const modelDocument = report.ok && model && documents.model.valid === true && !(report.documents.model.blockers ?? []).length
     ? model
     : null;
-  report.documents.graph.written = Boolean(graphDocument);
+  if (!modelDocument && model && !(report.documents.model.blockers ?? []).length && report.blocking.length) {
+    report.documents.model.blockers = [
+      {
+        rule: null,
+        code: 'commit_blocked',
+        severity: 'error',
+        subject: null,
+        detail: `the commit was blocked by ${report.blocking.length} rule(s) — ${report.blocking.map((blocker) => blocker.code).join(', ')} — and the model is projected from the document those rules judged, so it was refused with it. A blocked commit produces no document at all.`,
+      },
+    ];
+  }
+  report.documents.graph.written = false;
+  report.documents.graph.artifact = false;
   report.documents.model.written = Boolean(modelDocument);
   const reportPath = join(dir, reportFile);
   writeFileSync(reportPath, JSON.stringify(report, null, 2) + '\n', 'utf8');
-  const graphPath = graphDocument ? join(dir, graphFile) : null;
-  if (graphDocument) writeFileSync(graphPath, JSON.stringify(graphDocument, null, 2) + '\n', 'utf8');
   const modelPath = modelDocument ? join(dir, modelFile) : null;
   if (modelDocument) writeFileSync(modelPath, JSON.stringify(modelDocument, null, 2) + '\n', 'utf8');
-  return { graph: graphDocument, model: modelDocument, report, graphPath, modelPath, reportPath };
+  return { graph: graphDocument, model: modelDocument, report, graphPath: null, modelPath, reportPath };
 }
 
 /**
@@ -4441,16 +4503,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(2);
   }
   try {
-    const { graph, report, graphPath, modelPath, reportPath } = commitRun({ dir, command: 'dsh-graph-explorer commit' });
+    const { report, graphPath, modelPath, reportPath } = commitRun({ dir, command: 'dsh-graph-explorer commit' });
     if (json) {
-      console.log(JSON.stringify({ ok: report.ok, graph: graphPath, model: modelPath, report: reportPath, documents: report.documents, transitions: report.transitions, blocking: report.blocking }, null, 2));
+      // `graph` is deliberately absent from the machine-readable answer: there is no graph path any
+      // more, and a key that always reads `null` is a key a caller will read as "the commit was
+      // blocked". Whether the graph's own check passed is `documents.graph.valid`.
+      console.log(JSON.stringify({ ok: report.ok, model: modelPath, report: reportPath, documents: report.documents, transitions: report.transitions, blocking: report.blocking }, null, 2));
     } else {
       console.log(`run:        ${dir}`);
       console.log(`states:     ${report.states.committed} committed from ${report.states.candidates} records (${report.states.deduplicated} repeat readings collapsed)`);
       console.log(`capabilities: ${report.capabilities.committed}`);
       console.log(`transitions: ${report.transitions.committed} committed, ${report.transitions.rejected} rejected, ${report.transitions.superseded} superseded`);
       console.log(`report:     ${reportPath}`);
-      console.log(`graph:      ${graphPath ?? '(not written — the commit was blocked)'}`);
+      // The graph is the commit's own check on the run and no longer a file, so this line reports the
+      // verdict rather than a path — and the verdict is the one thing a reader of a run directory
+      // would otherwise have to open the report to find.
+      console.log(`graph:      (not written — assembled and validated as this commit's own check: ${report.documents.graph.valid === true ? 'valid' : 'INVALID'})`);
       // The model is the second reading of the same run, and its absence is a verdict rather than
       // an omission: the profile found an error in it, or the schema refused it. Which one is in
       // the report, and the count here is what says the walk was read twice rather than once.

@@ -1,12 +1,17 @@
-// Phase 2's gate: one commit, two documents, and the two readings have to agree about the run.
+// Phase 2's gate: one commit, one document written, and the graph that was judged beside it.
 //
-// The pivot's fourth decision (D1) is that `graph.json` and `application-model.json` are two
-// *readings* of one run rather than a derivation of one from the other, and every consequence of
-// that decision is a thing this suite has to be able to falsify:
+// The pivot's fourth decision (D1) was that `graph.json` and `application-model.json` are two
+// *readings* of one run rather than a derivation of one from the other. 0.1.38 revised half of it:
+// the model is still written and the graph is still read as a separate document, but the graph is
+// no longer *written* — it is the commit's own check on the run. Every consequence of that, and of
+// the decision it revises, is a thing this suite has to be able to falsify:
 //
-//   * the fallback document may not get worse — `graph.json` is what 0.1.22 wrote and what every
+//   * the fallback document may not get worse — the graph is what 0.1.22 wrote and what every
 //     existing consumer reads, so the model arriving may not take a key away from it, and its
-//     validation is now a *gate* rather than a hope (README gap 8);
+//     validation is a *gate* rather than a hope (README gap 8). The gate now gates the model,
+//     because the model is projected from the document it judged;
+//   * nothing writes a `graph.json` — the document is assembled and returned, and a commit that
+//     left one on disk would be a commit that still had two artifacts (the point of 0.1.38);
 //   * the model may not be written when it is wrong — a document nothing downstream reads cannot be
 //     wrong in a way that matters (D10), so the profile is checked *before* the write and its
 //     errors withhold the file rather than annotating it;
@@ -24,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
+import { assembledGraph } from '../lib/commit.js';
 import { apply, Config } from '../lib/index.js';
 import { candidatesFromRun, modelFromCandidates, profileFindings, profileInvariants } from '../lib/abm.js';
 import { loadSchemas, validateDocument } from '../lib/validate.js';
@@ -178,17 +184,25 @@ if (!verdict.model_path) {
   console.log('     ', JSON.stringify({ documents: committed.documents?.model, findings: committed.profile?.findings }, null, 2));
 }
 
-// --- clause 1: the fallback document is intact, and it validates ----------
-const graph = readDoc('graph.json');
-check('the run commits and the graph is written where it always was',
-  [verdict.committed, verdict.graph_path !== null, graph !== null], [true, true, true]);
+// --- clause 1: the checked document is intact, and it validates -------------
+// It is no longer on disk — nothing this version commits is — so it is read back through the same
+// door the commit assembled it at. `assembledGraph` runs the commit's own reconciliation over the
+// logs and returns the document without writing it, which is what makes this a check on the
+// document rather than on a file that happened to survive.
+const graph = assembledGraph(join(cwd, 'graph-run'));
+check('the run commits, the model is written, and no graph is left beside it',
+  [verdict.committed, verdict.model_path !== null, verdict.graph_path, existsSync(logPath('graph.json'))],
+  [true, true, null, false]);
 
 const schemaRoots = { '0.1': loadSchemas(join(root, 'schemas', '0.1')), abm: loadSchemas(join(root, 'schemas', 'abm', '0.2')) };
 const graphValidation = validateDocument(graph, schemaRoots['0.1'], 'graph.schema.json', { name: 'graph.json' });
 if (!graphValidation.valid) console.log('     ', JSON.stringify(graphValidation.errors, null, 2));
-check('and it validates against the vendored 0.1 schema, before it was written as well as after',
-  [graphValidation.valid, committed.documents.graph.valid, committed.documents.graph.written],
-  [true, true, true]);
+// `written: false` and `artifact: false` are two different facts and the report has to keep them
+// apart: the first says no file was left, the second says none was ever meant to be. A commit that
+// reported `written: true` here would be claiming a file it did not write.
+check('and the document the commit judged validates against the vendored 0.1 schema, and says it is not an artifact',
+  [graphValidation.valid, committed.documents.graph.valid, committed.documents.graph.written, committed.documents.graph.artifact],
+  [true, true, false, false]);
 // `unchecked` is the honest half of a hand-rolled walker: a keyword it does not apply is a check
 // that did not run, and a schema set that has grown one would otherwise pass by being ignored.
 check('with nothing in the schema left unchecked', graphValidation.unchecked, []);
@@ -455,14 +469,19 @@ if (profileErrors.length) console.log('     ', JSON.stringify(profileErrors, nul
 check('the profile finds nothing in error, so the model was written rather than annotated',
   [profileErrors.length, committed.profile.errors, committed.documents.model.blockers],
   [0, 0, []]);
-// A rule the model adds may never take the fallback document away: `blocking` is about `graph.json`
-// and says so, and the two documents are two readings of one run (D1). The counts are asserted
-// rather than the emptiness alone, because a rule that stopped reporting would otherwise be
-// indistinguishable from a document with nothing wrong: 30 invariants (13 over the graph, one per
-// model rule — 17 as of P17) as of P17.
-check('and no model rule is a blocker of the graph',
-  [graphInvariants.length + modelInvariants.length, committed.invariants.filter((result) => /^P\d+$/.test(result.code)).length],
-  [30, 17]);
+// Half of the old invariant survives and half of it is reversed, and both halves are assertions.
+// A rule the model adds still may not block the commit: `blocking` is computed from the graph's
+// gates and the graph's own invariants, so no `P` rule can put anything in it. What 0.1.38 reversed
+// is the other direction — the graph's verdict now withholds the model, because the model is
+// projected from the document the graph's rules judged and is the only document a run produces. On
+// this walk nothing is blocked, so the two statements are about an empty list either way; the
+// counts are asserted rather than the emptiness alone, because a rule that stopped reporting would
+// otherwise be indistinguishable from a document with nothing wrong: 30 invariants (13 over the
+// graph, one per model rule — 17 as of P17) as of P17.
+check('and no model rule is a blocker of the commit',
+  [graphInvariants.length + modelInvariants.length, committed.invariants.filter((result) => /^P\d+$/.test(result.code)).length,
+    committed.blocking.filter((blocker) => /^P\d+$/.test(blocker.code ?? '')).length],
+  [30, 17, 0]);
 
 // --- clause 4b: every reference says what it is evidence for ----------------------------------
 // §P1's evidence granularity, asserted on the document that was written rather than on a hand-built

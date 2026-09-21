@@ -19,6 +19,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
+import { assembledGraph } from '../lib/commit.js';
 import { apply, Config } from '../lib/index.js';
 
 let fails = 0;
@@ -389,7 +390,10 @@ check('the identity minted from a form\'s progress is reported, as a warning',
   [...new Set(verdict.warnings.detail.filter((finding) => finding.code === 'identity_read_from_element_state').map((finding) => finding.severity))], ['warning']);
 check('and nothing about this run is an error', verdict.warnings.errors, 0);
 
-const graph = JSON.parse(readFileSync(join(cwd, 'graph-run', 'graph.json'), 'utf8'));
+// The document the commit judged, read back through the commit's own reconciliation: since 0.1.38
+// the graph is a check rather than an artifact, so there is no file to open — and this clause is
+// about what is *in* the document (a detection that survived the commit), not about where it went.
+const graph = assembledGraph(join(cwd, 'graph-run'));
 const byId = new Map(graph.states.map((state) => [state.id, state]));
 const detectionOf = (id) => (byId.get(id)?.detection ?? []).map((entry) => entry.element ?? entry.expected);
 check('the login state carries both forms of the element claim, as element ids',

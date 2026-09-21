@@ -207,14 +207,22 @@ has('and the correction is to name the basis or drop the claim',
 has('and writing something down verifies nothing',
   text, 'Nothing becomes verified by being written down');
 
-// --- the commit writes both documents ------------------------------------
-// Phase 2 made the commit write `application-model.json` beside `graph.json`; the protocol is where
-// the model learns that the second document exists, and that a model rule withholds the model
-// rather than blocking the run.
-has('the commit is said to write the graph', text, '`graph.json`');
-has('and the application model beside it', text, '`application-model.json`');
-has('and the two verdicts are kept apart',
-  text, 'a rule about the graph blocks the run, and a rule about the model withholds the model');
+// --- the commit writes one document, and says which -----------------------
+// Phase 2 made the commit write `application-model.json` beside `graph.json`; 0.1.38 stopped writing
+// the graph, and the protocol is where a model learns all of it: which file a run produces, that
+// nothing writes a `graph.json` any more, and that there is now one verdict rather than two — a
+// blocking rule withholds the model, because the model is projected from the document the rule
+// judged. The last one reverses what this section asserted before, so each half is asked for
+// separately and the old sentence is asked *not* to be there: a protocol that still promised two
+// verdicts would send a model looking for a graph that does not exist.
+has('the commit is said to write the application model', text, '`application-model.json`');
+has('and to write no graph at all', text, 'nothing writes a `graph.json`');
+has('and the graph is said to be a check rather than an artifact',
+  text, 'the graph is a *check* rather than a document a run produces');
+has('and one rule to explain every refusal, withholding the model',
+  text, 'a blocking rule withholds the model, and a commit that said');
+hasNot('with the old two-verdict sentence gone',
+  text, 'a rule about the model withholds the model and leaves the graph alone');
 
 // --- the refusal sentences, verbatim --------------------------------------
 // §5 of the pivot: keep every existing refusal sentence. Each one below is a live-run failure mode

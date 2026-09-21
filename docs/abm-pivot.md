@@ -1,8 +1,10 @@
 # Pivot: generate an Application Behavior Model beside the graph
 
 Status: **Phase 0a, 0b, 1, 2, 3 and 4 DONE — the pivot is load-bearing: a spec is generated with
-`graph.json` absent from the run directory, and every action in it traces to a `realization[]` step.
-Phase 5 next.**
+no `graph.json` in the run directory, and every action in it traces to a `realization[]` step.
+Phase 5 next.** Since 0.1.38 that is not a state a run can avoid — the commit stopped writing a
+graph, so the model is the only document a run produces and the check that judged it is read from
+`graph_valid` / `force: true` (see D1 below, revised).
 Baseline: plugin `0.1.22`, branch
 `fix/graph-explorer-lossless-and-state-entered` (`8738f52`), deployed to the `graph` and
 `web` profiles. Work happens on **`feat/application-behavior-model`**, branched off `8738f52`
@@ -19,7 +21,7 @@ description rather than a replacement. §5 Phase 4 is in the MVP for that reason
 
 | # | Decision | What it changes in this plan |
 | --- | --- | --- |
-| **D1** | **Two artifacts.** `graph.json` stays exactly as it is, as a fallback; the ABM is a second document beside it. | §1: the pipeline writes two documents from one evidence log, and the two are **independent readings**, not a projection of each other. The generator returning to the critical path (D10) does not weaken
+| **D1** | **Two readings, one artifact** — *revised in 0.1.38; the decision was "two artifacts".* `application-model.json` is what the commit writes. `graph.json` stays exactly as it is — assembled from the same logs, judged by the same rules, validated against the same schema — but it is the commit's **own integrity check** instead of a file: nothing writes it, and `graph_valid` / `report.documents.graph` are how its verdict is read. | §1: the pipeline assembles two readings from one evidence log, and the two are **independent readings**, not a projection of each other. The first is the check the second is projected from, so it still gates: a graph that does not validate blocks the commit, because the model is built from the document those rules judged. §1: the comparison the two renderings make possible is still available — `force: true` returns the assembled document without writing it — so nothing about the revision costs the fallback its *content*, only its presence on disk. The generator returning to the critical path (D10) does not weaken
 this: it makes the ABM a consumer of its own document, which is the point. |
 | **D2** | **Copy the schemas in-repo and modify them here.** The external schema is no longer authoritative for this project. | §2: a vendored `schemas/` tree, a fork policy, and a validation strategy that does not cost the plugin its zero-dependency `npm test`. §3: `entities` / `state_variables` / `actors` get **real top-level arrays** instead of `metadata.extra`. |
 | **D3** | **`composed_of` demoted.** `realization.steps[]` is the default home for a behaviour's mechanics. | §3: P2/P3 rules. `composed_of` survives only for a behaviour genuinely built from other behaviours. |
@@ -183,9 +185,10 @@ steps to behaviours, and the number that measures it is how many capabilities th
              ├──────────────┬───────────────────┐
              ▼              ▼                   ▼
       graph.json     application-model.json   commit_report.json
-      (fallback,      (the product,            (says what each
-       ABG v0.1)       ABM v0.2)               document contains
-                                               and what it refused)
+      (the check,     (the product,            (says what each
+       ABG v0.1,       ABM v0.2)               document contains,
+       NOT written)                            what it refused, and
+                                               what the check decided)
 ```
 
 **The two documents are read from the same logs, not derived from each other.** This is the
@@ -195,6 +198,15 @@ point of D1 and it is worth being explicit about, because the tempting shortcut 
 > derived from the graph, then a defect in the ABM's reading is also a defect in the graph,
 > and there is nothing to fall back *to*. A fallback has to be produced from the evidence
 > independently, by machinery that a change in the ABM's vocabulary cannot reach.
+
+**0.1.38 kept the independence and dropped the second file.** The argument above is about two
+*readings*, and a reading does not have to be written to exist: the graph is still assembled by
+machinery the ABM's vocabulary cannot reach, still judged by the rules written for it, still the
+document the model is projected from — and it is now read where it is used rather than on disk.
+What the revision removes is the part the argument never needed and the project kept paying for: a
+second artifact kept in step with the first, which invited a reader to compare two files as though
+one were evidence for the other. What it costs is a way to see the check's own output, and that is
+`force: true`.
 
 The machinery already supports this: `graph_transition` can name a **step capability** and its
 **behaviour** in one call (`capability: "submit_login"`, `capability_behaviour: "login"`, added
@@ -207,7 +219,7 @@ in 0.1.21/0.1.22), and the store's `addCapability` takes `composed_of` and appen
 
 Nothing is recorded twice by hand, and neither document is a projection of the other.
 
-| | `graph.json` (fallback) | `application-model.json` (product) |
+| | `graph.json` (the check since 0.1.38) | `application-model.json` (the product) |
 | --- | --- | --- |
 | Schema | vendored ABG `0.1`, **byte-identical to upstream** | forked ABM `0.2` |
 | Spine | `states` + `transitions` | `behaviors` + `transitions` |
@@ -221,7 +233,7 @@ Nothing is recorded twice by hand, and neither document is a projection of the o
 | Entities / state variables | implicit (`data_subject`, effect targets, dimensions) | `entities[]` / `state_variables[]` top-level |
 | Epistemic level | `metadata.status` reports whether **the walk** was observed, and an LLM-inferred behaviour *name* shares that one block — measured: `cap_submit_login` reads `status: verified, confidence: 1` while the name is pure inference | D9: the level is a property of **the claim**, not of the record. A behaviour's name is `inferred` even when its edge is `observed`, and P14 refuses the promotion |
 | Consumers | `graph_test` (unchanged today), anything already reading ABG 0.1 | **`graph_test` from Phase 4 (D10)**, plus the PR→test path this pivot exists for |
-| Written when | always, as today | always, same commit |
+| Written when | never, since 0.1.38 — assembled and judged on every commit, returned only under `force: true` | when no rule blocks the run: the gates passed, the projection assembled it, the profile found no error, and it validates |
 
 **Cost of D1, stated plainly:** the ABM needs a schema of its own and every rule has to be
 expressible twice — once as an ABG check and once as an ABM check — or once in a shared module
@@ -872,6 +884,11 @@ plan had not anticipated, and each is now a rule with a test:
   `realization_step` records in `capabilities.jsonl` instead. A fact the fallback document cannot
   hold is not a fact the model loses — that is the whole argument for two documents (D1), and it was
   one commit away from being violated in the other direction.
+  **0.1.38 found the third direction.** The branch that reads a `graph.json` already on disk passed
+  the recorded steps; the branch that reads the four logs did not, and nothing noticed, because every
+  run had a `graph.json` for the first branch to win with. The commit stopped writing one, the logs
+  branch became the branch every profile takes, and the drift test failed within the hour — which is
+  the argument for the change stated as evidence rather than as preference.
 - **D12 reaches further than the edge.** The collapsed edge starts where the *invocation* started,
   not where its last call did: carrying the last call's `from_state` claimed the behaviour began
   wherever its final step began, which lost the state the walk was standing in when it was asked for

@@ -2491,10 +2491,12 @@ export function apply(ctx, config) {
     // the same run can be re-judged differently later without re-walking.
     ctx.tools.register(defineTool({
         name: commitTool,
-        description: 'Reconcile the run into a graph. This is the LAST step: it reads the raw evidence '
-            + '(observations, states, capabilities, transitions), decides which candidates become part of the '
-            + 'graph, and writes graph.json plus commit_report.json. It never edits the raw logs, and it refuses '
-            + 'to write a graph whose rules are violated — read the report instead of assuming success.',
+        description: 'Reconcile the run into a behaviour model. This is the LAST step: it reads the raw evidence '
+            + '(observations, states, capabilities, transitions), decides which candidates hold, checks the '
+            + 'result, and writes application-model.json plus commit_report.json. The 0.1 graph is assembled '
+            + 'and validated as the commit\'s own check and is *not* written — it is a way of judging the run, '
+            + 'not a document the run produces. It never edits the raw logs, and it refuses to write a model '
+            + 'whose rules are violated — read the report instead of assuming success.',
         parameters: {
             run_dir: {
                 type: 'string',
@@ -2503,8 +2505,9 @@ export function apply(ctx, config) {
             },
             force: {
                 type: 'boolean',
-                description: 'Commit even when blocking rules fired. Writes the graph with the violations listed in '
-                    + 'its warnings. Only for inspecting the near-miss; it does not make the graph correct.',
+                description: 'Return the assembled graph even when blocking rules fired, with the violations listed '
+                    + 'in its warnings. Only for inspecting the near-miss; it does not make the graph correct, and '
+                    + 'since the graph is not written it changes nothing on disk.',
             },
         },
         output: {
@@ -2532,7 +2535,7 @@ export function apply(ctx, config) {
                 );
             }
 
-            const { graph, model, report, graphPath, modelPath, reportPath } = commitRun({
+            const { graph, model, report, modelPath, reportPath } = commitRun({
                 dir,
                 command: `${self?.name ?? 'dsh-graph-explorer'} ${self?.version ?? 'unknown'} ${commitTool}`,
                 force: args.force === true,
@@ -2541,13 +2544,28 @@ export function apply(ctx, config) {
             const severityCount = (severity) => report.findings.filter((finding) => finding.severity === severity).length;
             return {
                 committed: report.ok,
-                graph_path: graphPath ?? null,
+                // There is no graph path any more (0.1.38) and the key stays, so a caller written against
+                // 0.1.37 gets the same shape and a truthful answer: the graph is assembled, validated and
+                // judged as this commit's own check and nothing is written for it. What such a caller
+                // actually wants is `graph_valid` — whether the reconciled document validates — because
+                // `graph_path` being `null` no longer distinguishes "the commit was blocked" from
+                // "the graph is not a document a run produces".
+                graph_path: null,
+                graph_valid: report.documents?.graph?.valid ?? null,
+                // `graph` is present only when `force` was asked for, and that is the whole of what
+                // `force` still means: it used to be "write the document anyway", and there is
+                // nothing left to write, so what it buys is the document itself. Absent rather than
+                // `null` when it was not asked for, because `null` is the answer `graph_valid` and
+                // `documents.graph` already give about a document that was withheld, and a caller
+                // reading this field must not mistake "you did not ask" for "it was refused".
+                ...(args.force === true && graph ? { graph } : {}),
                 report_path: reportPath,
-                // The commit writes two documents, and they are two readings of one run: the model
-                // is not a rewrite of the graph and the graph is not a view of the model (D1). Both
-                // are reported, and `written` is the field that says which of them exists — the
-                // model is withheld when the profile finds an error in it, and that is a fact about
-                // the run the caller has to be able to read without opening the report.
+                // One document is written, and the model is not a rewrite of the graph and the graph is
+                // not a view of the model (D1): the model is the reading of the run that keeps what a step
+                // was *walked with*, and the graph is the check. `model_path` is `null` whenever the
+                // model was withheld — the profile found an error in it, the schema refused it, the
+                // commit was blocked, or the projection declined to assemble one — and that is a fact
+                // about the run the caller has to be able to read without opening the report.
                 model_path: modelPath ?? null,
                 model: report.documents?.model ?? null,
                 run_dir: dir,
@@ -2573,11 +2591,10 @@ export function apply(ctx, config) {
                     // whose instruction could not be attributed needs a hand-written goal, and
                     // that is a finding about this commit, not a detail in a file.
                     journeys: report.journeys,
-                    // Features, for the same reason: nothing in a page says what a product is
-                    // for, so a graph with no features is not a graph with nothing to say — it
-                    // is a graph whose model never said it, and the count is what makes the
-                    // difference visible in the commit's own answer.
-                    features: report.features,
+                    // Features are deliberately *not* in this answer. They belong to the 0.1 graph's
+                    // vocabulary, the ABM has no `features[]` (D6, D7), and the graph is no longer
+                    // written — so a count here would name a concept the model reading this answer
+                    // cannot put anywhere. The report still keeps the accounting.
                 },
                 // The graph's own index of what it is: a model reporting on the run needs
                 // these without reading the file, because they are what it must explain.
@@ -2591,7 +2608,7 @@ export function apply(ctx, config) {
                     code: result.code,
                     // Which document the rule is about. The list is one list on purpose — "is this
                     // commit's output sound" is one question — and the tag is what keeps the graph's
-                    // thirteen rules and the model's fifteen readable apart in one answer.
+                    // thirteen rules and the model's seventeen readable apart in one answer.
                     document: result.document ?? 'graph',
                     ok: result.ok,
                     severity: result.severity,
@@ -2613,14 +2630,24 @@ export function apply(ctx, config) {
                     warnings: (decision.findings ?? decision.warnings ?? []).map((finding) => finding.code),
                 })),
                 blocked_by: report.blocking,
+                // The commit's answer has three shapes, not two, and the third is the one a caller is
+                // most likely to misread: `committed: true` with `model_path: null` is a run whose
+                // edges all held and whose projection still could not be written (a profile error, or
+                // the schema). Saying "the model is at null" there would be worse than saying nothing.
                 next: report.ok
-                    ? `The graph is at ${graphPath}. It is built from ${report.transitions.committed} committed edge(s); `
-                        + `${report.transitions.rejected} candidate(s) were refused and ${report.transitions.superseded} superseded. `
-                        + `${modelPath ? `The application model is at ${modelPath}. ` : report.documents?.model?.written === false ? 'No application model was written; the model section of the report says which rule withheld it. ' : ''}`
-                        + 'Report the graph and the findings — a warning in warnings[] is a fact about the run, not a failure to paper over.'
-                    : `No graph was written. ${report.blocking.length} blocking rule(s) fired; each one is a fact the run `
-                        + 'does not settle. Resolve them and commit again — the raw evidence is unchanged, so a fix here is a '
-                        + 'config fix or another walk, never an edit to the logs.',
+                    ? (modelPath
+                        ? `The application model is at ${modelPath}. It is built from ${report.transitions.committed} committed edge(s); `
+                            + `${report.transitions.rejected} candidate(s) were refused and ${report.transitions.superseded} superseded. `
+                            + 'The 0.1 graph was assembled and validated as this commit\'s own check and is not written — nothing refers to a graph.json. '
+                            + 'Report the model and the findings — a warning in warnings[] is a fact about the run, not a failure to paper over.'
+                        : `No model was written, and no blocking rule fired: the commit held and the projection did not. `
+                            + `The model section of the report says which rule withheld it (${(report.documents?.model?.blockers ?? []).map((blocker) => blocker.code).join(', ') || 'see blockers'}). `
+                            + 'Report that rather than the run — the walk is sound and the document it should have produced is the thing to fix.')
+                    : `No model was written. ${report.blocking.length} blocking rule(s) fired; each one is a fact the run `
+                        + 'does not settle, and the model is projected from the document those rules judged, so it is refused '
+                        + 'with it. Resolve them and commit again — the raw evidence is unchanged, so a fix here is a '
+                        + 'config fix or another walk, never an edit to the logs. The 0.1 graph was assembled and judged '
+                        + 'as this commit\'s own check and is not written either.',
             };
         },
     }));
@@ -2654,11 +2681,10 @@ export function apply(ctx, config) {
     ctx.tools.register(defineTool({
         name: generateTool,
         description: 'Generate a Playwright spec for one journey, from the run\'s behaviour model. This is the LAST '
-            + 'step, after the commit: it reads application-model.json (or graph.json when the run has no model) and '
-            + 'writes a runnable .spec.ts beside it, plus a list of the steps it refused to turn into code. Every '
-            + 'action traces to a realization[] step — the reading the machinery took — and a step with no reading '
-            + 'under it is refused. Read the spec, then the gaps — a gap names what the document would have to say for '
-            + 'the generated test to check it.',
+            + 'step, after the commit: it reads application-model.json and writes a runnable .spec.ts beside it, '
+            + 'plus a list of the steps it refused to turn into code. Every action traces to a realization[] step — '
+            + 'the reading the machinery took — and a step with no reading under it is refused. Read the spec, then '
+            + 'the gaps — a gap names what the document would have to say for the generated test to check it.',
         parameters: {
             journey: {
                 type: 'string',
@@ -2675,8 +2701,8 @@ export function apply(ctx, config) {
                 type: 'string',
                 description: 'Which document to write the spec from: "model" (the default when the run has one) or '
                     + '"graph". The model keeps the values a step was walked with, so a fill can be generated from it; '
-                    + 'the graph is the projection that drops them, and is kept readable so the two can be compared on '
-                    + 'one run.',
+                    + 'the graph is the projection that drops them. A commit writes no graph.json any more, so "graph" '
+                    + 'is a legacy reading — it needs a document left by a commit before 0.1.38, or a hand-written one.',
             },
             name: {
                 type: 'string',
@@ -2690,8 +2716,8 @@ export function apply(ctx, config) {
             },
             write: {
                 type: 'boolean',
-                description: 'Write the spec to generated/<journey>.spec.ts beside the graph. Default true; set false to '
-                    + 'read it without leaving a file behind.',
+                description: 'Write the spec to generated/<journey>.spec.ts beside the document. Default true; set false '
+                    + 'to read it without leaving a file behind.',
             },
         },
         output: {
@@ -2735,9 +2761,13 @@ export function apply(ctx, config) {
             // turn is expanded into the calls the behaviour's `realization[]` recorded, and the
             // generator *refuses* an action no realization step stands behind. So a spec is
             // reproducible from `application-model.json`, and every line of it traces to a reading
-            // the machinery took. `graph.json` is still read when a run has no model, and
-            // `source: "graph"` forces it — which is what makes the two renderings comparable on one
-            // run instead of on two.
+            // the machinery took.
+            //
+            // `graph.json` is still read, and it is read as a legacy document since 0.1.38: the
+            // commit no longer writes one, so `source: "graph"` needs a directory a 0.1.37-or-earlier
+            // commit wrote, or a document written by hand. It survives as a reading for two reasons
+            // — the runs already on disk, and the comparison the two renderings make possible on
+            // one run — and not because a run still produces one.
             const modelPath = join(dir, 'application-model.json');
             const graphPath = join(dir, 'graph.json');
             const source = args.source ?? (existsSync(modelPath) ? 'model' : 'graph');
@@ -2748,16 +2778,17 @@ export function apply(ctx, config) {
                         ? `The graph is there: pass source: "graph" to generate from it, or re-commit the run to write `
                             + 'the model — the model is what keeps the values a step was walked with.'
                         : `Pass run_dir to generate from a run recorded earlier (the default is ${runDirName} under the `
-                            + 'workspace root), or walk the application first.'),
+                            + 'workspace root), or walk the application first. A run has a model only when it has been '
+                            + 'committed and the model passed every rule the commit has.'),
                 );
             }
             if (source === 'graph' && !existsSync(graphPath)) {
                 throw new Error(
                     `${dir} has no graph.json, so there is no graph to generate a test from. `
                     + (existsSync(join(dir, 'run.json'))
-                        ? `The run is there but has not been reconciled: call ${commitTool} first, then generate — the `
-                            + 'commit is where a step is decided to be a step, and a spec built from the raw walk would be '
-                            + 'built from candidates nobody accepted.'
+                        ? `A commit no longer writes one (0.1.38): the graph is assembled as the commit's own check on `
+                            + `the run and application-model.json is what it produces, so call ${commitTool} and generate `
+                            + 'from the model. Pass source: "graph" only for a directory a 0.1.37-or-earlier commit wrote.'
                         : `Pass run_dir to generate from a run recorded earlier (the default is ${runDirName} under the `
                             + 'workspace root), or walk the application first.'),
                 );

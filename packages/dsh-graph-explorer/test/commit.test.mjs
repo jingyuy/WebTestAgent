@@ -425,7 +425,8 @@ check('and the coverage note counts the walks', graph.coverage.notes.includes('1
 
 // --- invariants -------------------------------------------------------------
 // `report.invariants` carries both documents' rules in one flat list, and `document` says which
-// document each entry is about: `report.ok` is about `graph.json`, so the graph's own set is what
+// document each entry is about: `report.ok` is about the graph the commit assembled — which since
+// 0.1.38 is its own check rather than an artifact — so the graph's own set is what
 // this suite documents. The model's fifteen rules are pinned separately, below.
 const invariants = Object.fromEntries(
   report.invariants.filter((result) => result.document === 'graph').map((result) => [result.code, result]),
@@ -458,7 +459,9 @@ check('the rule set is the documented one', Object.keys(invariants).sort(), [
 // Phase 2: the application model's seventeen rules are in the same section, with `document: 'model'`,
 // so that "is this commit's output sound" is one question about two documents rather than two
 // sections a reader has to know to look in. They are *not* part of `blocking` — a rule the model
-// adds must never take `graph.json` away from a run that satisfied every rule the graph has (D1).
+// adds must never take the commit's verdict away from a run that satisfied every rule the graph has.
+// The converse does hold, and has since 0.1.38: the graph's verdict is what decides whether the
+// model is written, because the model is projected from the very document those rules judged (D1).
 // P16 is the reference-integrity rule the review asked for by name ("every reference resolves"), so
 // it is also the one rule whose *subject* is the document rather than what the document claims.
 // P17 is its counterpart for claims rather than ids: a contract may not be stated at a level its own
@@ -466,11 +469,27 @@ check('the rule set is the documented one', Object.keys(invariants).sort(), [
 check('the model\'s rules are reported beside them, and name the other document', Object.keys(modelInvariants).sort(), [
   'P1', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15', 'P16', 'P17', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9',
 ]);
-check('and none of them is a blocker of the graph', report.blocking.some((blocker) => /^P\d+$/.test(blocker.code ?? '')), false);
+check('and none of them is a blocker of the commit',
+  // Read off `rule`, not `code`: a model finding carries its rule id in `rule` (`P5`) and its
+  // vocabulary in `code` (`unbound_parameter`), so a check against `code` could never fail.
+  report.blocking.filter((blocker) => /^P\d+$/.test(blocker.rule ?? '')).length, 0);
 
 // --- what lands on disk -----------------------------------------------------
-check('the report is written', existsSync(join(FIXTURE, 'commit_report.json')), true);
-check('the graph is written', existsSync(join(FIXTURE, 'graph.json')), true);
+// The suite reads `committed.graph` all the way through, which is the document the commit judged;
+// these two checks are the other half of the same statement, and they are facts about the directory
+// rather than about the run. Since 0.1.38 the report is the only file a run is guaranteed, and for
+// *this* fixture it is the only file at all: the model is withheld by five of its own rules, not by
+// the commit. `abm-commit.test.mjs` is where a commit that does write a model is pinned; what this
+// suite pins is the graph, which is assembled and judged whether or not anything is written.
+check('the report is written, and the graph is not written at all',
+  [existsSync(join(FIXTURE, 'commit_report.json')), existsSync(join(FIXTURE, 'graph.json')),
+    existsSync(join(FIXTURE, 'application-model.json')), committed.graphPath],
+  [true, false, false, null]);
+check('and the rules that withheld the model are the model\'s own, while the commit held',
+  [(report.documents.model.blockers ?? []).length,
+    (report.documents.model.blockers ?? []).every((blocker) => /^P\d+$/.test(blocker.rule ?? '')),
+    report.ok],
+  [5, true, true]);
 check('the run directory reports what it read', committed.report.run_dir, FIXTURE);
 check('the graph says it is derived and rebuildable', graph.generator.notes.includes('can be rebuilt'), true);
 check('the declared application is the identity', [graph.application.id, graph.application.name], ['app_synth', 'Synth']);
@@ -1476,7 +1495,8 @@ check('and the journey says the run recorded none',
   unstated.journeys[0].metadata.extra.goal_source.includes('the run recorded no instruction'), true);
 
 // ---------------------------------------------------------------------------
-// `commitRun` and the filesystem: the report is always written, the graph is not
+// `commitRun` and the filesystem: the report is always written, the model is not, and the graph is
+// never written at all
 // ---------------------------------------------------------------------------
 const scratch = mkdtempSync(join(tmpdir(), 'gx-commit-io-'));
 const undeclaredRun = createRun({ cwd: scratch, provenance: { startUrl: 'http://x/' } });
@@ -1484,17 +1504,39 @@ undeclaredRun.addObservation({ tool: 'browser_open', phase: 'after', capture: ca
 undeclaredRun.addState({ observationId: 'obs_0001', page_type: 'home', detection: [{ type: 'url' }] });
 
 const blocked = commitRun({ dir: undeclaredRun.dir, command: 'test' });
-check('a blocked commit writes no graph', existsSync(join(undeclaredRun.dir, 'graph.json')), false);
+check('a blocked commit writes no graph and no model, and both absences are its own verdict',
+  [existsSync(join(undeclaredRun.dir, 'graph.json')), blocked.modelPath,
+    existsSync(join(undeclaredRun.dir, 'application-model.json'))], [false, null, false]);
 check('a blocked commit still writes the report', existsSync(join(undeclaredRun.dir, 'commit_report.json')), true);
 check('the report is the product', [blocked.report.ok, blocked.graph, blocked.graphPath], [false, null, null]);
 check('the report names the blocking rule', blocked.report.blocking[0].code, 'application_not_declared');
+// Two absences, told apart and each given its own reason. The graph is absent because it is not a
+// document this commit writes — `written: false` and `artifact: false` say that, and they are two
+// fields because a document that was withheld and a document that was never an artifact are
+// different facts. The model is absent because the projection *refused*: it is not an unassembled
+// document but an impossible one, and the refusal is a sentence in the report.
+check('and the report tells the two absences apart',
+  [blocked.report.documents.graph.written, blocked.report.documents.graph.artifact,
+    blocked.report.documents.model.assembled, blocked.report.documents.model.blockers,
+    typeof blocked.report.documents.model.refusal],
+  [false, false, false, [], 'string']);
+check('and the refusal is the projection\'s own sentence, sent to the same gate the report names',
+  blocked.report.documents.model.refusal.includes('application_not_declared'), true);
+// The draft a gate refused does not validate either — the gate is about the application, and the
+// 0.1 schema requires one — and that is reported in `documents.graph` rather than as a second
+// blocker. Two codes for one cause read as two defects.
+check('and a second code is not minted for the same cause',
+  [blocked.report.blocking.length, blocked.report.documents.graph.valid], [1, false]);
 check('the report is JSON on disk', JSON.parse(readFileSync(join(undeclaredRun.dir, 'commit_report.json'), 'utf8')).ok, false);
 
 const forced = commitRun({ dir: undeclaredRun.dir, command: 'test', force: true });
-check('a forced commit writes the assembled document', existsSync(join(undeclaredRun.dir, 'graph.json')), true);
+// `force` returns the assembled graph — which is the only way to read a document a blocked commit
+// judged, and the reason `assembledGraph` exists — and changes nothing about what lands on disk.
+check('a forced commit returns the document it judged and still writes no graph',
+  [forced.graph !== null, existsSync(join(undeclaredRun.dir, 'graph.json'))], [true, false]);
 check('forcing does not pretend the report passed', forced.report.ok, false);
-check('the forced document still says what is wrong with it', JSON.parse(readFileSync(join(undeclaredRun.dir, 'graph.json'), 'utf8')).warnings
-  .some((line) => line.includes('application_not_declared')), true);
+check('the document the forced commit returned says what is wrong with it',
+  forced.graph.warnings.some((line) => line.includes('application_not_declared')), true);
 
 const readBack = readRun(undeclaredRun.dir);
 check('a run can be read back without the store that wrote it', [readBack.observations.length, readBack.states.length], [1, 1]);

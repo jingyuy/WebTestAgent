@@ -158,12 +158,31 @@ CASES = [
         # The graph's `steps[]` is a deliberately narrower projection of the recorded step —
         # `capabilityStep` is closed and has no room for a `purpose` or an `effects` — so the model
         # has to read the log. Remove that and the model loses exactly the facts the graph never
-        # carried, which is the reason there are two documents rather than one.
+        # carried, which is what the narrower shape was widened for.
+        #
+        # The line is the *logs* branch, and since 0.1.38 that is the branch a current run takes:
+        # the other call to `candidatesFromGraph` is the one for a `graph.json` already on disk, and
+        # no run writes one any more. Aim this at the wrong one and the case survives — the edit
+        # lands on a branch no suite reaches, so nothing fails and the rule looks unproven. It was
+        # the branch itself that was unreachable before the change, which is why the argument was
+        # missing from it for as long as it was.
         'rule': 'the model\'s steps are the recorded ones, not the graph\'s projection of them',
         'file': 'lib/abm.js',
-        'old': "      recordedStepsIn(dir),",
-        'new': "      null,",
+        'old': "    ...candidatesFromGraph(graph ?? draft, run, recordedStepsIn(dir)),",
+        'new': "    ...candidatesFromGraph(graph ?? draft, run, null),",
         'suite': 'test/abm-commit.test.mjs',
+    },
+    {
+        # The same rule on the other branch, and it needs its own case because the two branches
+        # reach the reader by different routes: a document already on disk is read as it was judged
+        # (the `graph.json` a 0.1.37-or-earlier run left), and the log still wins for the steps.
+        # `test/abm.test.mjs` is what reaches this one, with a run whose graph names a capability and
+        # leaves the steps to the log.
+        'rule': 'the same is true of the steps read beside a graph that is already on disk',
+        'file': 'lib/abm.js',
+        'old': "      recordedStepsIn(dir),\n    );\n  }\n  const read = readRun(dir);",
+        'new': "      null,\n    );\n  }\n  const read = readRun(dir);",
+        'suite': 'test/abm.test.mjs',
     },
     {
         # Every reference in the document is an id. An element-shaped effect is recorded with the

@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
+import { assembledGraph } from '../lib/commit.js';
 import { apply, Config } from '../lib/index.js';
 import { ELEMENT_ID_PATTERN, STEP_ACTIONS, normalizeAffordance, normalizeRealizationStep } from '../lib/schema.js';
 import { loadAjv } from './ajv.mjs';
@@ -39,7 +40,7 @@ const refuses = async (label, fn, expectedFragment) => {
 // --- fake harness ---------------------------------------------------------
 // The same seam `tools.test.mjs` drives, with two differences that matter. The application is
 // DECLARED, because a run with no `application.actors` cannot commit and this suite has to reach a
-// written `graph.json`; and the walk is longer, because a realisation is only interesting when one
+// committed document; and the walk is longer, because a realisation is only interesting when one
 // behaviour is performed by more than one step.
 const cwd = mkdtempSync(join(tmpdir(), 'gx-realization-'));
 const tools = new Map();
@@ -338,7 +339,21 @@ check('the log holds one canonical record per capability, plus the composition a
 
 // --- the commit and the fold ---------------------------------------------
 const verdict = await commit({});
-check('the run commits', [verdict.committed, verdict.graph_path !== null], [true, true]);
+// The two verdicts, and the asymmetry 0.1.38 kept between them. The run commits — every rule the
+// *graph* has is satisfied, and the clauses below are all about that document — and the model is
+// still withheld: this walk's steps bind `{{email}}` with no declared input (P5), and it collapses a
+// state the steps do not account for (P12). A model rule may not block the commit; the commit's own
+// verdict may withhold the model. The last member is the half that is new: nothing writes a
+// `graph.json` any more, so a run can reach this point and leave one document on disk, or none.
+check('the run commits, writes no graph, and withholds the model for reasons of the model',
+  [verdict.committed, verdict.graph_path, existsSync(logPath('graph.json')), verdict.model_path],
+  [true, null, false, null]);
+// An unexplained `null` is the failure mode the coupling could have introduced, so the reasons are
+// asserted rather than the absence alone. Neither is the commit's own code: the run was not refused,
+// and `blocked_by` is the commit's list, which is what the run's own verdict is made of.
+check('and the report names the two model rules that withheld it, for a commit nothing blocked',
+  [verdict.model.blockers.map((blocker) => blocker.code), verdict.blocked_by],
+  [['unbound_parameter', 'collapsed_past_a_state'], []]);
 check('and the report counts the realisation apart from the vocabulary',
   [verdict.counts.capabilities, verdict.counts.realization], [3, { recorded: 2, projected: 2 }]);
 // The resolution is a fact about the run that the document cannot hold by itself: the target is in
@@ -347,13 +362,16 @@ check('and the report counts the realisation apart from the vocabulary',
 const resolutionNotes = verdict.warnings.detail.filter((finding) => finding.code === 'target_from_realization');
 check('the report says the control was taken from the step, at info, once, for the one call that did not state it',
   resolutionNotes.map((finding) => [finding.severity, finding.basis]), [['info', 'recorder_note']]);
-// The affordance is a claim `graph.json` has no room for, and the count is how its absence from the
-// document is a stated fact rather than a silent drop. `retired` is the clause that keeps the claim
-// falsifiable: it says nobody performed this, so the walk is what settles it.
+// The affordance is a claim the 0.1 graph has no room for, and the count is how its absence from
+// the document is a stated fact rather than a silent drop. `retired` is the clause that keeps the
+// claim falsifiable: it says nobody performed this, so the walk is what settles it.
 check('the report counts the affordance the log holds and the document cannot carry',
   verdict.counts.states.affordances, { recorded: 1, surfaces: 1, retired: 0 });
 
-const written = JSON.parse(readFileSync(logPath('graph.json'), 'utf8'));
+// The document itself, read back through the commit's own reconciliation — there is no `graph.json`
+// to open since 0.1.38, and every clause below is about what the commit decided rather than about
+// where it put it.
+const written = assembledGraph(join(cwd, 'graph-run'));
 const byId = Object.fromEntries(written.capabilities.map((capability) => [capability.id, capability]));
 check('login is committed as a composite of the two steps',
   [byId.cap_login.kind, byId.cap_login.composed_of], ['composite', ['cap_fill_login_email', 'cap_submit_login']]);
@@ -383,8 +401,9 @@ check('and every committed edge names the control it acted on, whether or not th
   ['element_email_input', 'element_submit_button']);
 check('nothing named after the record kind reached the graph', JSON.stringify(written).includes('realization_step'), false);
 // The other claim the log holds and the document cannot carry, asserted the blunt way: the string
-// does not occur anywhere in `graph.json`. 0.1's `state.schema.json` is `additionalProperties:
-// false`, so the claim has to be counted in the report or it is a silent drop.
+// does not occur anywhere in the committed document. 0.1's `state.schema.json` is
+// `additionalProperties: false`, so the claim has to be counted in the report or it is a silent
+// drop.
 check('and the affordance is not in the document, which is why the report counts it',
   JSON.stringify(written).includes('affordances'), false);
 // The application is where the actor vocabulary lives, and the commit is what reads it.
@@ -427,7 +446,7 @@ check('a step that is not a step is reported rather than written into the graph'
   codes.includes('realization_step_not_a_step'), true);
 check('and a step of a behaviour that does not exist is reported rather than silently dropped',
   codes.includes('realization_does_not_resolve'), true);
-const again = JSON.parse(readFileSync(logPath('graph.json'), 'utf8'));
+const again = assembledGraph(join(cwd, 'graph-run'));
 const againLogin = again.capabilities.find((capability) => capability.id === 'cap_login');
 check('so the committed behaviour still describes exactly the two steps the walk performed',
   [againLogin.steps.length, againLogin.steps[0].action], [2, 'fill']);

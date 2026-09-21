@@ -280,27 +280,30 @@ For every step:
    one more look before moving on.
 4. Repeat until the goal in the task is reached, is proven impossible, or you are out
    of steps.${config.maxSteps ? `\n   You have at most ${config.maxSteps} steps.` : ''}
-5. Call \`${config.commitTool}\` when the walk is over. This is where the run becomes
-   documents. Everything you did until now is *evidence*, and evidence is allowed to be
+5. Call \`${config.commitTool}\` when the walk is over. This is where the run becomes a
+   document. Everything you did until now is *evidence*, and evidence is allowed to be
    wrong — a reading can be reinterpreted, a step can turn out to belong to a different
    transition, an edge can turn out to be a duplicate, a step can turn out not to be a step of
    the behaviour you attached it to. The commit is the only step that reads the whole run at
-   once and decides what is knowledge: it writes \`graph.json\` and, beside it, the
-   \`application-model.json\` — the same run read as the behaviour model this protocol is
-   about — next to a \`commit_report.json\` that says what it committed, what it refused and
-   why. The report keeps the two verdicts apart: a rule about the graph blocks the run, and a
-   rule about the model withholds the model and leaves the graph alone. Nothing you record is
-   retracted by it — the raw logs stay exactly as written — with one exception, and that is a
-   correction rather than a retraction: a step you state again out of the same two readings
-   replaces the walk's own account of that step, which is what the bullet on stating a step again
-   below is for.
-6. Call \`${config.generateTool}\` to turn the committed graph into a Playwright spec, and read
-   what it reports. It is the last thing a run does, and it changes nothing: the graph is
-   its only input, so the spec is reproducible from \`graph.json\` alone — the run is not
-   the thing being tested. Name the journey by id, by name, or by the words it is a
-   journey towards; with exactly one journey in the graph you need not name it, and with
+   once and decides what is knowledge: it writes the \`application-model.json\` — the run read
+   as the behaviour model this protocol is about — next to a \`commit_report.json\` that says
+   what it committed, what it refused and why. It also reconciles the run into the 0.1 graph
+   and checks it, but the graph is a *check* rather than a document a run produces: nothing
+   writes a \`graph.json\`, and the report's \`documents.graph\` carries that verdict instead.
+   The check is the commit's own and the model is projected from the document it judged, so
+   one rule explains every refusal: a blocking rule withholds the model, and a commit that said
+   \`committed: false\` while leaving a model on disk would be an answer nothing downstream could
+   act on. Nothing you record is retracted by it — the raw logs stay exactly as written — with
+   one exception, and that is a correction rather than a retraction: a step you state again out
+   of the same two readings replaces the walk's own account of that step, which is what the
+   bullet on stating a step again below is for.
+6. Call \`${config.generateTool}\` to turn the committed model into a Playwright spec, and read
+   what it reports. It is the last thing a run does, and it changes nothing: the document is
+   its only input, so the spec is reproducible from \`application-model.json\` alone — the run is
+   not the thing being tested. Name the journey by id, by name, or by the words it is a
+   journey towards; with exactly one journey in the document you need not name it, and with
    several the tool refuses rather than picking one, because a spec that clicks through
-   the wrong walk is worse than no spec. Then read its \`gaps[]\` — everything the graph
+   the wrong walk is worse than no spec. Then read its \`gaps[]\` — everything the document
    implies and the spec cannot say, each with a sentence naming what to record. A spec
    with a blocking gap is still written and is *not ok*: it drops the step it could not
    turn into an action, so it would pass without performing it. Fix what the gaps name

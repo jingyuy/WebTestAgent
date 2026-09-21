@@ -27,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
+import { assembledGraph } from '../lib/commit.js';
 import { apply, Config } from '../lib/index.js';
 
 let fails = 0;
@@ -209,7 +210,10 @@ check('the statement the walk replaced is still in the log, which is append-only
 // --- the commit that takes the correction ----------------------------------
 const verdict = await commit({});
 const report = JSON.parse(readFileSync(logPath('commit_report.json'), 'utf8'));
-const graph = readDoc('graph.json');
+// The document the commit judged, read back through the commit's own reconciliation. There is no
+// `graph.json` to open since 0.1.38, and the clauses below are about the edge the commit kept —
+// which is a question about the document, so the way back to it is the same assembly the commit made.
+const graph = assembledGraph(join(cwd, 'graph-run'));
 const model = readDoc('application-model.json');
 const submitEdge = (graph?.transitions ?? []).find((edge) => edge.id === 'transition_submit_login');
 check('the correction takes: the model is written, and nothing in either document is in error',
@@ -269,7 +273,7 @@ check('the log the older version wrote carries no field naming the restatement',
 
 const reread = await commit({ force: true });
 const rereadReport = JSON.parse(readFileSync(logPath('commit_report.json'), 'utf8'));
-const rereadGraph = readDoc('graph.json');
+const rereadGraph = assembledGraph(join(cwd, 'graph-run'));
 const rereadModel = readDoc('application-model.json');
 const rereadEdge = (rereadGraph?.transitions ?? []).find((edge) => edge.id === 'transition_submit_login');
 check('and the commit still takes the correction, from the records alone',

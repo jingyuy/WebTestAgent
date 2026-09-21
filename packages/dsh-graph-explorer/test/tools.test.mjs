@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CAPTURE_EXPRESSION, SETTLE_EXPRESSION } from '../lib/capture.js';
+import { assembledGraph } from '../lib/commit.js';
 import { apply, Config } from '../lib/index.js';
 import { losslessPaths } from './lossless.mjs';
 
@@ -263,7 +264,14 @@ check('an undeclared application blocks the document', [verdict.committed, verdi
 check('a blocked commit still writes its report', verdict.report_path.endsWith('commit_report.json'), true);
 check('a blocked commit writes no graph', verdict.graph_path, null);
 check('the refusal names the setting to fix', verdict.blocked_by[0].detail.includes('application: {id, name}'), true);
-check('and says what to do next', verdict.next.includes('No graph was written'), true);
+// Three shapes, and this is the blocked one: no document at all, and a sentence that says why rather
+// than a path that is `null`. `No graph was written` became wrong in 0.1.38 — the graph is not what a
+// run produces, so a sentence that offered its absence as the news would describe the wrong loss.
+check('and says what to do next, starting from the model rather than from the graph',
+  [verdict.next.startsWith('No model was written. 1 blocking rule(s) fired'),
+    verdict.next.includes('the model is projected from the document those rules judged'),
+    verdict.next.includes('The 0.1 graph was assembled and judged as this commit\'s own check and is not written either')],
+  [true, true, true]);
 check('the findings are summarised by severity', [verdict.warnings.errors, verdict.warnings.detail.length > 0], [0, true]);
 // Two states of one application at two routes: the fingerprint is what says so without asking the
 // model, and it is a rule the plugin added (severity `warning`), so a walk that passes it is a walk
@@ -279,11 +287,44 @@ check('and the invariant that asked is on the report, passing, as a warning',
 check('the invariants travelled with it', verdict.invariants.filter((result) => result.severity === 'error' && !result.ok).length, 0);
 check('the same run can be named explicitly', (await commit({ run_dir: 'graph-run' })).run_dir, join(cwd, 'graph-run'));
 const forced = await commit({ force: true });
-check('forcing writes the assembled document', existsSync(join(cwd, 'graph-run', 'graph.json')), true);
+// `force` is the door onto a document a blocked commit judged, and since 0.1.38 that is the *only*
+// thing it is: it used to write the graph anyway, and there is nothing left for it to write. The
+// two halves of the check are the two answers it now gives — the document comes back, nothing lands.
+check('forcing returns the assembled document without writing it',
+  [forced.committed, forced.graph_valid, forced.graph_path, typeof forced.graph,
+    existsSync(join(cwd, 'graph-run', 'graph.json'))], [false, false, null, 'object', false]);
 // A walk is derived, so the graph is where the instruction has to be visible: on every strand, as
 // the run's own words, with `goal_stated` false so a reader knows the goal on this walk was not
 // attributed and has to be supplied by hand. Nothing inferred it from the shape of the walk.
-const written = JSON.parse(readFileSync(join(cwd, 'graph-run', 'graph.json'), 'utf8'));
+//
+// The test writes that document itself, and that is the change this section had to absorb rather
+// than a convenience: the generator reads *files*, and since 0.1.38 no run puts a `graph.json` on
+// disk. So the section below is now about the legacy reading — a document a 0.1.37-or-earlier commit
+// would have left, supplied by hand — and writing it here is what a caller of that reading does.
+check('the commit left no graph on disk for the generator to read',
+  existsSync(join(cwd, 'graph-run', 'graph.json')), false);
+const written = assembledGraph(join(cwd, 'graph-run'));
+// The door and the forced commit are two calls to the same assembly, so they agree on the document
+// apart from the two fields that cannot agree: a graph stamps `generated_at`, and it records the
+// `command` that assembled it — the forced commit was made through the tool, which names itself, and
+// the door below called the assembly directly. Everything else comparing equal is what says
+// `assembledGraph` is not a second reading of the run but the commit's own.
+// The door and the forced commit are two calls to the same assembly, so they agree on the document
+// apart from the two kinds of field that cannot agree, and neither is a difference in *what* was
+// assembled: every timestamp the document stamps on itself, and the `command` that assembled it —
+// the forced commit was made through the tool, which names itself, while the door below called the
+// assembly directly. Everything else comparing equal is what says `assembledGraph` is not a second
+// reading of the run but the commit's own.
+const comparable = (document) => JSON.stringify({
+  ...document,
+  generated_at: null,
+  generator: { ...document.generator, command: null },
+}).replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z/g, '<when>');
+check('the assembly is the document a forced commit returned, apart from when and by whose word',
+  comparable(written) === comparable(forced.graph), true);
+writeFileSync(join(cwd, 'graph-run', 'graph.json'), JSON.stringify(written, null, 2) + '\n', 'utf8');
+check('the legacy document the generator will read is now there, because this test put it there',
+  existsSync(join(cwd, 'graph-run', 'graph.json')), true);
 check('the graph carries the capabilities this run named, once each, with the kinds it gave them',
   written.capabilities.map((entry) => [entry.id, entry.kind, entry.composed_of ?? null]),
   [['cap_go_to_login', 'navigation', null], ['cap_go_to_login_page', 'interaction', null]]);
@@ -533,7 +574,12 @@ check('and graph_commit still returns JSON', losslessPaths(rewalked), []);
 // the capability it was about — the step it is built from, and the kind the later call carried,
 // because the kind is what tells a generator to expand the behaviour rather than treat it as one
 // action. It is one entry in `capabilities[]`, not two.
-const settled = JSON.parse(readFileSync(rewalked.graph_path, 'utf8'));
+const settled = assembledGraph(rewalked.run_dir);
+// The one commit this suite made without `force` carries no document, and the reason is that `force`
+// is the only thing that asks for one: an answer that always embedded a graph would make every
+// commit's result as long as the graph, which is the document 0.1.38 stopped producing. (`rewalked`
+// is the forced one, two sections below, and it is asserted there.)
+check('and a commit that was not forced carries no document at all', 'graph' in verdict, false);
 check('a composition recorded on a later call lands on the capability, not beside it',
   settled.capabilities.map((entry) => [entry.id, entry.kind, entry.composed_of ?? null]),
   [['cap_buy_item', 'composite', ['cap_return_to_cart']], ['cap_return_to_cart', 'navigation', null]]);

@@ -303,19 +303,25 @@ function recordedStepsIn(dir) {
 /**
  * Everything one run recorded, read-only.
  *
- * `graph.json` wins when it is there: it is the document that was judged and it carries the
- * journeys, which the logs do not (a journey is a claim about a walk, and only the commit makes
- * it) — and the log wins for the *steps*, because the graph's step shape is narrower than the
- * behaviour model's on purpose and the model is not built from the narrower one.
+ * A `graph.json` wins when it is there, and since 0.1.38 that is a *legacy* document: the commit no
+ * longer writes one, so this branch is what reads the runs already on disk (0.1.37 and earlier).
+ * It stays because those runs are evidence — and because a hand-written graph is still a legitimate
+ * input to a profile — but nothing a current run does reaches it. When it is there it is the
+ * document that was judged, and it carries the journeys, which the logs do not (a journey is a claim
+ * about a walk, and only the commit makes it) — and the log still wins for the *steps*, because the
+ * graph's step shape is narrower than the behaviour model's on purpose and the model is not built
+ * from the narrower one.
  *
  * Without it the four logs are read — and through `reconcile()`, not by hand. The logs hold the
  * *candidate* records, whose shape is older and looser than the committed one (`states.jsonl`
  * elements carry a `semantic_purpose` and a raw CSS string, and no element id at all), so anything
  * this module did to them would be a second, divergent reading of the same evidence. The commit
- * already knows how to turn them into a document; it writes that document when its gates pass, and
- * hands back `draft` when they do not. Profiling a run that never committed is exactly the case a
- * profile is for, so the draft is projected, and the gates that blocked it are carried as notes.
- * Nothing here writes: `commitRun` is what writes, and this is not it.
+ * already knows how to turn them into a document; it hands back `graph` when its gates passed and
+ * `draft` when they did not, and since the graph is never written there is no third case to worry
+ * about: a run this version committed has its model on disk and no graph beside it, so this is the
+ * branch a current run takes. Profiling a run that never committed is exactly the case a profile is
+ * for, so the draft is projected, and the gates that blocked it are carried as notes. Nothing here
+ * writes: `commitRun` is what writes, and this is not it.
  */
 export function candidatesFromRun(dir) {
   const graphPath = join(dir, 'graph.json');
@@ -333,8 +339,15 @@ export function candidatesFromRun(dir) {
   const notes = rows(report?.gates).map((gate) => (
     `the commit refused this run: ${gate.code} — ${gate.detail}`
   ));
+  // This branch is the *normal* one since 0.1.38 — a current run has a model and no `graph.json`, so
+  // every profile of an ordinary run directory comes through here. It therefore has to hand over the
+  // recorded steps exactly as the legacy branch above does: the graph's step shape is the narrower
+  // one (`capabilityStep` has no key for a step's `purpose` or its `effects`), and profiling the
+  // document while the commit profiled the log would be the two-readers-one-log disagreement this
+  // module exists to prevent. That the omission went unnoticed until the graph stopped being written
+  // is the measure of how unreachable this branch used to be.
   return {
-    ...candidatesFromGraph(graph ?? draft, run),
+    ...candidatesFromGraph(graph ?? draft, run, recordedStepsIn(dir)),
     source: graph ? 'logs' : 'draft',
     notes,
   };
